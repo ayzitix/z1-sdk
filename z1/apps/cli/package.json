@@ -25,6 +25,7 @@
     "@z1/runtime": "workspace:*",
     "@z1/nodes": "workspace:*",
     "@z1/journal": "workspace:*",
+    "@z1/provider-openai": "workspace:*",
     "@z1/protocol": "workspace:*",
     "@z1/server": "workspace:*",
     "@z1/host-dsh": "workspace:*"

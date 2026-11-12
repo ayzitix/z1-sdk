@@ -14,6 +14,47 @@ pnpm z1 run z1/examples/agent.graph.json --input '"[[tool:echo]] hello"' --json
 Add `--trace` to stream every run event as a JSON line on stderr, or
 `--approve auto|ask|deny` to control the mock approval service.
 
+## Live provider
+
+`agent.live.graph.json` has the same topology, but its model node asks for
+`river` / `deepseek-ai/DeepSeek-V4.1-Flash-1017`. `--live` routes `river` and
+`openai` model handles to the OpenAI-compatible client; every other provider
+still uses the mock.
+
+```sh
+export RIVER_API_KEY=...            # OPENAI_API_KEY for provider "openai"
+pnpm z1 run z1/examples/agent.live.graph.json --live \
+  --input '"[[tool:echo]] hello"' --json
+
+# Optional endpoint overrides, shared or per provider:
+#   Z1_OPENAI_BASE_URL, RIVER_BASE_URL, OPENAI_BASE_URL
+```
+
+Without `--live` the run stays fully offline: the model node resolves to a
+handle but all chat calls go to the deterministic mock. `--live` fails with a
+clear message and exit code 1 when the credential for a provider the graph uses
+is missing; no run is recorded.
+
+## Runs, trees and forks
+
+Every run is journaled to `.z1/runs.db` (override with `--db <path>`).
+
+```sh
+# One line per run, newest first:
+#   <runId>  <status>  <graphId>  <digest[:12]>  <created ISO>  <- <parent>@<seq>
+pnpm z1 tree --db /tmp/z1.db
+pnpm z1 tree --db /tmp/z1.db --json     # RunRecord[]
+
+# Fork a run at an execution path (the node's `node.started` path) ...
+pnpm z1 fork run_<id> --at template --db /tmp/z1.db
+# ... or at a raw sequence number, then resume the fork:
+pnpm z1 run z1/examples/hello.graph.json --resume run_<fork> --approve auto --db /tmp/z1.db
+```
+
+A path fork records `seq - 1`, so the node at that path re-executes on resume
+while the earlier nodes replay from the journal. `fork` only creates the record;
+it never runs the graph.
+
 ## Loop and map bodies
 
 Both `z1.flow.loop` and `z1.flow.map` run a nested *body graph*. The body's

@@ -20,6 +20,9 @@
       "path": "../../packages/journal"
     },
     {
+      "path": "../../packages/provider-openai"
+    },
+    {
       "path": "../../packages/protocol"
     },
     {

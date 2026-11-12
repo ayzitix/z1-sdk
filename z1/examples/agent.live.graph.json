@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "id": "agent-live",
+  "title": "Agent loop (live provider)",
+  "nodes": [
+    {
+      "id": "input",
+      "type": "z1.core.input",
+      "version": "1.0.0",
+      "config": {},
+      "position": { "x": 0, "y": 120 }
+    },
+    {
+      "id": "model",
+      "type": "z1.llm.model",
+      "version": "1.0.0",
+      "config": {
+        "provider": "river",
+        "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+      },
+      "position": { "x": 0, "y": -80 }
+    },
+    {
+      "id": "chat1",
+      "type": "z1.llm.chat",
+      "version": "1.0.0",
+      "config": {},
+      "position": { "x": 280, "y": 0 }
+    },
+    {
+      "id": "tool1",
+      "type": "z1.tool.call",
+      "version": "1.0.0",
+      "config": { "name": "echo" },
+      "position": { "x": 560, "y": 0 }
+    },
+    {
+      "id": "chat2",
+      "type": "z1.llm.chat",
+      "version": "1.0.0",
+      "config": {},
+      "position": { "x": 840, "y": 0 }
+    },
+    {
+      "id": "done",
+      "type": "z1.core.const",
+      "version": "1.0.0",
+      "config": { "value": "done" },
+      "position": { "x": 560, "y": 180 }
+    },
+    {
+      "id": "output",
+      "type": "z1.core.output",
+      "version": "1.0.0",
+      "config": {},
+      "position": { "x": 1120, "y": 0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "d-input-prompt",
+      "kind": "data",
+      "from": { "node": "input", "port": "value" },
+      "to": { "node": "chat1", "port": "prompt" }
+    },
+    {
+      "id": "d-model-chat1",
+      "kind": "data",
+      "from": { "node": "model", "port": "model" },
+      "to": { "node": "chat1", "port": "model" }
+    },
+    {
+      "id": "d-model-chat2",
+      "kind": "data",
+      "from": { "node": "model", "port": "model" },
+      "to": { "node": "chat2", "port": "model" }
+    },
+    {
+      "id": "d-chat1-tool-args",
+      "kind": "data",
+      "from": { "node": "chat1", "port": "toolCalls" },
+      "to": { "node": "tool1", "port": "args" }
+    },
+    {
+      "id": "d-done-chat2",
+      "kind": "data",
+      "from": { "node": "done", "port": "value" },
+      "to": { "node": "chat2", "port": "prompt" }
+    },
+    {
+      "id": "d-chat2-output",
+      "kind": "data",
+      "from": { "node": "chat2", "port": "text" },
+      "to": { "node": "output", "port": "value" }
+    },
+    {
+      "id": "f-input-chat1",
+      "kind": "flow",
+      "from": { "node": "input", "port": "out" },
+      "to": { "node": "chat1", "port": "in" }
+    },
+    {
+      "id": "f-chat1-tool1",
+      "kind": "flow",
+      "from": { "node": "chat1", "port": "out" },
+      "to": { "node": "tool1", "port": "in" }
+    },
+    {
+      "id": "f-tool1-chat2",
+      "kind": "flow",
+      "from": { "node": "tool1", "port": "out" },
+      "to": { "node": "chat2", "port": "in" }
+    },
+    {
+      "id": "f-chat2-output",
+      "kind": "flow",
+      "from": { "node": "chat2", "port": "out" },
+      "to": { "node": "output", "port": "in" }
+    }
+  ]
+}

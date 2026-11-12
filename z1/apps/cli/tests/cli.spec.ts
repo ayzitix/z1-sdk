@@ -2,11 +2,15 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SqliteJournal, type RunRecord } from '@z1/journal'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { runCli, type CliIO } from '../src/cli.ts'
 
 const HELLO = fileURLToPath(new URL('../../../examples/hello.graph.json', import.meta.url))
 const AGENT = fileURLToPath(new URL('../../../examples/agent.graph.json', import.meta.url))
+const AGENT_LIVE = fileURLToPath(
+  new URL('../../../examples/agent.live.graph.json', import.meta.url),
+)
 
 /** Set once per suite; every run gets `--db` so no test pollutes `.z1/runs.db`. */
 let dbPath = ''
@@ -17,7 +21,10 @@ interface Captured {
   stderr(): string
 }
 
-function capture(isTTY = false): Captured {
+function capture(
+  isTTY = false,
+  env?: Record<string, string | undefined>,
+): Captured {
   const out: string[] = []
   const err: string[] = []
   return {
@@ -25,6 +32,7 @@ function capture(isTTY = false): Captured {
       stdout: (text) => out.push(text),
       stderr: (text) => err.push(text),
       isTTY,
+      ...(env === undefined ? {} : { env }),
     },
     stdout: () => out.join(''),
     stderr: () => err.join(''),
@@ -33,11 +41,11 @@ function capture(isTTY = false): Captured {
 
 async function run(
   argv: readonly string[],
-  options: { isTTY?: boolean } = {},
+  options: { isTTY?: boolean; env?: Record<string, string | undefined> } = {},
 ): Promise<{ code: number; out: string; err: string }> {
   const args =
     argv[0] === 'run' && !argv.includes('--db') ? [...argv, '--db', dbPath] : [...argv]
-  const io = capture(options.isTTY ?? false)
+  const io = capture(options.isTTY ?? false, options.env)
   const code = await runCli(args, io.io)
   return { code, out: io.stdout(), err: io.stderr() }
 }
@@ -282,6 +290,142 @@ describe('z1 cli', () => {
 
       expect(code).toBe(1)
       expect(err).toContain('RESUME_MISMATCH')
+    })
+  })
+
+  describe('branch tree', () => {
+    let directory = ''
+    let db = ''
+
+    beforeAll(async () => {
+      directory = await mkdtemp(join(tmpdir(), 'z1-tree-'))
+      db = join(directory, 'runs.db')
+    })
+
+    afterAll(async () => {
+      await rm(directory, { recursive: true, force: true })
+    })
+
+    test('tree --json lists runs and a fork carries lineage', async () => {
+      const first = await run(['run', HELLO, '--input', '{"name":"a"}', '--json', '--db', db])
+      expect(first.code).toBe(0)
+      const { runId } = JSON.parse(first.out.trimEnd()) as { runId: string }
+
+      const forked = await run(['fork', runId, '--at', 'template', '--json', '--db', db])
+      expect(forked.err).toBe('')
+      expect(forked.code).toBe(0)
+      const fork = JSON.parse(forked.out.trimEnd()) as {
+        runId: string
+        parentRunId: string
+        forkSeq: number
+      }
+      expect(fork.parentRunId).toBe(runId)
+
+      const tree = await run(['tree', '--db', db, '--json'])
+      expect(tree.code).toBe(0)
+      const records = JSON.parse(tree.out.trimEnd()) as RunRecord[]
+      const ids = records.map((record) => record.runId)
+      expect(ids).toContain(runId)
+      expect(ids).toContain(fork.runId)
+      expect(records.find((record) => record.runId === fork.runId)).toMatchObject({
+        graphId: 'hello',
+        status: 'running',
+        parentRunId: runId,
+        forkSeq: fork.forkSeq,
+      })
+
+      const text = await run(['tree', '--db', db])
+      expect(text.code).toBe(0)
+      expect(text.out).toContain(`${fork.runId}  running  hello  `)
+      expect(text.out).toContain(`<- ${runId}@${String(fork.forkSeq)}`)
+    })
+
+    test('resuming a fork re-executes the forked node and leaves the source alone', async () => {
+      const original = await run(['run', HELLO, '--input', '{"name":"fork"}', '--json', '--db', db])
+      expect(original.code).toBe(0)
+      const { runId } = JSON.parse(original.out.trimEnd()) as { runId: string }
+
+      const before = new SqliteJournal(db)
+      let beforeRecord: RunRecord | undefined
+      let beforeEvents: ReturnType<SqliteJournal['read']> = []
+      try {
+        beforeRecord = before.getRun(runId)
+        beforeEvents = before.read(runId)
+      } finally {
+        before.close()
+      }
+      expect(beforeRecord?.status).toBe('completed')
+
+      const forked = await run(['fork', runId, '--at', 'template', '--json', '--db', db])
+      expect(forked.code).toBe(0)
+      const fork = JSON.parse(forked.out.trimEnd()) as { runId: string }
+
+      const resumed = await run([
+        'run',
+        HELLO,
+        '--input',
+        '{"name":"fork"}',
+        '--resume',
+        fork.runId,
+        '--approve',
+        'auto',
+        '--json',
+        '--db',
+        db,
+      ])
+      expect(resumed.err).toBe('')
+      expect(resumed.code).toBe(0)
+      expect(JSON.parse(resumed.out.trimEnd())).toMatchObject({ status: 'completed' })
+
+      const after = new SqliteJournal(db)
+      try {
+        const forkedEvents = after.read(fork.runId)
+        expect(
+          forkedEvents.some(
+            (event) =>
+              event.type === 'node.started' && event.runId === fork.runId && event.path === 'template',
+          ),
+        ).toBe(true)
+        expect(after.getRun(runId)).toEqual(beforeRecord)
+        expect(after.read(runId)).toEqual(beforeEvents)
+      } finally {
+        after.close()
+      }
+    })
+
+    test('fork --at an unknown path exits 1', async () => {
+      const first = await run(['run', HELLO, '--input', '{"name":"b"}', '--json', '--db', db])
+      const { runId } = JSON.parse(first.out.trimEnd()) as { runId: string }
+
+      const { code, err } = await run(['fork', runId, '--at', 'nope', '--db', db])
+
+      expect(code).toBe(1)
+      expect(err).toContain('no node.started event')
+    })
+
+    test('tree on an empty database prints nothing and exits 0', async () => {
+      const { code, out, err } = await run(['tree', '--db', join(directory, 'empty.db')])
+
+      expect(err).toBe('')
+      expect(code).toBe(0)
+      expect(out).toBe('')
+    })
+
+    test('--live without the provider credential exits 1 before the run', async () => {
+      const liveDb = join(directory, 'live.db')
+      const { code, err } = await run(
+        ['run', AGENT_LIVE, '--live', '--json', '--db', liveDb],
+        { env: {} },
+      )
+
+      expect(code).toBe(1)
+      expect(err).toContain('RIVER_API_KEY')
+      const journal = new SqliteJournal(liveDb)
+      try {
+        expect(journal.listRuns()).toEqual([])
+      } finally {
+        journal.close()
+      }
     })
   })
 

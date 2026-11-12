@@ -24,17 +24,14 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 
 ## M1 — durability, approvals, real provider
 
-- [ ] T9 `@z1/journal`: SQLite (`node:sqlite`), append/read/list/fork, blobs.
-- [ ] T10 Executor resume: skip completed nodes, `run.suspended`,
+- [x] T9 `@z1/journal`: SQLite (`node:sqlite`), append/read/list/fork, blobs.
+- [x] T10 Executor resume: skip completed nodes, `run.suspended`,
   `approval.requested/decided`, `z1 run --resume`.
-- [ ] T11 `@z1/host-dsh`: provider + tool + fs services backed by
-  DeepSeek Harness packages; real model turn.
-- [ ] T12 Branch tree: `z1 tree`, `z1 fork --at`, run lineage.
+- [x] T11 `@z1/provider-openai`: OpenAI-compatible streaming provider
+  (River/OpenAI), local SSE test server; real River turn verified.
+- [x] T12 Branch tree: `z1 tree`, `z1 fork --at`, run lineage.
 - [ ] T13 Review + commit.
-
-## M2 — headless server + protocol
-
-- [ ] T14 `@z1/protocol`: JSON-RPC method map + event types + transport.
+- [x] T14 `@z1/protocol`: JSON-RPC method map + event types + transport.
 - [ ] T15 `@z1/server`: WS server, run control, approval, artifacts, module registry.
 - [ ] T16 CLI `z1 serve`; reconnecting client smoke test.
 - [ ] T17 Review + commit.
