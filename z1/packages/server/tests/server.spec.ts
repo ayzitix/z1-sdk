@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { SqliteJournal } from '@z1/journal'
 import {
+  APP_ERRORS,
   JsonRpcPeer,
   type ApprovalRequestParams,
   type NotificationMap,
@@ -316,8 +317,9 @@ test('artifact.get reads a blob written through the journal', async () => {
   expect(Buffer.from(result.base64, 'base64').toString('utf8')).toBe('artifact body')
 
   await expect(peer.request('artifact.get', { hash: 'deadbeef' })).rejects.toMatchObject({
-    code: 1003,
+    code: APP_ERRORS.artifactNotFound,
   })
+  expect(APP_ERRORS.artifactNotFound).toBe(1006)
 })
 
 test('run.resume replays a finished run and requires the graph', async () => {

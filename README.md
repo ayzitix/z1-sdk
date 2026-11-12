@@ -6,62 +6,120 @@
 
 </div>
 
-z1 sdk is the runtime behind the z1 agent: a graph of typed nodes instead of a
-chat loop. Model providers, tools, filesystem access, sandboxes and the loop
-itself are modules with declared inputs and outputs, so a workflow is assembled
-rather than prompted.
+z1 is a node-graph agent SDK. Model providers, tools, filesystem access and the
+agent loop itself are executable nodes with typed ports; a workflow is assembled
+on a canvas instead of prompted into a chat window. Runs are journaled, approval
+is per node, and the history is a tree you can fork.
 
 Built on the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 engine (MIT), which contributes the plugin runtime, sessions, providers, tools
-and sandboxes. This repository removes the product surfaces — web UI pieces not
-needed by the SDK, documentation site, benchmarks, desktop packaging — and keeps
-the engine and the SDK composition.
+and sandboxes. The node-graph layer lives in [`z1/`](z1/SPEC.md) and does not
+modify the engine.
 
 ## Status
 
-**Early.** The engine builds and its gates pass on this tree. The module
-contract, the graph executor and the node canvas are being designed; nothing in
-this repository implements them yet.
+**Working prototype.** The graph engine, durable journal, resume, approvals,
+branch forks, headless server, real OpenAI-compatible models and a browser
+canvas are implemented and tested (226 tests). Not implemented yet: sandboxed
+third-party modules, the agent-as-a-graph template, and editor integration.
 
-## What is in here
-
-| Path | Contents |
-| --- | --- |
-| `packages/core` | the runtime: sessions, models, tools, permissions |
-| `packages/llm` | model providers |
-| `packages/session*` | session log, projections, persistence |
-| `packages/tool-*`, `packages/tools` | tool definitions and execution |
-| `packages/sandbox*`, `packages/fs*`, `packages/shell*` | capability boundaries |
-| `packages/mcp`, `packages/lsp`, `packages/skill` | integrations |
-| `packages/sdk` | the SDK composition (`sdk-app`, JSON-RPC server, client) |
-| `packages/bundle` | profile compositions: `base`, `headless`, `sdk-app`, `sdk-minimal` |
-| `packages/client` | React UI packages (kept for the future canvas) |
-| `apps/cli` | the executable |
-| `apps/web` | the shipped web client |
-| `native`, `vendor`, `patches` | native addon, vendored Cordis packages, dependency patches |
-
-## Build
+## Quick start
 
 Requires **Node.js 24.9+** and **pnpm 11**.
 
 ```bash
 pnpm install
-pnpm run build        # typecheck, bundle host and client, web build — 10 gates
+pnpm z1:build                 # typecheck every z1 package
+pnpm z1:test                  # 220 tests
+
+# run a graph with the deterministic mock model
+pnpm z1 run z1/examples/hello.graph.json --input '{"name":"world"}'
+
+# run it with a real model (OpenAI-compatible endpoint)
+export RIVER_API_KEY=...
+pnpm z1 run z1/examples/agent.live.graph.json --live --input '"hello"'
+
+# inspect the run tree and fork a branch
+pnpm z1 tree
+pnpm z1 fork <runId> --at chat
+pnpm z1 run <graph> --resume <forkedRunId>
 ```
 
-Run the agent:
+Commands: `z1 list`, `z1 validate`, `z1 run`, `z1 tree`, `z1 fork`, `z1 serve`.
+Run state lives in `.z1/runs.db` (SQLite).
+
+### Canvas
 
 ```bash
-pnpm dsh web --no-open --port 3080     # web UI, prints a token URL
-pnpm dsh <prompt>                      # one-shot, needs a provider key
+pnpm z1 serve --json          # prints {"url":"ws://…","token":"…"}
+pnpm z1:canvas                # Vite dev server on :5173
 ```
 
-## Providers
+Open the canvas, paste the URL and token (or pass `?url=…&token=…`), then
+connect, load a graph JSON, press Run. Approvals appear as a dialog; the runs
+panel lists branches and forks.
 
-Bring your own key. A provider is configured with an endpoint, a protocol
-(`openai-completions`, `openai-responses`, `anthropic-messages`,
-`google-generative-ai`) and a credential reference, or with an environment
-variable such as `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`.
+## How it works
+
+A **module** is an npm package. It contributes **nodes** (typed data inputs and
+outputs, plus explicit flow edges) and may contribute services. A node is real
+code:
+
+```ts
+export const chat = defineNode({
+  id: 'z1.llm.chat',
+  version: '1.0.0',
+  category: 'llm',
+  config: z.object({ system: z.string().optional() }),
+  inputs: [
+    dataPort('messages', z.array(messageSchema)),
+    flowPort('in', { required: false }),
+  ],
+  outputs: [dataPort('text', z.string()), flowPort('out')],
+  async execute(ctx) {
+    const result = await ctx.llm.chat(
+      { model: ctx.config.model, messages: ctx.inputs.messages },
+      (delta) => ctx.emit('text', delta.text),
+    )
+    return { text: result.message.content, out: true }
+  },
+})
+```
+
+Execution is a hybrid scheduler: data ports are pulled from cache, flow edges
+order side effects. Cycles live only inside `flow.loop`, `flow.map` or a
+subgraph. Every node execution is a checkpoint in an append-only SQLite journal;
+a run resumes from it, and `fork` is a pointer, not a copy.
+
+Approval is data on the node instance — `auto`, `ask` or `deny` — with runtime
+escalation as a separate decision. The server sends an `approval/request` over
+JSON-RPC and the canvas answers it. A paused run is persisted as
+`run.suspended`, not a parked process.
+
+The branch tree is the long-term memory: every node completion is a node in the
+tree, non-taken siblings are recorded as history, and summaries are regenerated
+lazily with provenance back to the node or artifact.
+
+## Repository
+
+| Path | Contents |
+| --- | --- |
+| `z1/packages/node` | node contract, ports, capabilities, autonomy, registry |
+| `z1/packages/graph` | graph document, validation, digest |
+| `z1/packages/runtime` | executor, cache, approvals, resume, nested runs |
+| `z1/packages/nodes` | core, flow, subgraph, llm and tool nodes |
+| `z1/packages/journal` | SQLite journal, forks, content-addressed blobs |
+| `z1/packages/protocol` | JSON-RPC 2.0 transport and method map |
+| `z1/packages/server` | headless WebSocket server |
+| `z1/packages/provider-openai` | OpenAI-compatible streaming provider |
+| `z1/apps/cli` | the `z1` executable |
+| `z1/apps/canvas` | React Flow canvas |
+| `z1/SPEC.md`, `z1/TASKS.md` | contract and milestone board |
+| `packages/*`, `apps/*` | the upstream DeepSeek Harness engine |
+| `native`, `vendor`, `patches` | native addon, vendored Cordis packages, patches |
+
+The upstream engine still builds with its 10 gates (`pnpm run build`); the z1
+layer is a separate workspace group with its own tsconfig and test runner.
 
 ## Licence
 

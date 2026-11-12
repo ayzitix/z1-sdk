@@ -78,6 +78,7 @@ export const APP_ERRORS = {
   approvalNotFound: 1003,
   conflict: 1004,
   unauthorized: 1005,
+  artifactNotFound: 1006,
 } as const
 
 export type JsonRpcErrorCode = (typeof JSON_RPC_ERRORS)[keyof typeof JSON_RPC_ERRORS]

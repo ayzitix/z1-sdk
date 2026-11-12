@@ -34,5 +34,19 @@ removed.
 ## What is still upstream
 
 Package names (`@deepseek-ai/*`), the Cordis runtime and the plugin API are
-unchanged. Renaming the scope and replacing the plugin API with the z1 module
-contract is planned work, not done work.
+unchanged.
+
+## What this fork adds
+
+The `z1/` workspace is new code, not derived from the upstream project:
+
+- `@z1/node`, `@z1/graph`, `@z1/runtime`, `@z1/nodes` — the node contract, graph
+  document, executor and built-in nodes
+- `@z1/journal` — SQLite run journal with forks and blobs
+- `@z1/protocol`, `@z1/server` — JSON-RPC over WebSocket and the headless server
+- `@z1/provider-openai` — OpenAI-compatible streaming provider
+- `@z1/cli`, `@z1/canvas` — the `z1` command and the browser canvas
+
+The node-graph layer is intentionally separate: it composes the engine at the
+provider/tool/session boundary instead of editing upstream packages. Its contract
+and milestones are in `z1/SPEC.md` and `z1/TASKS.md`.

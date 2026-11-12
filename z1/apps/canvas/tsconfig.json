@@ -1,0 +1,31 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../packages/graph"
+    },
+    {
+      "path": "../../packages/node"
+    },
+    {
+      "path": "../../packages/protocol"
+    }
+  ],
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "node",
+      "vite/client"
+    ],
+    "outDir": "lib/types",
+    "rootDir": "src"
+  }
+}

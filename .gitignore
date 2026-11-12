@@ -55,3 +55,4 @@ native/system/test/bin/
 
 # z1 local run state
 .z1/
+z1/apps/*/dist/

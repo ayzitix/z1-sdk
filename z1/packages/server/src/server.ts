@@ -548,8 +548,7 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       const hash = stringParam(params['hash'], 'hash')
       const blob = journal.getBlob(hash)
       if (blob === undefined) {
-        // 1003 is the server's "not found" application code for content too.
-        throw appFault(APP_ERRORS.approvalNotFound, `unknown artifact: ${hash}`, { hash })
+        throw appFault(APP_ERRORS.artifactNotFound, `unknown artifact: ${hash}`, { hash })
       }
       return {
         hash: blob.hash,

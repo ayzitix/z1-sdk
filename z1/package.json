@@ -9,6 +9,8 @@
     "build": "tsc -b tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",
     "test": "vitest run --config vitest.config.ts",
+    "canvas:dev": "pnpm -C apps/canvas dev",
+    "canvas:build": "pnpm -C apps/canvas build",
     "z1": "tsx apps/cli/src/bin.ts"
   },
   "devDependencies": {

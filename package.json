@@ -56,6 +56,8 @@
     "z1": "pnpm -C z1 z1",
     "z1:build": "pnpm -C z1 build",
     "z1:test": "pnpm -C z1 test",
+    "z1:canvas": "pnpm -C z1 canvas:dev",
+    "z1:canvas:build": "pnpm -C z1 canvas:build",
     "lint": "tsx scripts/compile-referenced-projects.ts host-contracts && npm run lint:contracts-ready",
     "lint:contracts-ready": "tsx scripts/run-oxlint.ts .",
     "lint:fix": "tsx scripts/compile-referenced-projects.ts host-contracts && npm run lint:fix:contracts-ready",

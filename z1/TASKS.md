@@ -30,18 +30,22 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] T11 `@z1/provider-openai`: OpenAI-compatible streaming provider
   (River/OpenAI), local SSE test server; real River turn verified.
 - [x] T12 Branch tree: `z1 tree`, `z1 fork --at`, run lineage.
-- [ ] T13 Review + commit.
+- [x] T13 Review + commit.
+
+## M2 — headless server + protocol
+
 - [x] T14 `@z1/protocol`: JSON-RPC method map + event types + transport.
-- [ ] T15 `@z1/server`: WS server, run control, approval, artifacts, module registry.
-- [ ] T16 CLI `z1 serve`; reconnecting client smoke test.
-- [ ] T17 Review + commit.
+- [x] T15 `@z1/server`: WS server, run control, approval, artifacts, forks.
+- [x] T16 CLI `z1 serve`; end-to-end ws client test.
+- [x] T17 Review + commit.
 
 ## M3 — canvas
 
-- [ ] T18 `z1/apps/canvas`: React + React Flow, palette, inspector, run overlay,
+- [x] T18 `z1/apps/canvas`: React + React Flow, palette, inspector, run overlay,
   approval queue, branch tree panel.
-- [ ] T19 e2e: edit graph, run, approve, see output.
-- [ ] T20 Review + commit.
+- [x] T19 Browser e2e: load graph, run, approve, see output (Chromium, zero
+  console errors).
+- [x] T20 Review + commit.
 
 ## Later
 
