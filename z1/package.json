@@ -1,0 +1,24 @@
+{
+  "name": "z1-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@11.28.5",
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "clean": "tsc -b tsconfig.json --clean",
+    "test": "vitest run --config vitest.config.ts",
+    "z1": "tsx apps/cli/src/bin.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.13",
+    "typescript": "^6.0.3",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.11",
+    "ws": "^8.21.3",
+    "zod": "4.6.6"
+  }
+}

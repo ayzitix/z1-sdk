@@ -1,0 +1,40 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/graph"
+    },
+    {
+      "path": "./packages/node"
+    },
+    {
+      "path": "./packages/runtime"
+    },
+    {
+      "path": "./packages/nodes"
+    },
+    {
+      "path": "./packages/journal"
+    },
+    {
+      "path": "./packages/protocol"
+    },
+    {
+      "path": "./packages/provider-openai"
+    },
+    {
+      "path": "./packages/server"
+    },
+    {
+      "path": "./packages/host-dsh"
+    },
+    {
+      "path": "./apps/cli"
+    }
+  ],
+  "compilerOptions": {
+    "outDir": "lib",
+    "rootDir": "."
+  }
+}

@@ -18925,6 +18925,119 @@ importers:
         specifier: link:../cosmokit
         version: link:../cosmokit
 
+  z1:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.20.1
+        version: 22.20.1
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      tsx:
+        specifier: ^4.23.13
+        version: 4.23.13
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vite-tsconfig-paths:
+        specifier: ^6.1.1
+        version: 6.1.1(supports-color@9.4.0)(typescript@6.0.3)(vite@8.2.2(@types/node@22.20.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
+      vitest:
+        specifier: ^4.1.11
+        version: 4.1.11(@opentelemetry/api@1.9.1)(@types/node@22.20.1)(@vitest/coverage-v8@4.1.11)(happy-dom@20.11.6)(jsdom@29.1.1(@noble/hashes@2.4.0))(vite@8.2.2(@types/node@22.20.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
+      ws:
+        specifier: ^8.21.3
+        version: 8.21.3
+      zod:
+        specifier: 4.6.6
+        version: 4.6.6
+
+  z1/apps/cli:
+    dependencies:
+      '@z1/graph':
+        specifier: workspace:*
+        version: link:../../packages/graph
+      '@z1/host-dsh':
+        specifier: workspace:*
+        version: link:../../packages/host-dsh
+      '@z1/journal':
+        specifier: workspace:*
+        version: link:../../packages/journal
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../../packages/node
+      '@z1/nodes':
+        specifier: workspace:*
+        version: link:../../packages/nodes
+      '@z1/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
+      '@z1/server':
+        specifier: workspace:*
+        version: link:../../packages/server
+
+  z1/packages/graph:
+    dependencies:
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      zod:
+        specifier: 4.6.6
+        version: 4.6.6
+
+  z1/packages/host-dsh: {}
+
+  z1/packages/journal: {}
+
+  z1/packages/node:
+    dependencies:
+      zod:
+        specifier: 4.6.6
+        version: 4.6.6
+
+  z1/packages/nodes:
+    dependencies:
+      '@z1/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      zod:
+        specifier: 4.6.6
+        version: 4.6.6
+
+  z1/packages/protocol: {}
+
+  z1/packages/provider-openai:
+    dependencies:
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
+  z1/packages/runtime:
+    dependencies:
+      '@z1/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      zod:
+        specifier: 4.6.6
+        version: 4.6.6
+
+  z1/packages/server: {}
+
 packages:
 
   '@agentclientprotocol/sdk@1.4.0':
@@ -28528,7 +28641,7 @@ snapshots:
 
   '@types/node-fetch@2.6.13':
     dependencies:
-      '@types/node': 22.20.1
+      '@types/node': 26.4.1
       form-data: 4.0.6
 
   '@types/node@14.18.63': {}
@@ -32127,7 +32240,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.1
-      '@types/node': 22.20.1
+      '@types/node': 26.4.1
       long: 5.3.2
 
   proxy-addr@2.0.8:

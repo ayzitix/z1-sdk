@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "hello",
+  "title": "Hello",
+  "nodes": [
+    {
+      "id": "input",
+      "type": "z1.core.input",
+      "version": "1.0.0",
+      "config": {},
+      "position": { "x": 0, "y": 0 }
+    },
+    {
+      "id": "template",
+      "type": "z1.core.template",
+      "version": "1.0.0",
+      "config": { "template": "hello {{name}}" },
+      "position": { "x": 260, "y": 0 }
+    },
+    {
+      "id": "output",
+      "type": "z1.core.output",
+      "version": "1.0.0",
+      "config": {},
+      "position": { "x": 520, "y": 0 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-in-vars",
+      "kind": "data",
+      "from": { "node": "input", "port": "value" },
+      "to": { "node": "template", "port": "vars" }
+    },
+    {
+      "id": "e-template-value",
+      "kind": "data",
+      "from": { "node": "template", "port": "text" },
+      "to": { "node": "output", "port": "value" }
+    },
+    {
+      "id": "f-in-output",
+      "kind": "flow",
+      "from": { "node": "input", "port": "out" },
+      "to": { "node": "output", "port": "in" }
+    }
+  ]
+}

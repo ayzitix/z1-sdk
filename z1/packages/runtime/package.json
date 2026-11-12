@@ -1,0 +1,24 @@
+{
+  "name": "@z1/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "dependencies": {
+    "@z1/graph": "workspace:*",
+    "@z1/node": "workspace:*",
+    "zod": "4.6.6"
+  }
+}

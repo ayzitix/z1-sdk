@@ -7,6 +7,10 @@ packages:
   - native/system/packages/*
   # Product assemblies over the package tier; apps/cli owns the `dsh` bin.
   - apps/*
+  # The z1 SDK graph engine keeps its own tsconfig/vitest root; see z1/SPEC.md.
+  - z1
+  - z1/packages/*
+  - z1/apps/*
   # Private package owning repository-level benchmark dependencies.
   - benchmarks
   - website
