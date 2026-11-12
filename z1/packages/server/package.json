@@ -15,5 +15,18 @@
   "files": [
     "lib",
     "src"
-  ]
+  ],
+  "dependencies": {
+    "@z1/graph": "workspace:*",
+    "@z1/journal": "workspace:*",
+    "@z1/node": "workspace:*",
+    "@z1/nodes": "workspace:*",
+    "@z1/protocol": "workspace:*",
+    "@z1/provider-openai": "workspace:*",
+    "@z1/runtime": "workspace:*",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  }
 }

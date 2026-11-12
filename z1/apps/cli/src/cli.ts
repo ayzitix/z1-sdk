@@ -14,6 +14,7 @@ import {
 import { SqliteJournal } from '@z1/journal'
 import { createBuiltinRegistry } from '@z1/nodes'
 import { createOpenAiLlmService } from '@z1/provider-openai'
+import { startServer, type Z1Server } from '@z1/server'
 import {
   createMockRuntimeServices,
   runGraph,
@@ -43,6 +44,7 @@ const USAGE = [
   '      [--approve auto|ask|deny] [--db <path>] [--suspend] [--resume <runId>] [--live]',
   '  tree [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
+  '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
   '',
 ].join('\n')
 
@@ -687,6 +689,114 @@ async function forkCommand(args: readonly string[], io: CliIO): Promise<number> 
   }
 }
 
+const DEFAULT_SERVE_HOST = '127.0.0.1'
+const DEFAULT_SERVE_PORT = 7331
+
+/**
+ * Resolves once the process is asked to stop, after the server has closed.
+ * Signal handlers are process-wide, so they are removed again on the way out;
+ * otherwise a second `runCli` call in the same process would stack them.
+ */
+function waitForShutdown(server: Z1Server): Promise<number> {
+  const signals = ['SIGINT', 'SIGTERM'] as const
+  return new Promise<number>((resolve) => {
+    let stopping = false
+    const stop = (): void => {
+      if (stopping) return
+      stopping = true
+      void server.close().then(
+        () => {
+          finish(0)
+        },
+        () => {
+          finish(1)
+        },
+      )
+    }
+    const finish = (code: number): void => {
+      for (const signal of signals) process.off(signal, stop)
+      resolve(code)
+    }
+    for (const signal of signals) process.on(signal, stop)
+  })
+}
+
+async function serveCommand(args: readonly string[], io: CliIO): Promise<number> {
+  let values: {
+    host?: string
+    port?: string
+    db?: string
+    token?: string
+    live?: boolean
+    json?: boolean
+  }
+  let positionals: string[]
+  try {
+    const parsed = parseArgs({
+      args: [...args],
+      options: {
+        host: { type: 'string' },
+        port: { type: 'string' },
+        db: { type: 'string' },
+        token: { type: 'string' },
+        live: { type: 'boolean' },
+        json: { type: 'boolean' },
+      },
+      allowPositionals: true,
+      strict: true,
+    })
+    values = parsed.values
+    positionals = [...parsed.positionals]
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return usage(io)
+  }
+  if (positionals.length > 0) return usage(io)
+
+  let port = DEFAULT_SERVE_PORT
+  if (values.port !== undefined) {
+    // `parseArgs` hands back strings, and `Number('')` is 0, so check the shape
+    // before converting rather than trusting the cast.
+    if (!/^\d{1,5}$/.test(values.port) || Number(values.port) > 65535) {
+      io.stderr(`invalid --port "${values.port}"; expected 0-65535\n`)
+      return usage(io)
+    }
+    port = Number(values.port)
+  }
+
+  if (values.token === '') {
+    io.stderr('--token must not be empty\n')
+    return usage(io)
+  }
+
+  const dbPath = values.db ?? '.z1/runs.db'
+  const host = values.host ?? DEFAULT_SERVE_HOST
+  const token = values.token
+
+  let server: Z1Server
+  try {
+    server = await startServer({
+      dbPath,
+      host,
+      port,
+      // Omitting `token` keeps the server's own random generation.
+      ...(token === undefined ? {} : { token }),
+      live: values.live === true,
+    })
+  } catch (error) {
+    io.stderr(`cannot start server: ${errorMessage(error)}\n`)
+    return 1
+  }
+
+  if (values.json === true) {
+    io.stdout(`${JSON.stringify({ url: server.url, token: server.token, port: server.port })}\n`)
+  } else {
+    io.stdout(`z1 listening on ${server.url} token=${server.token}\n`)
+  }
+
+  return await waitForShutdown(server)
+}
+
 /** Entry point shared by the bin and the tests; never exits the process. */
 export async function runCli(argv: readonly string[], io: CliIO): Promise<number> {
   const [command, ...rest] = argv
@@ -703,6 +813,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return await treeCommand(rest, io)
     case 'fork':
       return await forkCommand(rest, io)
+    case 'serve':
+      return await serveCommand(rest, io)
     default:
       io.stderr(`unknown command "${command}"\n`)
       return usage(io)

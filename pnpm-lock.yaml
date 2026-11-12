@@ -19052,7 +19052,36 @@ importers:
         specifier: 4.6.6
         version: 4.6.6
 
-  z1/packages/server: {}
+  z1/packages/server:
+    dependencies:
+      '@z1/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@z1/journal':
+        specifier: workspace:*
+        version: link:../journal
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/nodes':
+        specifier: workspace:*
+        version: link:../nodes
+      '@z1/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@z1/provider-openai':
+        specifier: workspace:*
+        version: link:../provider-openai
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      ws:
+        specifier: ^8.21.3
+        version: 8.21.3
+    devDependencies:
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
 
 packages:
 

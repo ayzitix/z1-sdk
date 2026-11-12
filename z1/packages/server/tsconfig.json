@@ -3,6 +3,29 @@
   "include": [
     "src"
   ],
+  "references": [
+    {
+      "path": "../graph"
+    },
+    {
+      "path": "../node"
+    },
+    {
+      "path": "../runtime"
+    },
+    {
+      "path": "../nodes"
+    },
+    {
+      "path": "../journal"
+    },
+    {
+      "path": "../protocol"
+    },
+    {
+      "path": "../provider-openai"
+    }
+  ],
   "compilerOptions": {
     "outDir": "lib",
     "rootDir": "src"
