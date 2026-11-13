@@ -42,6 +42,7 @@ import {
 } from '@z1/runtime'
 
 import type { RuntimeConfig } from './config.ts'
+import { createLocalFsService } from './fs-local.ts'
 import { createAgentTemplateRegistry, createTemplateRegistry } from './templates.ts'
 
 export interface RunOverrides {
@@ -177,6 +178,9 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
 
   const memory = config.useMemory ? new BranchMemory(journal) : undefined
   const mock = createMockRuntimeServices()
+  // `memory` keeps the mock's in-process map (tests); `local` is the real disk.
+  // A run may still override this with `RunOverrides.fs`.
+  const fs: FsService = config.fsMode === 'memory' ? mock.fs : createLocalFsService()
   const providers = new ProviderRegistry({
     providers: config.providers,
     env: config.env,
@@ -262,10 +266,12 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     if (!config.useModules || !hasActiveModule(modules)) return undefined
     moduleRuntime ??= new ModuleRuntime({
       store: modules,
+      // Module code sees the same workspace and fs backend as the process.
+      workspace: config.cwd,
       services: {
         llm,
         tools: mock.tools,
-        fs: mock.fs,
+        fs,
         approval: moduleNodeApproval,
         approvalFor: approvalForRun,
       },
@@ -405,7 +411,11 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         }
         let started: StartedHostModule['started']
         try {
-          started = await runtime.start(projected, { log: serviceLog, registry: hostRegistry })
+          started = await runtime.start(projected, {
+            log: serviceLog,
+            registry: hostRegistry,
+            workspace: config.cwd,
+          })
         } catch (error) {
           throw new Error(
             `cannot start host service module "${moduleId}"@${version}: ${errorMessage(error)}`,
@@ -525,7 +535,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
           llm: overrides.llm ?? (provided.llm?.instance as LlmService | undefined) ?? llm,
           tools:
             overrides.tools ?? (provided.tools?.instance as ToolService | undefined) ?? mock.tools,
-          fs: overrides.fs ?? (provided.fs?.instance as FsService | undefined) ?? mock.fs,
+          fs: overrides.fs ?? (provided.fs?.instance as FsService | undefined) ?? fs,
           artifacts:
             overrides.artifacts ??
             (provided.artifacts?.instance as ArtifactService | undefined) ??

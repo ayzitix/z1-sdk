@@ -56,6 +56,8 @@ interface ModuleContext {
   readonly inputs: Record<string, unknown>
   readonly config: unknown
   readonly input: unknown
+  /** Directory the module should treat as the project root; never its own dir. */
+  readonly workspace: string
   readonly signal: AbortSignal
   log(level: WorkerLogLevel, message: string, data?: unknown): void
   emit(port: string, chunk: unknown): void
@@ -87,6 +89,8 @@ interface ModuleServiceContext {
   readonly moduleId: string
   readonly version: string
   readonly directory: string
+  /** Directory the module should treat as the project root; never its own dir. */
+  readonly workspace: string
   readonly config: Record<string, unknown>
   log(level: WorkerLogLevel, message: string, data?: unknown): void
   /** Resolve a service of *this* module only; undefined otherwise. */
@@ -311,6 +315,8 @@ const rawNodes = isRecord(loaded) ? (loaded['nodes'] ?? loaded['default']) : und
 interface EntryMetadata {
   moduleId: string
   version: string
+  /** Project root the module sees as `ctx.workspace`. */
+  workspace: string
   config: Record<string, unknown>
   /**
    * Whether this child should instantiate the entry's `services`. Node-only
@@ -325,6 +331,9 @@ function readEntryMetadata(raw: string | undefined): EntryMetadata {
   const metadata: EntryMetadata = {
     moduleId: 'unknown',
     version: '0.0.0',
+    // Legacy metadata carries no workspace; the documented fallback is the
+    // child's own cwd, exactly like the host's `process.cwd()` default.
+    workspace: process.cwd(),
     config: {},
     // A host that sends no metadata keeps the pre-loadServices behaviour.
     loadServices: true,
@@ -342,6 +351,8 @@ function readEntryMetadata(raw: string | undefined): EntryMetadata {
   if (typeof moduleId === 'string' && moduleId.length > 0) metadata.moduleId = moduleId
   const version = parsed['version']
   if (typeof version === 'string' && version.length > 0) metadata.version = version
+  const workspace = parsed['workspace']
+  if (typeof workspace === 'string' && workspace.length > 0) metadata.workspace = workspace
   const config = parsed['config']
   if (isRecord(config)) metadata.config = config
 
@@ -418,6 +429,7 @@ function serviceContext(
     moduleId: metadata.moduleId,
     version: metadata.version,
     directory: moduleDirectory,
+    workspace: metadata.workspace,
     config: metadata.config,
     log: (level, message, data) => serviceLog(serviceId, level, message, data),
     // One child serves one module, so `started` never contains another
@@ -538,6 +550,7 @@ function createContext(
     inputs,
     config: request.config,
     input: request.seed,
+    workspace: metadata.workspace,
     signal,
     log(level, message, data) {
       const payload: WorkerToHost = {

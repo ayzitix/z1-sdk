@@ -34,6 +34,8 @@ export interface ModuleServiceContext {
   moduleId: string
   version: string
   directory: string
+  /** Project root the service should treat as its workspace. */
+  workspace: string
   /** Per-module config; v1 manifests carry no config, so this is `{}`. */
   config: Record<string, unknown>
   log: ModuleServiceLog
@@ -54,6 +56,8 @@ export interface ModuleServiceEntrypoints {
 
 export interface ModuleServiceEnvironment {
   config?: Record<string, unknown>
+  /** Project root exposed as `ctx.workspace`; defaults to `process.cwd()`. */
+  workspace?: string
   log?: ModuleServiceLog
   /**
    * @deprecated Ignored. `ctx.get` is module-scoped; pass `registry` when the
@@ -177,6 +181,7 @@ export class ModuleServiceRuntime {
       moduleId,
       version,
       directory: installed.directory,
+      workspace: env.workspace ?? process.cwd(),
       config: env.config ?? {},
       log: (level, message, data) =>
         log(level, `[${moduleId}/${declaration.id}] ${message}`, data),

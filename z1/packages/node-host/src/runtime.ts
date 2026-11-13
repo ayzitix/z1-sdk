@@ -28,6 +28,11 @@ import type { WorkerNodeInfo, WorkerServiceInfo } from './protocol.ts'
 
 export interface ModuleRuntimeOptions {
   store: ModuleStore
+  /**
+   * Directory module code sees as `ctx.workspace`. Defaults to
+   * `process.cwd()`; the composition root passes its configured cwd.
+   */
+  workspace?: string
   /** Host services brokered to every module worker. */
   services: WorkerHostServices
   /** Registry to extend; a fresh one when omitted. */
@@ -296,6 +301,7 @@ export class ModuleRuntime {
     const worker = new ModuleWorker({
       moduleDir: slot.installed.directory,
       entry: slot.installed.manifest.entry,
+      ...(this.#options.workspace === undefined ? {} : { workspace: this.#options.workspace }),
       manifestNodeIds: [...slot.nodeIds],
       manifestServiceIds: slot.services.map((declaration) => declaration.id),
       loadServices: slot.loadServices,

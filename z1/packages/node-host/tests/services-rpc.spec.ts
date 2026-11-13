@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import type { ChatDelta, ChatRequest } from '@z1/node'
@@ -23,6 +24,7 @@ const SERVICE_IDS = [
   'memory',
   'bad',
   'bad-llm',
+  'workspace',
 ]
 
 const request: ChatRequest = {
@@ -85,6 +87,32 @@ describe('service RPC', () => {
     expect(started.services.map((service) => service.id).sort()).toEqual([...SERVICE_IDS].sort())
     expect(worker.services.map((service) => service.id).sort()).toEqual([...SERVICE_IDS].sort())
     expect(worker.alive).toBe(true)
+  }, 20_000)
+
+  test('ctx.workspace defaults to the host cwd, not the module dir', async () => {
+    const worker = createWorker()
+    await worker.startAll()
+
+    const reported = (await worker.serviceCall('workspace', 'get', [])) as {
+      workspace: string
+      directory: string
+    }
+    expect(reported.workspace).toBe(resolve(process.cwd()))
+    expect(reported.directory).toBe(MODULE_DIR)
+    expect(reported.workspace).not.toBe(reported.directory)
+  }, 20_000)
+
+  test('ctx.workspace follows the workspace option', async () => {
+    const workspace = resolve(MODULE_DIR, '..')
+    const worker = createWorker({ workspace })
+    await worker.startAll()
+
+    const reported = (await worker.serviceCall('workspace', 'get', [])) as {
+      workspace: string
+      directory: string
+    }
+    expect(reported.workspace).toBe(workspace)
+    expect(reported.directory).toBe(MODULE_DIR)
   }, 20_000)
 
   test('llm.chat streams deltas and returns the final answer', async () => {

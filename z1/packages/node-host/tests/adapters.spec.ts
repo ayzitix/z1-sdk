@@ -26,6 +26,7 @@ const SERVICE_IDS = [
   'memory',
   'bad',
   'bad-llm',
+  'workspace',
 ]
 
 const request: ChatRequest = {

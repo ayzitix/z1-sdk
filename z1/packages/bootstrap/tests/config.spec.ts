@@ -29,6 +29,7 @@ test('defaults resolve the relative paths against cwd', () => {
 
   expect(config).toEqual({
     cwd: resolve(directory),
+    fsMode: 'local',
     dbPath: join(resolve(directory), DEFAULT_CONFIG.dbPath),
     graphsPath: join(resolve(directory), DEFAULT_CONFIG.graphsPath),
     modulesPath: join(homedir(), '.z1', 'modules'),
@@ -115,6 +116,33 @@ test('the environment beats the file, overrides beat the environment', async () 
   expect(overridden.dbPath).toBe(join(resolve(directory), 'override.db'))
   expect(overridden.live).toBe(false)
   expect(overridden.useMemory).toBe(false)
+})
+
+test('Z1_FS selects the filesystem backend; env beats file, overrides beat env', async () => {
+  const file = join(directory, 'fs-mode.json')
+  await writeConfig(file, { fsMode: 'memory' })
+
+  expect(loadRuntimeConfig({ cwd: directory, env: {}, file }).fsMode).toBe('memory')
+  expect(
+    loadRuntimeConfig({ cwd: directory, env: { Z1_FS: 'local' }, file }).fsMode,
+  ).toBe('local')
+  expect(
+    loadRuntimeConfig({
+      cwd: directory,
+      env: { Z1_FS: 'local' },
+      file,
+      overrides: { fsMode: 'memory' },
+    }).fsMode,
+  ).toBe('memory')
+  expect(() => loadRuntimeConfig({ cwd: directory, env: { Z1_FS: 'disk' } })).toThrow(
+    /Z1_FS must be "local" or "memory"/,
+  )
+
+  const bad = join(directory, 'fs-mode-bad.json')
+  await writeConfig(bad, { fsMode: 'disk' })
+  expect(() => loadRuntimeConfig({ cwd: directory, env: {}, file: bad })).toThrow(
+    /fsMode must be "local" or "memory"/,
+  )
 })
 
 test('~ expands to the home directory', () => {

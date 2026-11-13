@@ -134,4 +134,13 @@ export const services = {
       },
     }
   },
+
+  // Reports the workspace the host configured for this child.
+  workspace(ctx) {
+    return {
+      get() {
+        return { workspace: ctx.workspace, directory: ctx.directory }
+      },
+    }
+  },
 }

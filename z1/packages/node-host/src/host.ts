@@ -106,6 +106,11 @@ export interface WorkerHostServices {
 export interface WorkerHostOptions {
   /** Absolute or cwd-relative directory that owns the entry. */
   moduleDir: string
+  /**
+   * Directory a module sees as its workspace (`ctx.workspace`). Defaults to
+   * `process.cwd()`, which is the host process's composition root.
+   */
+  workspace?: string
   /** Entry path relative to `moduleDir`; the file is imported by the child. */
   entry: string
   /** Node ids the manifest declares; exported ids must be a subset. */
@@ -496,6 +501,7 @@ function headersRecord(headers: Headers): Record<string, string> {
 export class ModuleWorker {
   readonly #options: WorkerHostOptions
   readonly #moduleDir: string
+  readonly #workspace: string
   readonly #capabilities: ModuleCapabilities
   readonly #loadServices: boolean
   readonly #bootstrap: string
@@ -522,6 +528,7 @@ export class ModuleWorker {
   constructor(options: WorkerHostOptions) {
     this.#options = options
     this.#moduleDir = resolve(options.moduleDir)
+    this.#workspace = resolve(options.workspace ?? process.cwd())
     this.#capabilities = options.capabilities
     this.#loadServices = options.loadServices ?? options.manifestServiceIds !== undefined
     this.#bootstrap = bootstrapPath()
@@ -823,6 +830,7 @@ export class ModuleWorker {
       JSON.stringify({
         moduleId: this.#moduleId,
         version: this.#moduleVersion,
+        workspace: this.#workspace,
         config: {},
         // Node-only workers get `loadServices: false` so the child never reads
         // or instantiates `services`.

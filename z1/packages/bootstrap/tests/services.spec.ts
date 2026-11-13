@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { graphDigest, parseGraph } from '@z1/graph'
 import { ModuleStore, type ModuleManifest } from '@z1/module'
@@ -276,6 +276,38 @@ export const services = {
     const match = /^pid: (\d+)$/.exec(answer)
     expect(match).not.toBeNull()
     expect(Number(match?.[1])).not.toBe(process.pid)
+  })
+
+  test('a worker service sees the runtime cwd as ctx.workspace, not its module dir', async () => {
+    const modulesPath = join(root, 'store-worker-workspace')
+    await installWorkerModule(modulesPath, {
+      id: 'com.example.workspace-llm',
+      version: '1.0.0',
+      services: [{ id: 'llm', kind: 'llm', mode: 'worker' }],
+      code: `export const nodes = []
+export const services = {
+  llm(ctx) {
+    return {
+      async chat() {
+        return {
+          message: { role: 'assistant', content: ctx.workspace },
+          toolCalls: [],
+          stopReason: 'stop',
+        }
+      },
+    }
+  },
+}
+`,
+    })
+    const runtime = await makeRuntime({ modulesPath })
+    const [installed] = runtime.modules.list()
+
+    const answer = await runAgent(runtime)
+    expect(answer).toBe(runtime.config.cwd)
+    expect(answer).toBe(resolve(root))
+    expect(installed).toBeDefined()
+    expect(answer).not.toBe(installed?.directory)
   })
 
   test('a throwing worker service fails the run but leaves the runtime usable', async () => {

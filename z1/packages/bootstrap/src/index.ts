@@ -8,7 +8,8 @@ export {
   DEFAULT_TEMPLATES_PATH,
   loadRuntimeConfig,
 } from './config.ts'
-export type { LoadRuntimeConfigOptions, RuntimeConfig } from './config.ts'
+export type { LoadRuntimeConfigOptions, FsMode, RuntimeConfig } from './config.ts'
+export { createLocalFsService } from './fs-local.ts'
 export { createTemplateRegistry } from './templates.ts'
 export { builtinRegistry, createRuntime } from './runtime.ts'
 export type { RunHandle, RunOverrides, Runtime } from './runtime.ts'

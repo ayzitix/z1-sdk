@@ -14,8 +14,16 @@ import { isAbsolute, resolve } from 'node:path'
 
 import { providersFromEnv, type ProviderConfig, type ProviderProtocol } from '@z1/provider'
 
+/** Where `ctx.fs` of a run reads and writes. */
+export type FsMode = 'local' | 'memory'
+
 export interface RuntimeConfig {
   cwd: string
+  /**
+   * Backend of the ambient filesystem service. `local` uses the real disk,
+   * `memory` keeps the in-process mock used by tests. Defaults to `local`.
+   */
+  fsMode?: FsMode
   /** SQLite journal for runs and artifacts. */
   dbPath: string
   /** One JSON file per saved graph. */
@@ -47,6 +55,7 @@ export const DEFAULT_TEMPLATES_PATH = '.z1/templates'
 
 /** The config used when neither a file nor the environment says otherwise. */
 export const DEFAULT_CONFIG = {
+  fsMode: 'local' as FsMode,
   dbPath: DEFAULT_DB_PATH,
   graphsPath: DEFAULT_GRAPHS_PATH,
   modulesPath: DEFAULT_MODULES_PATH,
@@ -58,6 +67,7 @@ export const DEFAULT_CONFIG = {
 } as const
 
 const FILE_KEYS = [
+  'fsMode',
   'dbPath',
   'graphsPath',
   'modulesPath',
@@ -72,6 +82,7 @@ const FILE_KEYS = [
 const PROVIDER_KEYS = ['id', 'protocol', 'envKey', 'baseURL', 'headers'] as const
 
 interface RuntimeConfigFile {
+  fsMode?: FsMode
   dbPath?: string
   graphsPath?: string
   modulesPath?: string
@@ -101,6 +112,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isProtocol(value: unknown): value is ProviderProtocol {
   return value === 'openai-completions'
+}
+
+function isFsMode(value: unknown): value is FsMode {
+  return value === 'local' || value === 'memory'
+}
+
+/** Accept only the two known backends; a typo must not silently hit the disk. */
+function readFsMode(value: unknown, label: string): FsMode {
+  if (!isFsMode(value)) throw new Error(`${label} must be "local" or "memory"`)
+  return value
 }
 
 function requiredText(value: unknown, label: string): string {
@@ -186,6 +207,9 @@ function readConfigFile(file: string): RuntimeConfigFile {
     }
   }
 
+  const fsMode = raw['fsMode']
+  if (fsMode !== undefined) config.fsMode = readFsMode(fsMode, `"${file}": fsMode`)
+
   const providers = raw['providers']
   if (providers !== undefined) {
     if (!Array.isArray(providers)) {
@@ -262,6 +286,16 @@ function envFlag(name: string, env: Record<string, string | undefined>): boolean
   throw new Error(`${name} must be 1, 0, true or false, got "${raw}"`)
 }
 
+/** `local` or `memory`; anything else is a configuration error. */
+function envFsMode(
+  name: string,
+  env: Record<string, string | undefined>,
+): FsMode | undefined {
+  const raw = env[name]
+  if (raw === undefined || raw === '') return undefined
+  return readFsMode(raw.toLowerCase(), name)
+}
+
 /**
  * Resolve one process config. Never mutates the file or the environment; a
  * caller that supplies `overrides` keeps whatever it explicitly names.
@@ -295,6 +329,8 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
 
   return {
     cwd,
+    fsMode:
+      overrides.fsMode ?? envFsMode('Z1_FS', env) ?? fromFile.fsMode ?? DEFAULT_CONFIG.fsMode,
     dbPath: expandPath(dbPath, cwd),
     graphsPath: expandPath(graphsPath, cwd),
     modulesPath: expandPath(modulesPath, cwd),
