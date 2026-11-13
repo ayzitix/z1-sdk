@@ -4,6 +4,11 @@
  * They run `git` through `ctx.process.run` in the workspace. Nothing here
  * stages, commits or rewrites history.
  *
+ * A `ref` is attacker-controlled input, so one that starts with `-` is refused
+ * outright and the ref is passed after `--end-of-options`, with any pathspec
+ * after `--`. That keeps `ref: "--output=/tmp/x"` (or `-O`, `--no-index`, ...)
+ * from turning a read-only diff into a write.
+ *
  * @module z1-tools/git
  */
 
@@ -36,8 +41,16 @@ async function git(ctx, args) {
 }
 
 /** Absolute path for a git pathspec: resolves relative to the workspace. */
-function pathspec(ctx, value, tool) {
-  return resolvePath(ctx, value, `${tool}.path`)
+async function pathspec(ctx, value, tool) {
+  return await resolvePath(ctx, value, `${tool}.path`)
+}
+
+/** A revision is data, never an option. */
+function revision(ref, tool) {
+  if (ref.startsWith('-')) {
+    fail(`${tool}.ref must not start with "-"`)
+  }
+  return ref
 }
 
 export async function gitStatus(ctx) {
@@ -47,18 +60,18 @@ export async function gitStatus(ctx) {
 export async function gitDiff(ctx, raw) {
   const staged = optionalBoolean(raw, 'staged', 'git.diff') === true
   const ref = optionalString(raw, 'ref', 'git.diff')
-  const path = raw['path'] === undefined ? undefined : pathspec(ctx, raw['path'], 'git.diff')
+  const path = raw['path'] === undefined ? undefined : await pathspec(ctx, raw['path'], 'git.diff')
 
   const args = ['diff']
   if (staged) args.push('--staged')
-  if (ref !== undefined) args.push(ref)
+  if (ref !== undefined) args.push('--end-of-options', revision(ref, 'git.diff'))
   if (path !== undefined) args.push('--', path)
   return git(ctx, args)
 }
 
 export async function gitLog(ctx, raw) {
-  const limit = optionalInteger(raw, 'limit', 'git.log', 1, 1000) ?? 20
-  const path = raw['path'] === undefined ? undefined : pathspec(ctx, raw['path'], 'git.log')
+  const limit = optionalInteger(raw, 'limit', 'git.log', 1, 200) ?? 20
+  const path = raw['path'] === undefined ? undefined : await pathspec(ctx, raw['path'], 'git.log')
 
   const args = ['log', '--pretty=format:%h %ad %s', '--date=short', `--max-count=${limit}`]
   if (path !== undefined) args.push('--', path)

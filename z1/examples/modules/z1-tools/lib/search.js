@@ -4,10 +4,14 @@
  * Every walk goes through the brokered `ctx.fs.list`/`ctx.fs.read`, is bounded
  * in depth and entries, and reports truncation instead of walking forever.
  *
+ * Symlinks are never followed: the broker reports a link as its own entry
+ * (`type: "symlink"`), the walk only recurses into `dir`, and `grep` only reads
+ * `file`, so a link inside the workspace cannot make a search leave it. `list`
+ * still shows the link itself as `link <path>`. `grep` silently skips files
+ * over 1 MiB and files whose first 8 KiB contains a NUL byte.
+ *
  * @module z1-tools/search
  */
-
-import { resolve } from 'node:path'
 
 import {
   fail,
@@ -17,8 +21,8 @@ import {
   positiveInteger,
   stringArg,
 } from './args.js'
-import { displayPath, resolvePath, toPosix } from './paths.js'
-import { MAX_READ_BYTES, splitLines } from './text.js'
+import { displayPath, resolvePath, toPosix, workspaceRoot } from './paths.js'
+import { BINARY_SNIFF_BYTES, MAX_READ_BYTES, splitLines } from './text.js'
 
 /** Deepest recursion accepted by `list`, `glob` and `grep`. */
 export const MAX_DEPTH = 8
@@ -44,6 +48,8 @@ function relPosix(base, path) {
  * Walk `base` depth first through the broker.
  *
  * `depth` counts levels below `base`: its immediate children are depth 1.
+ * A symlink is collected as an entry but never recursed into, so the walk
+ * cannot be steered outside the workspace by a link.
  */
 export async function walk(ctx, base, maxDepth, options = {}) {
   const entries = []
@@ -71,6 +77,7 @@ export async function walk(ctx, base, maxDepth, options = {}) {
         ...(entry.size === undefined ? {} : { size: entry.size }),
         depth,
       })
+      // Only real directories are entered; a symlink is an entry, not a path.
       if (entry.type === 'dir' && depth < maxDepth) await visit(entry.path, depth + 1)
     }
   }
@@ -80,7 +87,7 @@ export async function walk(ctx, base, maxDepth, options = {}) {
 }
 
 export async function listTool(ctx, raw) {
-  const base = resolvePath(ctx, raw['path'], 'list.path')
+  const base = await resolvePath(ctx, raw['path'], 'list.path')
   const recursive = optionalBoolean(raw, 'recursive', 'list') === true
   const requested = positiveInteger(raw, 'maxDepth', 'list', MAX_DEPTH)
   const maxDepth = requested ?? (recursive ? MAX_DEPTH : 1)
@@ -141,7 +148,9 @@ function normalizeGlob(pattern) {
 export async function globTool(ctx, raw) {
   const pattern = normalizeGlob(stringArg(raw, 'pattern', 'glob'))
   const base =
-    raw['path'] === undefined ? resolve(ctx.workspace) : resolvePath(ctx, raw['path'], 'glob.path')
+    raw['path'] === undefined
+      ? workspaceRoot(ctx)
+      : await resolvePath(ctx, raw['path'], 'glob.path')
   const matcher = globToRegExp(pattern)
 
   const { entries, truncated } = await walk(ctx, base, MAX_DEPTH, { skipGit: true })
@@ -176,7 +185,9 @@ function contextRanges(indexes, context) {
 export async function grepTool(ctx, raw) {
   const pattern = stringArg(raw, 'pattern', 'grep')
   const base =
-    raw['path'] === undefined ? resolve(ctx.workspace) : resolvePath(ctx, raw['path'], 'grep.path')
+    raw['path'] === undefined
+      ? workspaceRoot(ctx)
+      : await resolvePath(ctx, raw['path'], 'grep.path')
   const fileGlob = optionalString(raw, 'glob', 'grep')
   const caseSensitive = optionalBoolean(raw, 'caseSensitive', 'grep') === true
   const context = optionalInteger(raw, 'context', 'grep', 0, 20) ?? 0
@@ -199,6 +210,7 @@ export async function grepTool(ctx, raw) {
     if (truncated) break
     if (entry.type !== 'file') continue
     if (fileMatcher !== undefined && !fileMatcher.test(relPosix(base, entry.path))) continue
+    // Files over 1 MiB are skipped without a note (see README).
     if (entry.size !== undefined && entry.size > MAX_READ_BYTES) continue
 
     let text
@@ -207,8 +219,8 @@ export async function grepTool(ctx, raw) {
     } catch {
       continue
     }
-    // A NUL byte is the usual "this is not text" signal; skip binaries.
-    if (text.includes('\0')) continue
+    // A NUL byte in the head is the usual "this is not text" signal.
+    if (text.slice(0, BINARY_SNIFF_BYTES).includes('\0')) continue
 
     const lines = splitLines(text)
     const matched = []
@@ -242,7 +254,10 @@ export async function grepTool(ctx, raw) {
 }
 
 export async function treeTool(ctx, raw) {
-  const base = raw['path'] === undefined ? resolve(ctx.workspace) : resolvePath(ctx, raw['path'], 'tree.path')
+  const base =
+    raw['path'] === undefined
+      ? workspaceRoot(ctx)
+      : await resolvePath(ctx, raw['path'], 'tree.path')
   const depth = positiveInteger(raw, 'depth', 'tree', MAX_TREE_DEPTH) ?? 3
 
   const lines = [displayPath(ctx.workspace, base)]

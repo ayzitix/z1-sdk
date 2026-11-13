@@ -3,67 +3,56 @@
  *
  * Reads and writes go through the host's `ctx.fs` broker, so the manifest's
  * `fs` grant decides what the module may touch and denials stay auditable.
- * The broker exposes only `read`/`write`/`list`, so the two operations it
- * lacks — `stat` (mtime) and `move` (rename) — run as a tiny `node -e` helper
- * through `ctx.process.run`: argv only, no shell string, no extra dependency.
- * `mkdir` uses `node:fs` directly, which Node's permission model only allows
- * inside the granted write patterns.
+ * `stat` uses the brokered `ctx.fs.stat` (lstat semantics: a symlink reports
+ * itself, not its target). The broker has no `rename`, and the worker runs
+ * under Node's permission model, which denies it even on write-granted paths,
+ * so `move` runs a tiny `node -e` helper through `ctx.process.run`: argv only,
+ * no shell string, no extra dependency. `mkdir` uses `node:fs` directly, which
+ * Node's permission model only allows inside the granted write patterns.
+ *
+ * Every path is contained by `resolvePath` before use; `move` checks both ends.
  *
  * @module z1-tools/fs
  */
 
 import { mkdir } from 'node:fs/promises'
-import { resolve } from 'node:path'
 
 import { fail, optionalBoolean, positiveInteger, stringArg } from './args.js'
+import { runHelper } from './host.js'
 import { displayPath, resolvePath } from './paths.js'
 import {
+  BINARY_SNIFF_BYTES,
   MAX_READ_BYTES,
   MAX_READ_LINES,
   byteLength,
+  detectEol,
   excerpt,
   plural,
   readWindow,
+  toEol,
 } from './text.js'
 
-/** Operations Node's permission model denies inside the worker's own process. */
-const HELPER_SCRIPT = [
+/**
+ * `move` helper: rename within the workspace, falling back to copy-and-delete
+ * when the source and destination are on different devices.
+ */
+const MOVE_SCRIPT = [
   "const fs = require('node:fs/promises')",
   "const path = require('node:path')",
   'async function main() {',
-  "  const op = process.argv[1]",
-  "  if (op === 'stat') {",
-  '    const info = await fs.lstat(process.argv[2])',
-  '    const type = info.isSymbolicLink()',
-  "      ? 'symlink'",
-  "      : info.isDirectory()",
-  "        ? 'dir'",
-  "        : info.isFile()",
-  "          ? 'file'",
-  "          : 'other'",
-  '    process.stdout.write(',
-  '      JSON.stringify({ type, size: info.isFile() ? info.size : 0, mtime: info.mtime.toISOString() }),',
-  '    )',
-  '    return',
-  '  }',
-  "  if (op === 'move') {",
-  '    const from = process.argv[2]',
-  '    const to = process.argv[3]',
-  '    await fs.mkdir(path.dirname(to), { recursive: true })',
-  '    try {',
-  '      await fs.rename(from, to)',
-  '    } catch (error) {',
-  "      if (error && error.code === 'EXDEV') {",
-  '        await fs.cp(from, to, { recursive: true })',
-  '        await fs.rm(from, { recursive: true, force: true })',
-  '      } else {',
-  '        throw error',
-  '      }',
+  '  const from = process.argv[1]',
+  '  const to = process.argv[2]',
+  '  await fs.mkdir(path.dirname(to), { recursive: true })',
+  '  try {',
+  '    await fs.rename(from, to)',
+  '  } catch (error) {',
+  '    if (error !== null && typeof error === "object" && error.code === "EXDEV") {',
+  '      await fs.cp(from, to, { recursive: true })',
+  '      await fs.rm(from, { recursive: true, force: true })',
+  '    } else {',
+  '      throw error',
   '    }',
-  "    process.stdout.write('{}')",
-  '    return',
   '  }',
-  "  throw new Error('unknown filesystem helper op ' + op)",
   '}',
   'main().catch((error) => {',
   '  const detail = error && error.message ? error.message : String(error)',
@@ -72,32 +61,8 @@ const HELPER_SCRIPT = [
   '})',
 ].join('\n')
 
-const HELPER_TIMEOUT_MS = 15_000
-
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
-}
-
-async function runHelper(ctx, args) {
-  let result
-  try {
-    result = await ctx.process.run({
-      command: process.execPath,
-      args: ['-e', HELPER_SCRIPT, ...args],
-      cwd: resolve(ctx.workspace),
-      timeoutMs: HELPER_TIMEOUT_MS,
-    })
-  } catch (error) {
-    fail(`filesystem helper could not start: ${errorMessage(error)}`)
-  }
-  if (result.code !== 0) {
-    fail(result.stderr.trim() || `filesystem helper exited ${result.code}`)
-  }
-  try {
-    return JSON.parse(result.stdout)
-  } catch {
-    fail('filesystem helper returned malformed output')
-  }
 }
 
 function countOccurrences(text, needle) {
@@ -112,10 +77,21 @@ function countOccurrences(text, needle) {
 }
 
 export async function readTool(ctx, raw) {
-  const path = resolvePath(ctx, raw['path'], 'read.path')
-  const shown = displayPath(ctx.workspace, path)
+  const path = await resolvePath(ctx, raw['path'], 'read.path')
+  const shown = displayPath(ctx, path)
   const offset = positiveInteger(raw, 'offset', 'read') ?? 1
   const limit = positiveInteger(raw, 'limit', 'read', MAX_READ_LINES) ?? MAX_READ_LINES
+
+  // Guard before loading: a huge file or a binary is refused by metadata only.
+  let info
+  try {
+    info = await ctx.fs.stat(path)
+  } catch (error) {
+    fail(`cannot read "${shown}": ${errorMessage(error)}`)
+  }
+  if (info.type === 'file' && info.size > MAX_READ_BYTES) {
+    fail(`cannot read "${shown}": file is ${info.size} bytes; use shell sed -n`)
+  }
 
   let text
   try {
@@ -123,13 +99,8 @@ export async function readTool(ctx, raw) {
   } catch (error) {
     fail(`cannot read "${shown}": ${errorMessage(error)}`)
   }
-
-  const bytes = byteLength(text)
-  if (bytes > MAX_READ_BYTES) {
-    fail(
-      `cannot read "${shown}": ${bytes} bytes is over the ${MAX_READ_BYTES}-byte limit; ` +
-        'read a smaller range',
-    )
+  if (text.slice(0, BINARY_SNIFF_BYTES).includes('\0')) {
+    fail(`cannot read "${shown}": binary file: ${shown}`)
   }
 
   const window = readWindow(text, offset, limit)
@@ -141,7 +112,7 @@ export async function readTool(ctx, raw) {
 }
 
 export async function writeTool(ctx, raw) {
-  const path = resolvePath(ctx, raw['path'], 'write.path')
+  const path = await resolvePath(ctx, raw['path'], 'write.path')
   const content = raw['content']
   if (typeof content !== 'string') fail('write.content must be a string')
   const bytes = byteLength(content)
@@ -149,18 +120,18 @@ export async function writeTool(ctx, raw) {
   try {
     await ctx.fs.write(path, content)
   } catch (error) {
-    fail(`cannot write "${displayPath(ctx.workspace, path)}": ${errorMessage(error)}`)
+    fail(`cannot write "${displayPath(ctx, path)}": ${errorMessage(error)}`)
   }
-  return `wrote ${displayPath(ctx.workspace, path)} (${bytes} bytes)`
+  return `wrote ${displayPath(ctx, path)} (${bytes} bytes)`
 }
 
 export async function editTool(ctx, raw) {
-  const path = resolvePath(ctx, raw['path'], 'edit.path')
+  const path = await resolvePath(ctx, raw['path'], 'edit.path')
   const oldText = stringArg(raw, 'oldText', 'edit')
   const newText = raw['newText']
   if (typeof newText !== 'string') fail('edit.newText must be a string')
   const replaceAll = optionalBoolean(raw, 'replaceAll', 'edit') === true
-  const shown = displayPath(ctx.workspace, path)
+  const shown = displayPath(ctx, path)
 
   let before
   try {
@@ -169,7 +140,15 @@ export async function editTool(ctx, raw) {
     fail(`cannot read "${shown}": ${errorMessage(error)}`)
   }
 
-  const found = countOccurrences(before, oldText)
+  // Match the text as given first, then in the file's own line-ending style, so
+  // a block copied from a CRLF file works and one pasted from a LF tool works.
+  const eol = detectEol(before)
+  let needle = oldText
+  let found = countOccurrences(before, needle)
+  if (found === 0) {
+    needle = toEol(oldText, eol)
+    found = countOccurrences(before, needle)
+  }
   if (found === 0) {
     fail(`edit: "${excerpt(oldText)}" does not occur in ${shown}`)
   }
@@ -180,11 +159,12 @@ export async function editTool(ctx, raw) {
     )
   }
 
+  const replacement = toEol(newText, eol)
   const after = replaceAll
-    ? before.split(oldText).join(newText)
-    : before.slice(0, before.indexOf(oldText)) +
-      newText +
-      before.slice(before.indexOf(oldText) + oldText.length)
+    ? before.split(needle).join(replacement)
+    : before.slice(0, before.indexOf(needle)) +
+      replacement +
+      before.slice(before.indexOf(needle) + needle.length)
 
   try {
     await ctx.fs.write(path, after)
@@ -195,20 +175,21 @@ export async function editTool(ctx, raw) {
 }
 
 export async function statTool(ctx, raw) {
-  const path = resolvePath(ctx, raw['path'], 'stat.path')
-  const shown = displayPath(ctx.workspace, path)
+  const path = await resolvePath(ctx, raw['path'], 'stat.path')
+  const shown = displayPath(ctx, path)
   let info
   try {
-    info = await runHelper(ctx, ['stat', path])
+    info = await ctx.fs.stat(path)
   } catch (error) {
     fail(`cannot stat "${shown}": ${errorMessage(error)}`)
   }
-  return `${info.type} ${info.size} ${info.mtime} ${shown}`
+  const size = info.type === 'file' ? info.size : 0
+  return `${info.type} ${size} ${new Date(info.mtimeMs).toISOString()} ${shown}`
 }
 
 export async function mkdirTool(ctx, raw) {
-  const path = resolvePath(ctx, raw['path'], 'mkdir.path')
-  const shown = displayPath(ctx.workspace, path)
+  const path = await resolvePath(ctx, raw['path'], 'mkdir.path')
+  const shown = displayPath(ctx, path)
   try {
     await mkdir(path, { recursive: true })
   } catch (error) {
@@ -218,14 +199,11 @@ export async function mkdirTool(ctx, raw) {
 }
 
 export async function moveTool(ctx, raw) {
-  const from = resolvePath(ctx, raw['from'], 'move.from')
-  const to = resolvePath(ctx, raw['to'], 'move.to')
-  const shownFrom = displayPath(ctx.workspace, from)
-  const shownTo = displayPath(ctx.workspace, to)
-  try {
-    await runHelper(ctx, ['move', from, to])
-  } catch (error) {
-    fail(`cannot move "${shownFrom}" to "${shownTo}": ${errorMessage(error)}`)
-  }
+  const from = await resolvePath(ctx, raw['from'], 'move.from')
+  const to = await resolvePath(ctx, raw['to'], 'move.to')
+  const shownFrom = displayPath(ctx, from)
+  const shownTo = displayPath(ctx, to)
+  const label = `cannot move "${shownFrom}" to "${shownTo}"`
+  await runHelper(ctx, MOVE_SCRIPT, [from, to], label)
   return `moved ${shownFrom} -> ${shownTo}`
 }

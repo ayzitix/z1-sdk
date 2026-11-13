@@ -25,14 +25,15 @@ import { applyPatch } from './lib/patch.js'
 import { globTool, grepTool, listTool, treeTool } from './lib/search.js'
 import { shellTool } from './lib/shell.js'
 
-const PATH_DESCRIPTION = 'Path inside the workspace, or an absolute path.'
+const PATH_DESCRIPTION =
+  'Path inside the workspace: relative paths resolve there, absolute paths must land inside it.'
 
 /** Every tool this service exposes, in a stable order. */
 const TOOL_SCHEMAS = [
   {
     name: 'read',
     description:
-      'Read a UTF-8 text file as numbered lines (`1| text`). `offset` is 1-based; `limit` defaults to 2000 lines and files over 1 MiB are refused.',
+      'Read a UTF-8 text file as numbered lines (`1| text`). `offset` is 1-based; `limit` defaults to 2000 lines. Files over 1 MiB and binary files (NUL in the first 8 KiB) are refused before loading.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -60,7 +61,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'edit',
     description:
-      'Replace exact text in a file. `oldText` must occur once unless `replaceAll` is true.',
+      'Replace exact text in a file. `oldText` must occur once unless `replaceAll` is true. Matching accepts LF or the file\'s own CRLF line endings; the file keeps its line endings.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -76,7 +77,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'apply_patch',
     description:
-      'Apply SEARCH/REPLACE blocks to one or more files. Each block must match exactly once; the whole patch is rejected if any block does not.',
+      'Apply SEARCH/REPLACE blocks to one or more files. Each block must match exactly once, in LF or the file\'s CRLF style; the patch is validated in memory and files are swapped in atomically, so a failure leaves every original unchanged.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -93,7 +94,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'list',
     description:
-      'List a directory (`dir path`, `file path (size)`). Recursion is bounded to 8 levels and 5000 entries.',
+      'List a directory (`dir path`, `file path (size)`, `link path`). Recursion is bounded to 8 levels and 5000 entries and never follows symlinks.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -171,7 +172,7 @@ const TOOL_SCHEMAS = [
   },
   {
     name: 'move',
-    description: 'Move or rename a file or directory, creating the destination parent.',
+    description: 'Move or rename a file or directory inside the workspace, creating the destination parent. Runs a small Node helper because the broker has no rename.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -185,7 +186,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'shell',
     description:
-      'Run one command as argv (never a shell string). Returns `exit <code>`, then `--- stdout ---` and `--- stderr ---` sections when non-empty. Defaults to 30 s, max 300 s.',
+      'Run one command as argv (never a shell string). Returns `exit <code>` (or `killed <signal> (timeout after <ms> ms)`), then `--- stdout ---` and `--- stderr ---` sections when non-empty. Defaults to 30 s, max 300 s.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -193,7 +194,10 @@ const TOOL_SCHEMAS = [
       properties: {
         command: { type: 'string', description: 'Executable, resolved on PATH.' },
         args: { type: 'array', items: { type: 'string' }, description: 'Argument vector.' },
-        cwd: { type: 'string', description: 'Working directory; defaults to the workspace.' },
+        cwd: {
+          type: 'string',
+          description: 'Working directory inside the workspace; defaults to the workspace.',
+        },
         timeoutMs: { type: 'integer', minimum: 1, maximum: 300000 },
       },
     },
@@ -213,7 +217,10 @@ const TOOL_SCHEMAS = [
       properties: {
         path: { type: 'string', description: 'Limit the diff to this path.' },
         staged: { type: 'boolean', description: 'Diff the index (`--staged`).' },
-        ref: { type: 'string', description: 'Commit, branch or tag to diff against.' },
+        ref: {
+          type: 'string',
+          description: 'Commit, branch or tag to diff against; must not start with "-".',
+        },
       },
     },
   },
@@ -226,7 +233,7 @@ const TOOL_SCHEMAS = [
       required: [],
       properties: {
         path: { type: 'string', description: 'Limit history to this path.' },
-        limit: { type: 'integer', minimum: 1, maximum: 1000 },
+        limit: { type: 'integer', minimum: 1, maximum: 200 },
       },
     },
   },

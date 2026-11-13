@@ -11,6 +11,8 @@
 export const MAX_READ_BYTES = 1024 * 1024
 /** Lines returned by `read` when the caller does not ask for a window. */
 export const MAX_READ_LINES = 2000
+/** How much of a file is inspected for a NUL byte before reading it. */
+export const BINARY_SNIFF_BYTES = 8 * 1024
 
 export function byteLength(text) {
   return Buffer.byteLength(text, 'utf8')
@@ -54,8 +56,22 @@ export function readWindow(text, offset, limit) {
   }
 }
 
-/** A short single-line excerpt of a multi-line snippet, for error messages. */
-export function excerpt(text, maximum = 60) {
+/**
+ * The line ending a file already uses: CRLF when it contains one, else LF.
+ *
+ * Mixed files pick CRLF; the tools only use this to match and to normalise
+ * replacement text, never to rewrite untouched lines.
+ */
+export function detectEol(text) {
+  return text.includes('\r\n') ? '\r\n' : '\n'
+}
+
+/** Rewrite every line ending in `text` to `eol`. */
+export function toEol(text, eol) {
+  return text.replace(/\r\n/g, '\n').split('\n').join(eol)
+}
+
+/** A short single-line excerpt of a multi-line snippet, for error messages. */export function excerpt(text, maximum = 60) {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length <= maximum ? flat : `${flat.slice(0, maximum - 1)}…`
 }

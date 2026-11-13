@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -198,6 +198,32 @@ describe('z1 tools module', () => {
     expect(await call('read', { path: 'patch/a.txt' })).toBe('1| one\n2| TWO\n3| THREE!')
   })
 
+  test('a patch that cannot read its second file leaves the first unchanged', async () => {
+    await call('write', { path: 'atomic/a.txt', content: 'keep\nme\n' })
+    await call('mkdir', { path: 'atomic/folder' })
+
+    const patch = [
+      'atomic/a.txt',
+      '<<<<<<< SEARCH',
+      'keep',
+      '=======',
+      'CHANGED',
+      '>>>>>>> REPLACE',
+      'atomic/folder',
+      '<<<<<<< SEARCH',
+      'keep',
+      '=======',
+      'CHANGED',
+      '>>>>>>> REPLACE',
+      '',
+    ].join('\n')
+
+    await expect(call('apply_patch', { patch })).rejects.toThrow(/cannot read/)
+    expect(await readFile(inWorkspace('atomic', 'a.txt'), 'utf8')).toBe('keep\nme\n')
+    // The failed patch leaves no temp files behind.
+    expect((await readdir(inWorkspace('atomic'))).sort()).toEqual(['a.txt', 'folder'])
+  })
+
   test('list and glob walk the workspace', async () => {
     const listing = await call('list', { path: 'patch' })
     expect(listing).toContain('file patch/a.txt (15)')
@@ -314,26 +340,6 @@ describe('z1 tools module', () => {
     ).rejects.toThrow(/status must be one of/)
   })
 
-  test('relative and absolute paths both resolve against the workspace', async () => {
-    expect(await call('write', { path: 'rel/deep.txt', content: 'rel\n' })).toBe(
-      'wrote rel/deep.txt (4 bytes)',
-    )
-    expect(await readFile(inWorkspace('rel', 'deep.txt'), 'utf8')).toBe('rel\n')
-
-    expect(
-      await call('write', { path: inWorkspace('abs.txt'), content: 'abs\n' }),
-    ).toBe('wrote abs.txt (4 bytes)')
-    expect(await readFile(inWorkspace('abs.txt'), 'utf8')).toBe('abs\n')
-    expect(await call('read', { path: inWorkspace('abs.txt') })).toBe('1| abs')
-
-    // Absolute paths outside the workspace stay absolute.
-    const outside = join(root, 'outside.txt')
-    expect(await call('write', { path: outside, content: 'out\n' })).toBe(
-      `wrote ${outside} (4 bytes)`,
-    )
-    expect(await call('read', { path: outside })).toBe('1| out')
-  })
-
   test('git status, diff and log are read-only views of the workspace', async () => {
     await exec('git', ['init'], { cwd: workspace })
     await exec('git', ['config', 'user.email', 'z1-tests@example.com'], { cwd: workspace })
@@ -354,6 +360,10 @@ describe('z1 tools module', () => {
     const pathDiff = await call('git.diff', { path: 'notes/a.txt' })
     expect(pathDiff).toContain('notes/a.txt')
 
+    // A real ref still works through `--end-of-options`.
+    const refDiff = await call('git.diff', { ref: 'HEAD' })
+    expect(refDiff).toContain('+changed')
+
     const log = await call('git.log')
     expect(log).toMatch(/^[0-9a-f]+ \d{4}-\d{2}-\d{2} initial tools commit$/m)
 
@@ -372,5 +382,218 @@ describe('z1 tools module', () => {
       'wrote no-approval.txt (3 bytes)',
     )
     expect(await call('read', { path: 'no-approval.txt' })).toBe('1| ok')
+  })
+})
+
+describe('workspace containment', () => {
+  test('relative and absolute paths resolve against the workspace', async () => {
+    expect(await call('write', { path: 'rel/deep.txt', content: 'rel\n' })).toBe(
+      'wrote rel/deep.txt (4 bytes)',
+    )
+    expect(await readFile(inWorkspace('rel', 'deep.txt'), 'utf8')).toBe('rel\n')
+
+    expect(await call('write', { path: inWorkspace('abs.txt'), content: 'abs\n' })).toBe(
+      'wrote abs.txt (4 bytes)',
+    )
+    expect(await readFile(inWorkspace('abs.txt'), 'utf8')).toBe('abs\n')
+    expect(await call('read', { path: inWorkspace('abs.txt') })).toBe('1| abs')
+  })
+
+  test('refuses .. escapes on every path argument', async () => {
+    await writeFile(join(root, 'outside.txt'), 'outside\n')
+
+    await expect(call('read', { path: '../outside.txt' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('write', { path: '../escape.txt', content: 'x' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('edit', { path: '../outside.txt', oldText: 'out', newText: 'OUT' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('stat', { path: '..' })).rejects.toThrow(/path escapes workspace/)
+    await expect(call('list', { path: '..' })).rejects.toThrow(/path escapes workspace/)
+    await expect(call('glob', { pattern: '*', path: '..' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('grep', { pattern: 'outside', path: '..' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('tree', { path: '..' })).rejects.toThrow(/path escapes workspace/)
+    await expect(call('mkdir', { path: '../escaped-dir' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('move', { from: 'rel/deep.txt', to: '../moved.txt' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    expect(await readFile(join(root, 'outside.txt'), 'utf8')).toBe('outside\n')
+  })
+
+  test('refuses absolute paths outside the workspace', async () => {
+    const outside = join(root, 'absolute-outside.txt')
+    await writeFile(outside, 'keep\n')
+
+    await expect(call('read', { path: outside })).rejects.toThrow(/path escapes workspace/)
+    await expect(call('write', { path: outside, content: 'clobbered\n' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    expect(await readFile(outside, 'utf8')).toBe('keep\n')
+  })
+
+  test('refuses symlinks that resolve outside, allows those inside', async () => {
+    const outsideDirectory = join(root, 'outside-dir')
+    await mkdir(outsideDirectory, { recursive: true })
+    await writeFile(join(outsideDirectory, 'secret.txt'), 'outside-secret-token\n')
+    await symlink(outsideDirectory, inWorkspace('link-out'))
+    await writeFile(inWorkspace('link-target.txt'), 'linked\n')
+    await symlink(inWorkspace('link-target.txt'), inWorkspace('link-in.txt'))
+
+    await expect(call('read', { path: 'link-out/secret.txt' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('write', { path: 'link-out/new.txt', content: 'x' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(call('list', { path: 'link-out' })).rejects.toThrow(/path escapes workspace/)
+    await expect(call('glob', { pattern: '*', path: 'link-out' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+
+    // A link that stays inside resolves to its target.
+    expect(await call('read', { path: 'link-in.txt' })).toBe('1| linked')
+
+    // `list` reports the link itself; searches never walk through it.
+    const listing = await call('list', { path: '.' })
+    expect(listing).toContain('link link-out')
+    const matches = await call('glob', { pattern: '**/*.txt', path: '.' })
+    expect(matches.split('\n')).not.toContain('secret.txt')
+    expect(matches.split('\n')).not.toContain('link-out/secret.txt')
+    expect(await call('grep', { pattern: 'outside-secret-token' })).toBe('')
+  })
+
+  test('shell.cwd is contained', async () => {
+    await expect(call('shell', { command: 'node', args: ['-e', '0'], cwd: '..' })).rejects.toThrow(
+      /path escapes workspace/,
+    )
+    await expect(
+      call('shell', { command: 'node', args: ['-e', '0'], cwd: join(root, 'outside-dir') }),
+    ).rejects.toThrow(/path escapes workspace/)
+  })
+})
+
+describe('CRLF files', () => {
+  test('edit matches and keeps CRLF for single-line and multi-line text', async () => {
+    await call('write', { path: 'crlf/single.txt', content: 'alpha\r\nbeta\r\ngamma\r\n' })
+    expect(await call('edit', { path: 'crlf/single.txt', oldText: 'beta', newText: 'BETA' })).toBe(
+      'edited crlf/single.txt (1 replacement)',
+    )
+    expect(await readFile(inWorkspace('crlf', 'single.txt'), 'utf8')).toBe(
+      'alpha\r\nBETA\r\ngamma\r\n',
+    )
+
+    await call('write', { path: 'crlf/multi.txt', content: 'one\r\ntwo\r\nthree\r\nfour\r\n' })
+    expect(
+      await call('edit', {
+        path: 'crlf/multi.txt',
+        oldText: 'two\nthree',
+        newText: 'TWO\nTHREE',
+      }),
+    ).toBe('edited crlf/multi.txt (1 replacement)')
+    expect(await readFile(inWorkspace('crlf', 'multi.txt'), 'utf8')).toBe(
+      'one\r\nTWO\r\nTHREE\r\nfour\r\n',
+    )
+    expect(await call('read', { path: 'crlf/multi.txt' })).toBe(
+      '1| one\n2| TWO\n3| THREE\n4| four',
+    )
+  })
+
+  test('apply_patch matches CRLF and writes CRLF back', async () => {
+    await call('write', { path: 'crlf/patch-single.txt', content: 'a\r\nb\r\nc\r\n' })
+    const single = [
+      'crlf/patch-single.txt',
+      '<<<<<<< SEARCH',
+      'b',
+      '=======',
+      'B',
+      '>>>>>>> REPLACE',
+      '',
+    ].join('\n')
+    expect(await call('apply_patch', { patch: single })).toContain('(+1 -1)')
+    expect(await readFile(inWorkspace('crlf', 'patch-single.txt'), 'utf8')).toBe('a\r\nB\r\nc\r\n')
+
+    await call('write', { path: 'crlf/patch-multi.txt', content: 'one\r\ntwo\r\nthree\r\n' })
+    const multi = [
+      'crlf/patch-multi.txt',
+      '<<<<<<< SEARCH',
+      'one',
+      'two',
+      '=======',
+      'uno',
+      'dos',
+      '>>>>>>> REPLACE',
+      '',
+    ].join('\n')
+    expect(await call('apply_patch', { patch: multi })).toContain('(+2 -2)')
+    expect(await readFile(inWorkspace('crlf', 'patch-multi.txt'), 'utf8')).toBe(
+      'uno\r\ndos\r\nthree\r\n',
+    )
+  })
+})
+
+describe('read guards', () => {
+  test('refuses a file over 1 MiB before loading it', async () => {
+    const big = Buffer.alloc(1024 * 1024 + 10, 0x61)
+    await writeFile(inWorkspace('big.txt'), big)
+
+    await expect(call('read', { path: 'big.txt' })).rejects.toThrow(
+      /file is 1048586 bytes; use shell sed -n/,
+    )
+  })
+
+  test('refuses a binary file', async () => {
+    await writeFile(inWorkspace('binary.dat'), Buffer.from([0x41, 0x00, 0x42, 0x43]))
+
+    await expect(call('read', { path: 'binary.dat' })).rejects.toThrow(/binary file: binary\.dat/)
+  })
+})
+
+describe('git hardening', () => {
+  test('refuses a ref that looks like an option and leaves the target untouched', async () => {
+    const target = inWorkspace('pwn.diff')
+    await expect(call('git.diff', { ref: `--output=${target}` })).rejects.toThrow(
+      /must not start with "-"/,
+    )
+    await expect(stat(target)).rejects.toThrow()
+    expect((await readdir(workspace)).includes('pwn.diff')).toBe(false)
+
+    await writeFile(inWorkspace('sentinel.txt'), 'safe\n')
+    await expect(
+      call('git.diff', { ref: `--output=${inWorkspace('sentinel.txt')}` }),
+    ).rejects.toThrow(/must not start with "-"/)
+    expect(await readFile(inWorkspace('sentinel.txt'), 'utf8')).toBe('safe\n')
+    await rm(inWorkspace('sentinel.txt'))
+  })
+
+  test('git.log clamps limit to 1..200', async () => {
+    await expect(call('git.log', { limit: 0 })).rejects.toThrow(/at least 1/)
+    await expect(call('git.log', { limit: 201 })).rejects.toThrow(/at most 200/)
+    expect((await call('git.log', { limit: 1 })).split('\n')).toHaveLength(1)
+  })
+})
+
+describe('shell status', () => {
+  test('reports a signal kill and a timeout', async () => {
+    const killed = await call('shell', {
+      command: 'node',
+      args: ['-e', "process.kill(process.pid, 'SIGTERM')"],
+    })
+    expect(killed).toMatch(/^killed SIGTERM$/)
+
+    const timedOut = await call('shell', {
+      command: 'node',
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      timeoutMs: 250,
+    })
+    expect(timedOut).toMatch(/^killed \S+ \(timeout after 250 ms\)$/)
   })
 })
