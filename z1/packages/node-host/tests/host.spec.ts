@@ -182,7 +182,8 @@ test('llm.chat is forwarded to the host service with deltas', async () => {
     moduleDir: MODULE_DIR,
     entry: 'index.js',
     manifestNodeIds: NODE_IDS,
-    capabilities: { fs: { read: ['${moduleDir}/**'] } },
+    // Manifest gate: `ctx.llm.chat` needs a declared provider.
+    capabilities: { fs: { read: ['${moduleDir}/**'] }, llm: { providers: ['stub'] } },
     services: {
       ...services,
       llm: {

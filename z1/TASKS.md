@@ -136,3 +136,21 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - Known limitations: a module with nodes + worker services starts two child
   processes; worker `dispose()` is not called (the process is killed); worker
   services cannot request approval; service selection is cached per runtime.
+
+## M11 — worker services hardened
+
+- [x] One child per module hosts both nodes and services; node and service
+  calls share the same pid across runs; SIGKILL respawns with a new pid.
+- [x] Service `dispose()` is called over RPC before the child is killed.
+- [x] Worker services reach the current run's approval service (`runId` on
+  every service call); allow/reject/absent are tested.
+- [x] Per-run `useServiceModules` and `--no-service-modules` select services
+  without a permanent cache.
+- [x] Node-only workers never read service factories; a throwing service no
+  longer breaks node modules.
+- [x] `--no-modules` disables node and service modules; grants (not manifests)
+  are the authority; `llm`/`tools` capabilities are enforced; `ctx.get` is
+  module-scoped.
+- Known: a service-only child may still start if the runtime was constructed
+  with services enabled and a later run disables them; module-node approvals
+  resolve to the latest live run (ambiguous for concurrent runs).

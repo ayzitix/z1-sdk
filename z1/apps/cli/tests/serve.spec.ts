@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -138,6 +139,37 @@ describe('z1 serve', () => {
     // SIGTERM is the documented stop: the server closes and the CLI exits 0.
     child.kill('SIGTERM')
     expect(await exited).toBe(0)
+  }, TIMEOUT_MS)
+
+  test('accepts --modules-dir and uses that store', async () => {
+    const dbPath = await tempDb()
+    const modulesRoot = await mkdtemp(join(tmpdir(), 'z1-serve-modules-'))
+    directories.push(modulesRoot)
+    const modulesDir = join(modulesRoot, 'store')
+    const spawned = spawnServe([
+      '--port',
+      '0',
+      '--db',
+      dbPath,
+      '--modules-dir',
+      modulesDir,
+      '--json',
+    ])
+    const line = await spawned.firstLine
+    const info = JSON.parse(line) as ServeInfo
+
+    const peer = await connect(info.url, info.token)
+    try {
+      const listed = await peer.request('module.list', {})
+      expect(listed.modules).toEqual([])
+      // The runtime created the configured store rather than the default one.
+      expect(existsSync(modulesDir)).toBe(true)
+    } finally {
+      peer.close()
+    }
+
+    spawned.child.kill('SIGTERM')
+    expect(await spawned.exited).toBe(0)
   }, TIMEOUT_MS)
 
   test('rejects a wrong token', async () => {

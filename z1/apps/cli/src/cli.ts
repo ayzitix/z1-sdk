@@ -70,7 +70,7 @@ const USAGE = [
   '  memory context <runId> [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
   '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
-  '      [--templates-dir <path>] [--no-service-modules]',
+  '      [--modules-dir <path>] [--templates-dir <path>] [--no-service-modules]',
   '  studio [--host <host>] [--port <port>] [--db <path>] [--graphs-dir <path>]',
   '      [--modules-dir <path>] [--templates-dir <path>] [--token <token>] [--live] [--no-open]',
   '      [--no-service-modules] [--json]',
@@ -527,8 +527,9 @@ function moduleListCommand(args: readonly string[], io: CliIO): number {
           active: module.active,
           integrity: module.integrity,
           directory: module.directory,
-          capabilities: module.manifest.capabilities ?? {},
-          services: module.manifest.services ?? [],
+          // The grant is the authority: the manifest is only a request.
+          capabilities: module.grant.capabilities,
+          services: module.grant.services,
         })),
       )}\n`,
     )
@@ -541,10 +542,10 @@ function moduleListCommand(args: readonly string[], io: CliIO): number {
   }
   for (const module of modules) {
     const state = module.active ? 'active' : 'inactive'
-    const services = serviceSummary(module.manifest.services)
+    const services = serviceSummary(module.grant.services)
     const servicePart = services === '' ? '' : `  services: ${services}`
     io.stdout(
-      `${module.manifest.id}@${module.manifest.version}  ${state}  ${module.integrity.slice(0, 12)}  ${capabilitySummary(module.manifest.capabilities)}${servicePart}\n`,
+      `${module.manifest.id}@${module.manifest.version}  ${state}  ${module.integrity.slice(0, 12)}  ${capabilitySummary(module.grant.capabilities)}${servicePart}\n`,
     )
   }
   return 0
@@ -1095,10 +1096,16 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
       let handle
       try {
         handle = await runtime.beginRun({
+          runId,
           approval: nodeApprovalService(approvalBehavior(approve, io)),
           // Module code asks under its own policy: `--approve auto` describes
           // node autonomy and must not silently grant it.
           moduleApproval: moduleApprovalService(moduleApprove, io),
+          // `--no-modules` and `--no-service-modules` are per-run decisions:
+          // the same process may serve a later run that wants modules.
+          ...(values['no-modules'] === true || values['no-service-modules'] === true
+            ? { useServiceModules: false }
+            : {}),
           ...(values.trace === true
             ? { onEvent: (event: RunEvent) => io.stderr(`${JSON.stringify(event)}\n`) }
             : {}),
@@ -1432,6 +1439,7 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
     token?: string
     live?: boolean
     json?: boolean
+    'modules-dir'?: string
     'templates-dir'?: string
     'no-service-modules'?: boolean
   }
@@ -1446,6 +1454,7 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
         token: { type: 'string' },
         live: { type: 'boolean' },
         json: { type: 'boolean' },
+        'modules-dir': { type: 'string' },
         'templates-dir': { type: 'string' },
         'no-service-modules': { type: 'boolean' },
       },
@@ -1493,6 +1502,7 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
       env,
       // Omitted paths fall back to `z1.config.json`, the environment, defaults.
       ...(values.db === undefined ? {} : { dbPath: values.db }),
+      ...(values['modules-dir'] === undefined ? {} : { modulesPath: values['modules-dir'] }),
       // Omitting `token` keeps the server's own random generation.
       ...(token === undefined ? {} : { token }),
       ...(values.live === true ? { live: true } : {}),

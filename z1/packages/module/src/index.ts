@@ -26,7 +26,14 @@ export type {
 export { MODULE_MANIFEST_FILES, ModuleStore, ModuleStoreError } from './store.ts'
 export type { AuditAppend, AuditEntry } from './audit.ts'
 export { AuditChainError, AuditLog, GENESIS_HASH, auditEntryHash } from './audit.ts'
-export { checkFs, checkNet, matchPath, resolveCapabilityPath } from './capability.ts'
+export {
+  checkFs,
+  checkLlm,
+  checkNet,
+  checkTool,
+  matchPath,
+  resolveCapabilityPath,
+} from './capability.ts'
 export type { CapabilityCheck } from './capability.ts'
 export { directoryIntegrity, sha256Hex, walkIntegrityFiles } from './integrity.ts'
 export type { IntegrityFile } from './integrity.ts'

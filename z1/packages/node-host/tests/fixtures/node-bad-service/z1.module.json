@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.node-bad",
+  "version": "1.0.0",
+  "title": "Node with a bad service",
+  "description": "Declares no services; its entry still exports a throwing factory.",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [
+    {
+      "id": "com.example.node-bad.ping",
+      "version": "1.0.0",
+      "title": "Ping",
+      "category": "example",
+      "inputs": [],
+      "outputs": [{ "kind": "data", "id": "pong", "schema": { "type": "boolean" } }]
+    }
+  ]
+}

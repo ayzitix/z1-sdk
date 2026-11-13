@@ -261,6 +261,15 @@ function parseMemoryEnvelope(raw: unknown, serviceId: string): MemoryEnvelope {
   }
 }
 
+/**
+ * Every service call carries the run it belongs to, so an approval request
+ * from service code resolves through that run's channel. Without it the child
+ * sends `runId: ''`, which no run can claim.
+ */
+function callOptions(runId: string | undefined): { runId?: string } {
+  return runId === undefined ? {} : { runId }
+}
+
 function toBase64(data: Uint8Array): string {
   return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('base64')
 }
@@ -273,12 +282,17 @@ function fromBase64(text: string, serviceId: string): Uint8Array {
 }
 
 /** `llm.chat`, streaming deltas through the worker's `chat` callback param. */
-export function workerLlmService(worker: ModuleWorker, serviceId: string): LlmService {
+export function workerLlmService(
+  worker: ModuleWorker,
+  serviceId: string,
+  runId?: string,
+): LlmService {
   return {
     async chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult> {
       let deltaError: Error | undefined
-      const streamed =
-        onDelta === undefined
+      const streamed = {
+        ...callOptions(runId),
+        ...(onDelta === undefined
           ? {}
           : {
               onDelta: (raw: unknown): void => {
@@ -289,8 +303,9 @@ export function workerLlmService(worker: ModuleWorker, serviceId: string): LlmSe
                   // Throwing here would escape into the worker's IPC handler.
                   deltaError = error instanceof Error ? error : new Error(String(error))
                 }
-              },
-            }
+              }
+            }),
+      }
       const result = await worker.serviceCall(serviceId, 'chat', [request], streamed)
       if (deltaError !== undefined) throw deltaError
       return parseChatResult(result, serviceId)
@@ -299,44 +314,62 @@ export function workerLlmService(worker: ModuleWorker, serviceId: string): LlmSe
 }
 
 /** `tools.call` / `tools.list` over the worker. */
-export function workerToolService(worker: ModuleWorker, serviceId: string): ToolService {
+export function workerToolService(
+  worker: ModuleWorker,
+  serviceId: string,
+  runId?: string,
+): ToolService {
   return {
     async call(name: string, args: Json): Promise<Json> {
-      const value = await worker.serviceCall(serviceId, 'call', [name, args])
+      const value = await worker.serviceCall(serviceId, 'call', [name, args], callOptions(runId))
       return asJson(value, serviceId, 'tool result')
     },
     async list(): Promise<readonly ToolSchema[]> {
-      return parseToolSchemas(await worker.serviceCall(serviceId, 'list', []), serviceId)
+      return parseToolSchemas(
+        await worker.serviceCall(serviceId, 'list', [], callOptions(runId)),
+        serviceId,
+      )
     },
   }
 }
 
 /** `fs.read` / `fs.write`, with the worker's own fs capability applied. */
-export function workerFsService(worker: ModuleWorker, serviceId: string): FsService {
+export function workerFsService(
+  worker: ModuleWorker,
+  serviceId: string,
+  runId?: string,
+): FsService {
   return {
     async read(path: string): Promise<string> {
-      const value = await worker.serviceCall(serviceId, 'read', [path])
+      const value = await worker.serviceCall(serviceId, 'read', [path], callOptions(runId))
       if (typeof value !== 'string') {
         invalid(serviceId, 'fs read result', `must be a string, got ${describe(value)}`)
       }
       return value
     },
     async write(path: string, data: string): Promise<void> {
-      await worker.serviceCall(serviceId, 'write', [path, data])
+      await worker.serviceCall(serviceId, 'write', [path, data], callOptions(runId))
     },
   }
 }
 
 /** Artifacts travel base64-encoded; see the module doc comment for the shape. */
-export function workerArtifactService(worker: ModuleWorker, serviceId: string): ArtifactService {
+export function workerArtifactService(
+  worker: ModuleWorker,
+  serviceId: string,
+  runId?: string,
+): ArtifactService {
   return {
     async put(data: Uint8Array, mime: string): Promise<string> {
       if (typeof mime !== 'string' || mime.length === 0) {
         throw new Error(`artifact put requires a non-empty mime, got ${describe(mime)}`)
       }
-      const raw = await worker.serviceCall(serviceId, 'put', [
-        { data: toBase64(data), mime },
-      ])
+      const raw = await worker.serviceCall(
+        serviceId,
+        'put',
+        [{ data: toBase64(data), mime }],
+        callOptions(runId),
+      )
       if (!isRecord(raw)) invalid(serviceId, 'artifact put result', 'must be an object')
       const hash = readString(raw, 'hash', serviceId, 'artifact put result')
       if (hash.length === 0) invalid(serviceId, 'artifact put result', '"hash" must not be empty')
@@ -354,7 +387,7 @@ export function workerArtifactService(worker: ModuleWorker, serviceId: string): 
       if (typeof hash !== 'string' || hash.length === 0) {
         throw new Error('artifact get requires a non-empty hash')
       }
-      const raw = await worker.serviceCall(serviceId, 'get', [{ hash }])
+      const raw = await worker.serviceCall(serviceId, 'get', [{ hash }], callOptions(runId))
       if (!isRecord(raw)) invalid(serviceId, 'artifact get result', 'must be an object')
       const data = readString(raw, 'data', serviceId, 'artifact get result')
       const mime = readString(raw, 'mime', serviceId, 'artifact get result')
@@ -370,10 +403,17 @@ export function workerArtifactService(worker: ModuleWorker, serviceId: string): 
  * `writeSummary` is deliberately not implemented: it is optional on the host
  * interface, and a worker that does not export it must not fail a run.
  */
-export function workerMemoryService(worker: ModuleWorker, serviceId: string): MemoryService {
+export function workerMemoryService(
+  worker: ModuleWorker,
+  serviceId: string,
+  runId?: string,
+): MemoryService {
   return {
     async buildContext(request: MemoryContextRequest): Promise<MemoryEnvelope> {
-      return parseMemoryEnvelope(await worker.serviceCall(serviceId, 'buildContext', [request]), serviceId)
+      return parseMemoryEnvelope(
+        await worker.serviceCall(serviceId, 'buildContext', [request], callOptions(runId)),
+        serviceId,
+      )
     },
   }
 }

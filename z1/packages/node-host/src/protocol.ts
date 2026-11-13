@@ -44,6 +44,7 @@ export type WorkerToHost =
   | { t: 'service-result'; id: number; value: unknown }
   | { t: 'service-error'; id: number; message: string; stack?: string }
   | { t: 'service-delta'; id: number; delta: unknown }
+  | { t: 'disposed' }
 
 export type HostToWorker =
   | {
@@ -64,5 +65,9 @@ export type HostToWorker =
       serviceId: string
       method: string
       args: unknown
+      /** Run-scoped identity for approvals and cancellation. */
+      context: { runId: string }
     }
   | { t: 'service-cancel'; id: number }
+  /** Ask the child to dispose its service instances before it is killed. */
+  | { t: 'dispose' }

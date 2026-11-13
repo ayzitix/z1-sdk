@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import type { AuditEntry } from '@z1/module'
+import { ModuleStore } from '@z1/module'
 import { runCli, type CliIO } from '../src/cli.ts'
 
 const ECHO_SOURCE = fileURLToPath(new URL('../../../examples/modules/echo', import.meta.url))
@@ -551,5 +552,177 @@ describe('service modules', () => {
     expect(code).toBe(0)
     const result = JSON.parse(out.trimEnd()) as { outputs: { output: string } }
     expect(result.outputs.output).toBe('mock: hello')
+  })
+
+  test('module list reports the grant, not the manifest request', async () => {
+    const grantDir = join(directory, 'grant-store')
+    const source = join(directory, 'narrow-llm')
+    await mkdir(source, { recursive: true })
+    await writeFile(
+      join(source, 'manifest.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'com.example.narrow-llm',
+        version: '1.0.0',
+        title: 'Narrow grant',
+        license: 'MIT',
+        engines: { z1: '>=0.1.0' },
+        entry: 'index.js',
+        nodes: [],
+        services: [{ id: 'llm', kind: 'llm', mode: 'worker' }],
+        capabilities: { fs: { read: ['${moduleDir}/**'] } },
+      }),
+    )
+    await writeFile(
+      join(source, 'index.js'),
+      `export const nodes = []
+export const services = { llm() { return { async chat() { throw new Error('unused') } } } }
+`,
+    )
+
+    // The manifest asks for an llm service and fs read; the grant approves
+    // neither.
+    const store = new ModuleStore(grantDir)
+    store.propose(source)
+    store.install('com.example.narrow-llm', '1.0.0', {
+      capabilities: {},
+      services: [],
+      futureVersions: false,
+    })
+    store.activate('com.example.narrow-llm', '1.0.0')
+
+    const listed = await run(['module', 'list', '--json', '--modules-dir', grantDir])
+    expect(listed.code).toBe(0)
+    const modules = JSON.parse(listed.out.trimEnd()) as {
+      services: unknown[]
+      capabilities: Record<string, unknown>
+    }[]
+    expect(modules[0]?.services).toEqual([])
+    expect(modules[0]?.capabilities).toEqual({})
+
+    const human = await run(['module', 'list', '--modules-dir', grantDir])
+    expect(human.code).toBe(0)
+    expect(human.out).not.toContain('services: llm')
+    expect(human.out).toContain('none')
+  })
+
+  test('the per-run flag does not stick: the next run uses the service again', async () => {
+    const { code, out } = await run([
+      'run',
+      '--template',
+      'agent.loop',
+      '--message',
+      'hello',
+      '--json',
+      '--db',
+      serviceDb,
+      '--modules-dir',
+      serviceModulesDir,
+    ])
+
+    expect(code).toBe(0)
+    const result = JSON.parse(out.trimEnd()) as { outputs: { output: string } }
+    expect(result.outputs.output).toBe('echo-llm: hello')
+  })
+})
+
+describe('legacy host services and --no-modules', () => {
+  let hostModulesDir = ''
+  let hostDb = ''
+
+  beforeAll(async () => {
+    hostModulesDir = join(directory, 'host-store')
+    hostDb = join(directory, 'host.db')
+    const source = join(directory, 'legacy-host-llm')
+    await mkdir(source, { recursive: true })
+    await writeFile(
+      join(source, 'manifest.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'com.example.legacy-host-llm',
+        version: '1.0.0',
+        title: 'Legacy host LLM',
+        license: 'MIT',
+        engines: { z1: '>=0.1.0' },
+        entry: 'index.js',
+        nodes: [],
+        // Pre-mode spelling: no `mode`, but `trusted` makes it a host service.
+        services: [{ id: 'llm', kind: 'llm', trusted: true }],
+      }),
+    )
+    await writeFile(
+      join(source, 'index.js'),
+      `export const nodes = []
+export const services = {
+  llm() {
+    return {
+      async chat() {
+        return {
+          message: { role: 'assistant', content: 'legacy: hello' },
+          toolCalls: [],
+          stopReason: 'stop',
+        }
+      },
+    }
+  },
+}
+`,
+    )
+
+    const proposed = await run([
+      'module',
+      'propose',
+      source,
+      '--modules-dir',
+      hostModulesDir,
+    ])
+    expect(proposed.code).toBe(0)
+    const approved = await run([
+      'module',
+      'approve',
+      'com.example.legacy-host-llm',
+      '--modules-dir',
+      hostModulesDir,
+    ])
+    expect(approved.code).toBe(0)
+  })
+
+  test('--no-modules disables a legacy host service', async () => {
+    const { code, out } = await run([
+      'run',
+      '--template',
+      'agent.loop',
+      '--message',
+      'hello',
+      '--json',
+      '--db',
+      hostDb,
+      '--modules-dir',
+      hostModulesDir,
+      '--no-modules',
+    ])
+
+    expect(code).toBe(0)
+    const result = JSON.parse(out.trimEnd()) as { outputs: { output: string } }
+    expect(result.outputs.output).toBe('mock: hello')
+  })
+
+  test('the same module answers when modules are allowed', async () => {
+    const { code, out } = await run([
+      'run',
+      '--template',
+      'agent.loop',
+      '--message',
+      'hello',
+      '--json',
+      '--db',
+      hostDb,
+      '--modules-dir',
+      hostModulesDir,
+    ])
+
+    expect(code).toBe(0)
+    const result = JSON.parse(out.trimEnd()) as { outputs: { output: string } }
+    expect(result.outputs.output).toBe('legacy: hello')
   })
 })

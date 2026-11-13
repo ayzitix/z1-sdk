@@ -316,7 +316,7 @@ export const nodes = []
     })
     const runtime = await makeRuntime({ modulesPath })
 
-    await expect(runAgent(runtime)).rejects.toThrow(/cannot start service modules/)
+    await expect(runAgent(runtime)).rejects.toThrow(/cannot start module/)
     // Remove the broken module from the store; the cached failure must be gone
     // so the next run starts from scratch and falls back to the mock.
     rmSync(join(modulesPath, 'modules', 'com.example.broken-llm'), {

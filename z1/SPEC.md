@@ -564,20 +564,38 @@ service is stopped with its process.
 
 Service modules are approved through the normal store; the approved `services`
 list is recorded on the grant and in the audit log as declared, including
-`mode`/`trusted`. The runtime starts active service modules lazily on the first
-`beginRun` and resolves one instance per kind. Multiple providers of the same
-kind resolve to the highest module version across both modes; ties keep the
-lower module id, and the choice is logged. Service precedence for a run is:
+`mode`/`trusted`. **The grant is the authority**: a grant may approve fewer
+services or capabilities than the manifest requests, and a service the grant
+omits is never started. A pre-R3 grant (`services: []`) approves no services.
+`z1 module list` reports the grant, while `z1 module propose` reports the
+manifest.
+
+The runtime creates **one `ModuleRuntime` per process** on the first run and
+keeps it: each active module has one child that hosts its nodes and its granted
+worker services, reused by every later run. A crashed child is respawned
+lazily, and a failed load discards the runtime so the next run retries. Service
+resolution happens per run and resolves one instance per kind. Multiple
+providers of the same kind resolve to the highest module version across both
+modes; ties keep the lower module id, and the choice is logged. Service
+precedence for a run is:
 
 ```
 overrides > approved service module > built-in default
 ```
 
 Built-in defaults are the provider registry's `llm` (mock when `live` is off),
-the mock `tools`/`fs`/`artifacts`, and `BranchMemory` when enabled. Service
-modules do not need a per-call approval; a worker service that asks for one is
-refused.
+the mock `tools`/`fs`/`artifacts`, and `BranchMemory` when enabled. Module code
+does not need a per-call approval, but it may ask: an approval request from a
+worker service carries the run id of the run that called it, so it reaches that
+run's approval channel (and only that one). A request with no known run is
+refused cleanly. Host-mode services run in-process and use the grant alone.
 
-`RuntimeConfig.useServiceModules` (default `true`, env `Z1_SERVICE_MODULES=0|1`,
-file key `useServiceModules`) disables all service modules; the CLI exposes
-`--no-service-modules` on `run`, `serve` and `studio`.
+`RuntimeConfig.useModules` (env `Z1_USE_MODULES`, file key `useModules`) is the
+master switch: `false` disables node modules and service modules, host and
+worker alike, so no third-party code runs. `RuntimeConfig.useServiceModules`
+(default `true`, env `Z1_SERVICE_MODULES=0|1`, file key `useServiceModules`)
+disables only services; a run may override it per invocation with
+`RunOverrides.useServiceModules` (CLI `--no-service-modules`), and the choice
+is not cached — a later run can use the service again. The CLI exposes
+`--no-modules` and `--no-service-modules` on `run`, and
+`--no-service-modules` on `serve` and `studio`.

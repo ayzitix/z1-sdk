@@ -1,8 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { ModuleStore } from '@z1/module'
 import { JsonRpcFault, JsonRpcPeer } from '@z1/protocol'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import WebSocket from 'ws'
@@ -167,4 +168,176 @@ describe('module protocol', () => {
     expect(fault).toBeInstanceOf(JsonRpcFault)
     expect((fault as JsonRpcFault).message).toContain('no earlier version')
   })
+})
+
+/** `input` -> `z1.llm.chat` -> `z1.core.output`: the shortest service path. */
+function chatGraph(): unknown {
+  return {
+    schemaVersion: 1,
+    id: 'chat-service',
+    nodes: [
+      {
+        id: 'input',
+        type: 'z1.core.input',
+        version: '1.0.0',
+        config: {},
+        position: { x: -200, y: 0 },
+      },
+      {
+        id: 'chat',
+        type: 'z1.llm.chat',
+        version: '1.0.0',
+        config: { model: { provider: 'mock', model: 'mock-1' } },
+        position: { x: 0, y: 0 },
+      },
+      {
+        id: 'out',
+        type: 'z1.core.output',
+        version: '1.0.0',
+        config: {},
+        position: { x: 200, y: 0 },
+      },
+    ],
+    edges: [
+      {
+        id: 'd-in-prompt',
+        kind: 'data',
+        from: { node: 'input', port: 'value' },
+        to: { node: 'chat', port: 'prompt' },
+      },
+      {
+        id: 'd-chat-text',
+        kind: 'data',
+        from: { node: 'chat', port: 'text' },
+        to: { node: 'out', port: 'value' },
+      },
+      {
+        id: 'f-in-chat',
+        kind: 'flow',
+        from: { node: 'input', port: 'out' },
+        to: { node: 'chat', port: 'in' },
+      },
+      {
+        id: 'f-chat-out',
+        kind: 'flow',
+        from: { node: 'chat', port: 'out' },
+        to: { node: 'out', port: 'in' },
+      },
+    ],
+  }
+}
+
+function pidOf(output: unknown): string {
+  const match = /^pid: (\d+):/.exec(String(output))
+  expect(match).not.toBeNull()
+  return match?.[1] ?? ''
+}
+
+/** `true` once the pid no longer answers signal 0. */
+async function gone(pid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return true
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  return false
+}
+
+describe('a worker service module over one WebSocket run loop', () => {
+  let serviceRoot = ''
+  let serviceServer: Z1Server
+  let servicePeer: JsonRpcPeer
+  let serviceSocket: WebSocket
+  let servicePid = 0
+
+  beforeAll(async () => {
+    serviceRoot = await mkdtemp(join(tmpdir(), 'z1-server-service-'))
+    const source = join(serviceRoot, 'pid-llm')
+    await mkdir(source, { recursive: true })
+    await writeFile(
+      join(source, 'manifest.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'com.example.server-pid-llm',
+        version: '1.0.0',
+        title: 'Server pid LLM',
+        license: 'MIT',
+        engines: { z1: '>=0.1.0' },
+        entry: 'index.js',
+        nodes: [],
+        services: [{ id: 'llm', kind: 'llm', mode: 'worker' }],
+      }),
+    )
+    await writeFile(
+      join(source, 'index.js'),
+      `export const nodes = []
+export const services = {
+  llm() {
+    return {
+      async chat(request) {
+        const messages = Array.isArray(request?.messages) ? request.messages : []
+        const last = messages.filter((m) => m?.role === 'user').at(-1)
+        return {
+          message: {
+            role: 'assistant',
+            content: 'pid: ' + process.pid + ': ' + String(last?.content ?? ''),
+          },
+          toolCalls: [],
+          stopReason: 'stop',
+        }
+      },
+    }
+  },
+}
+`,
+    )
+
+    const store = new ModuleStore(join(serviceRoot, 'modules'))
+    store.propose(source)
+    store.approve('com.example.server-pid-llm', '1.0.0')
+    store.activate('com.example.server-pid-llm', '1.0.0')
+
+    serviceServer = await startServer({
+      dbPath: join(serviceRoot, 'runs.db'),
+      modulesPath: join(serviceRoot, 'modules'),
+    })
+    serviceSocket = new WebSocket(`${serviceServer.url}/ws?token=${serviceServer.token}`)
+    await new Promise<void>((resolve, reject) => {
+      serviceSocket.once('open', () => {
+        resolve()
+      })
+      serviceSocket.once('error', reject)
+    })
+    servicePeer = new JsonRpcPeer(new SocketTransport(serviceSocket), { requestTimeoutMs: 30_000 })
+    await servicePeer.request('initialize', { clientName: 'service-modules-test' })
+  }, 30_000)
+
+  afterAll(async () => {
+    servicePeer?.close()
+    serviceSocket?.terminate()
+    await serviceServer?.close()
+    if (servicePid !== 0) expect(await gone(servicePid)).toBe(true)
+    await rm(serviceRoot, { recursive: true, force: true })
+  })
+
+  test('two runs return the service answer from the same child', async () => {
+    const first = await servicePeer.request('run.start', {
+      graph: chatGraph(),
+      input: 'hello',
+    })
+    expect(first.status).toBe('completed')
+    expect(String(first.outputs['output'])).toMatch(/^pid: \d+: hello$/)
+
+    const second = await servicePeer.request('run.start', {
+      graph: chatGraph(),
+      input: 'again',
+    })
+    expect(second.status).toBe('completed')
+
+    expect(pidOf(second.outputs['output'])).toBe(pidOf(first.outputs['output']))
+    servicePid = Number(pidOf(first.outputs['output']))
+  }, 30_000)
 })

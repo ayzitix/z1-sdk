@@ -22,7 +22,7 @@ modify the engine.
 branch forks, sandboxed executable modules with an approval panel, the agent
 loop as a real graph, branch-tree memory, a headless server, real
 OpenAI-compatible models and a browser canvas are implemented and tested
-(612 tests). Not implemented yet: editor integration and OS-level sandboxing
+(651 tests). Not implemented yet: editor integration and OS-level sandboxing
 for untrusted modules.
 
 ## Quick start
@@ -96,7 +96,16 @@ also be **service-only** (`nodes: []`): it declares an ambient service such as
 `llm`, `tools`, `fs`, `artifacts` or `memory`, and once approved the runtime
 uses it instead of the built-in default. Services default to `mode: "worker"`
 (sandboxed child process, same capability broker as nodes); `mode: "host"` with
-`trusted: true` runs them in-process. A node is real code:
+`trusted: true` runs them in-process.
+
+Each active module gets **one child process**, shared by its nodes and its
+worker services: a node and the module's `llm` service report the same
+`process.pid`, and that child is reused by every later run of the runtime. A
+crashed child is respawned lazily by the next call, so one failed run does not
+poison later ones. A per-run switch (`useServiceModules`, CLI
+`--no-service-modules`) excludes services for that run only; the node modules
+keep running, and the next run can use the service again.
+ A node is real code:
 
 ```ts
 export const chat = defineNode({
@@ -146,7 +155,13 @@ Modules are reviewed before they run. A module is an npm-shaped directory with a
 manifest (id, version, integrity, declared ports and capabilities) and a
 dependency-free ESM entry. `z1 module propose` copies it to a proposal store;
 `z1 module approve` installs an immutable version, records a grant and an audit
-entry. At run time each module executes in a child process under Node's
+entry. **The grant is the authority**: it may approve less than the manifest
+requests, and `z1 module list` shows the granted capabilities and services (the
+manifest is only the request). `z1 run --no-modules` removes the whole module
+layer — node modules and services, host and worker alike — from that run. A
+worker service that asks for approval is routed to the run that started the
+call, so an allow or reject reaches the same connection and no other run can
+answer it. At run time each module executes in a child process under Node's
 permission model, and every `ctx.*` capability call is checked against the
 manifest. Node's permission model does not block direct sockets, so untrusted
 modules still need an OS-level sandbox — this is documented in

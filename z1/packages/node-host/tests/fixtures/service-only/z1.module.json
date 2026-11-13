@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.service-only",
+  "version": "1.0.0",
+  "title": "Service only",
+  "description": "No nodes at all; the worker exists for its llm service.",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [],
+  "services": [{ "id": "llm", "kind": "llm", "mode": "worker" }]
+}

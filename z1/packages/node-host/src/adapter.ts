@@ -81,6 +81,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * The worker a definition talks to, or a getter that resolves the worker at
+ * execution time.
+ *
+ * A runtime that can respawn a module passes the getter: the registered
+ * definition then always reaches the live child instead of a dead one.
+ */
+export type ModuleWorkerSource = ModuleWorker | (() => ModuleWorker)
+
+function resolveWorker(source: ModuleWorkerSource): ModuleWorker {
+  return typeof source === 'function' ? source() : source
+}
+
+/**
  * Adapt a manifest declaration plus a live {@link ModuleWorker} into a runtime
  * `NodeDefinition`, so module nodes run through the normal executor with the
  * usual config parsing, port validation, caching and approvals.
@@ -91,7 +104,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function moduleNodeDefinition(
   declaration: ModuleNodeDeclaration,
-  worker: ModuleWorker,
+  source: ModuleWorkerSource,
 ): NodeDefinition {
   const capabilities = moduleCapabilities(declaration.capabilities)
 
@@ -108,7 +121,7 @@ export function moduleNodeDefinition(
     ...(capabilities.length > 0 ? { capabilities } : {}),
     execute: async (ctx: NodeContext<unknown>): Promise<NodeOutputs> => {
       const inputs = isRecord(ctx.input) ? ctx.input : {}
-      const outputs = await worker.executeWithHooks(
+      const outputs = await resolveWorker(source).executeWithHooks(
         declaration.id,
         ctx.config,
         inputs,

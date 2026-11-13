@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.unified",
+  "version": "1.0.0",
+  "title": "Unified module",
+  "description": "One module, one child: a node and an llm service in the same sandbox.",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [
+    {
+      "id": "com.example.unified.pid",
+      "version": "1.0.0",
+      "title": "Pid",
+      "category": "example",
+      "inputs": [],
+      "outputs": [{ "kind": "data", "id": "pid", "schema": { "type": "string" } }]
+    }
+  ],
+  "services": [{ "id": "llm", "kind": "llm", "mode": "worker" }],
+  "capabilities": { "llm": { "providers": ["manifest-only"] } }
+}

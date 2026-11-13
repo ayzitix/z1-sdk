@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.bad-service",
+  "version": "1.0.0",
+  "title": "Bad service",
+  "description": "A node module whose declared service factory throws.",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [
+    {
+      "id": "com.example.bad-service.ping",
+      "version": "1.0.0",
+      "title": "Ping",
+      "category": "example",
+      "inputs": [],
+      "outputs": [{ "kind": "data", "id": "pong", "schema": { "type": "boolean" } }]
+    }
+  ],
+  "services": [{ "id": "llm", "kind": "llm", "mode": "worker" }]
+}

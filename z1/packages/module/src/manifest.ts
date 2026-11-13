@@ -90,12 +90,24 @@ const spendCapabilitySchema = z.strictObject({
   perCall: z.number().finite().nonnegative().optional(),
   perRun: z.number().finite().nonnegative().optional(),
 })
+// `true` is the "any provider / any tool" grant; an object lists the allowed
+// ones. A bare `{}` is therefore a grant of nothing, not a grant of everything.
+const llmCapabilitySchema = z.union([
+  z.literal(true),
+  z.strictObject({ providers: stringListSchema.optional() }),
+])
+const toolsCapabilitySchema = z.union([
+  z.literal(true),
+  z.strictObject({ names: stringListSchema.optional() }),
+])
 const capabilitiesSchema = z.strictObject({
   fs: fsCapabilitySchema.optional(),
   net: netCapabilitySchema.optional(),
   process: processCapabilitySchema.optional(),
   spend: spendCapabilitySchema.optional(),
   secrets: stringListSchema.optional(),
+  llm: llmCapabilitySchema.optional(),
+  tools: toolsCapabilitySchema.optional(),
 })
 
 const limitsSchema = z.strictObject({
@@ -269,6 +281,22 @@ function toCapabilities(data: CapabilitiesData): ModuleCapabilities {
     result.spend = spend
   }
   if (data.secrets !== undefined) result.secrets = [...data.secrets]
+  if (data.llm !== undefined) {
+    result.llm =
+      data.llm === true
+        ? true
+        : data.llm.providers === undefined
+          ? {}
+          : { providers: [...data.llm.providers] }
+  }
+  if (data.tools !== undefined) {
+    result.tools =
+      data.tools === true
+        ? true
+        : data.tools.names === undefined
+          ? {}
+          : { names: [...data.tools.names] }
+  }
   return result
 }
 

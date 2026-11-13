@@ -126,3 +126,46 @@ export function checkNet(
 
   return deny(`host is outside the granted patterns: ${normalizedHost}`)
 }
+
+/**
+ * Gate `ctx.llm.chat` on the declared provider.
+ *
+ * `llm: true` grants every provider; `{ providers: [...] }` grants exactly the
+ * listed ones (case-insensitive, no globs) and an empty list grants none.
+ */
+export function checkLlm(
+  capabilities: ModuleCapabilities | undefined,
+  provider: string,
+): CapabilityCheck {
+  const grant = capabilities?.llm
+  if (grant === undefined) return deny('no llm capability granted')
+  if (grant === true) return { ok: true }
+
+  const wanted = provider.trim().toLowerCase()
+  if (wanted.length === 0) return deny('empty model provider')
+  const providers = grant.providers ?? []
+  if (providers.length === 0) return deny('llm.providers is empty')
+  for (const candidate of providers) {
+    if (candidate.trim().toLowerCase() === wanted) return { ok: true }
+  }
+  return deny(`model provider "${wanted}" is outside the granted providers`)
+}
+
+/** Gate `ctx.tools.call` on the declared tool name. Same grant rules as {@link checkLlm}. */
+export function checkTool(
+  capabilities: ModuleCapabilities | undefined,
+  name: string,
+): CapabilityCheck {
+  const grant = capabilities?.tools
+  if (grant === undefined) return deny('no tools capability granted')
+  if (grant === true) return { ok: true }
+
+  const wanted = name.trim()
+  if (wanted.length === 0) return deny('empty tool name')
+  const names = grant.names ?? []
+  if (names.length === 0) return deny('tools.names is empty')
+  for (const candidate of names) {
+    if (candidate === wanted) return { ok: true }
+  }
+  return deny(`tool "${wanted}" is outside the granted tools`)
+}

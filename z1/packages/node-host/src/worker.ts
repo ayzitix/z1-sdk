@@ -8,6 +8,7 @@
  * It never trusts the host either: every inbound message is validated, and
  * every outbound result is checked to be plain JSON before it crosses IPC.
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { pathToFileURL } from 'node:url'
 import { dirname } from 'node:path'
 import type {
@@ -83,13 +84,37 @@ interface ModuleServiceContext {
   readonly directory: string
   readonly config: Record<string, unknown>
   log(level: WorkerLogLevel, message: string, data?: unknown): void
+  /** Resolve a service of *this* module only; undefined otherwise. */
   get(name: string): unknown
+  /**
+   * Signal of the service call currently running, aborted when the host
+   * cancels or times the call out. Best-effort: nothing waits for the service.
+   */
+  readonly signal: AbortSignal
   fs: {
     read(path: string): Promise<string>
     write(path: string, data: string): Promise<void>
   }
   net: { request(request: NetRequest): Promise<NetResponse> }
+  llm: {
+    chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult>
+  }
+  tools: {
+    call(name: string, args: Json): Promise<Json>
+    list(): Promise<readonly ToolSchema[]>
+  }
+  approval: { request(request: ApprovalRequest): Promise<ApprovalDecision> }
 }
+
+/** Ambient per-call data, so `ctx` getters do not need threading by hand. */
+interface ServiceCallContext {
+  readonly runId: string
+  readonly signal: AbortSignal
+}
+
+const callContext = new AsyncLocalStorage<ServiceCallContext>()
+/** Never aborted; used when a service reads `ctx.signal` outside a call. */
+const IDLE_SIGNAL = new AbortController().signal
 
 interface PendingCall {
   readonly resolve: (value: unknown) => void
@@ -273,34 +298,31 @@ try {
   fatal(`could not import module entry: ${errorText(error)}`)
 }
 
-const exported = isRecord(loaded) ? (loaded['nodes'] ?? loaded['default']) : undefined
-if (!Array.isArray(exported)) {
-  fatal('module entry must export `nodes` (or a default array of nodes)')
-}
-
-const nodes = new Map<string, ModuleNode>()
-exported.forEach((raw: unknown, index: number) => {
-  let node: ModuleNode
-  try {
-    node = parseNode(raw, index)
-  } catch (error) {
-    fatal(errorText(error))
-  }
-  if (nodes.has(node.info.id)) fatal(`duplicate exported node id "${node.info.id}"`)
-  nodes.set(node.info.id, node)
-})
-
-const info = [...nodes.values()].map((node) => node.info)
+const rawNodes = isRecord(loaded) ? (loaded['nodes'] ?? loaded['default']) : undefined
 
 /** Optional argv[3] metadata the host passes alongside the entry path. */
 interface EntryMetadata {
   moduleId: string
   version: string
   config: Record<string, unknown>
+  /**
+   * Whether this child should instantiate the entry's `services`. Node-only
+   * workers pass `false`, so a throwing factory cannot break node execution.
+   */
+  loadServices: boolean
+  /** Service ids the manifest declares (informational; the host validates ids). */
+  serviceIds: string[]
 }
 
 function readEntryMetadata(raw: string | undefined): EntryMetadata {
-  const metadata: EntryMetadata = { moduleId: 'unknown', version: '0.0.0', config: {} }
+  const metadata: EntryMetadata = {
+    moduleId: 'unknown',
+    version: '0.0.0',
+    config: {},
+    // A host that sends no metadata keeps the pre-loadServices behaviour.
+    loadServices: true,
+    serviceIds: [],
+  }
   if (raw === undefined || raw.length === 0) return metadata
   let parsed: unknown
   try {
@@ -315,10 +337,47 @@ function readEntryMetadata(raw: string | undefined): EntryMetadata {
   if (typeof version === 'string' && version.length > 0) metadata.version = version
   const config = parsed['config']
   if (isRecord(config)) metadata.config = config
+
+  const declared = parsed['serviceIds']
+  const hasServiceIds = Array.isArray(declared)
+  if (hasServiceIds) {
+    metadata.serviceIds = declared.filter(
+      (id): id is string => typeof id === 'string' && id.length > 0,
+    )
+  }
+  const loadServices = parsed['loadServices']
+  metadata.loadServices =
+    typeof loadServices === 'boolean' ? loadServices : hasServiceIds
   return metadata
 }
 
 const metadata = readEntryMetadata(process.argv[3])
+
+let exportedNodes: unknown[]
+if (Array.isArray(rawNodes)) {
+  exportedNodes = rawNodes
+} else if (rawNodes === undefined && metadata.loadServices) {
+  // A service-only module may omit `nodes` entirely: the manifest declares
+  // none, and the host only asked for its services.
+  exportedNodes = []
+} else {
+  fatal('module entry must export `nodes` (or a default array of nodes)')
+}
+
+const nodes = new Map<string, ModuleNode>()
+exportedNodes.forEach((raw: unknown, index: number) => {
+  let node: ModuleNode
+  try {
+    node = parseNode(raw, index)
+  } catch (error) {
+    fatal(errorText(error))
+  }
+  if (nodes.has(node.info.id)) fatal(`duplicate exported node id "${node.info.id}"`)
+  nodes.set(node.info.id, node)
+})
+
+const info = [...nodes.values()].map((node) => node.info)
+
 const moduleDirectory = dirname(entry)
 
 function serviceLog(
@@ -347,13 +406,19 @@ function serviceContext(
   started: Map<string, Record<string, unknown>>,
 ): ModuleServiceContext {
   const invoke = (method: string, args: unknown): Promise<unknown> => call(0, method, args)
+  const current = (): ServiceCallContext | undefined => callContext.getStore()
   return {
     moduleId: metadata.moduleId,
     version: metadata.version,
     directory: moduleDirectory,
     config: metadata.config,
     log: (level, message, data) => serviceLog(serviceId, level, message, data),
+    // One child serves one module, so `started` never contains another
+    // module's services: `ctx.get` is module-scoped by construction.
     get: (name) => started.get(name),
+    get signal() {
+      return current()?.signal ?? IDLE_SIGNAL
+    },
     fs: {
       read: (path) => invoke('fs.read', { path }) as Promise<string>,
       write: (path, data) => invoke('fs.write', { path, data }) as Promise<void>,
@@ -361,37 +426,64 @@ function serviceContext(
     net: {
       request: (netRequest) => invoke('net.request', netRequest) as Promise<NetResponse>,
     },
+    llm: {
+      chat: (chatRequest, onDelta) =>
+        call(0, 'llm.chat', chatRequest, onDelta) as Promise<ChatResult>,
+    },
+    tools: {
+      call: (name, args) => invoke('tools.call', { name, args }) as Promise<Json>,
+      list: () => invoke('tools.list', null) as Promise<readonly ToolSchema[]>,
+    },
+    approval: {
+      // The approval is run-scoped, so the wrapper carries the ambient runId.
+      request: (approvalRequest) =>
+        invoke('approval.request', {
+          runId: current()?.runId ?? '',
+          request: approvalRequest,
+        }) as Promise<ApprovalDecision>,
+    },
   }
 }
 
 const services = new Map<string, Record<string, unknown>>()
+/** Instances that export `dispose()`, called once on the `dispose` RPC. */
+const disposables: Array<() => Promise<unknown>> = []
 // Declared before the factories run so a service may use ctx.fs/net while it is
 // still being constructed.
 const executions = new Map<number, AbortController>()
 const pendingCalls = new Map<number, PendingCall>()
 let callSequence = 0
-const rawServices = isRecord(loaded) ? loaded['services'] : undefined
-if (rawServices !== undefined) {
-  if (!isRecord(rawServices)) {
-    fatal('module entry `services` must be an object of factory functions')
-  }
-  for (const [serviceId, factory] of Object.entries(rawServices)) {
-    if (serviceId.length === 0) fatal('module entry exports a service with an empty id')
-    if (typeof factory !== 'function') {
-      fatal(`service "${serviceId}" must be a factory function (ctx) => instance`)
+// Node-only workers never touch `loaded.services`: a factory that throws (or a
+// factory with a side effect) must not be able to break node execution.
+if (metadata.loadServices) {
+  const rawServices = isRecord(loaded) ? loaded['services'] : undefined
+  if (rawServices !== undefined) {
+    if (!isRecord(rawServices)) {
+      fatal('module entry `services` must be an object of factory functions')
     }
-    let instance: unknown
-    try {
-      instance = await (factory as (ctx: ModuleServiceContext) => unknown)(
-        serviceContext(serviceId, services),
-      )
-    } catch (error) {
-      fatal(`service "${serviceId}" failed to start: ${errorText(error)}`)
+    for (const [serviceId, factory] of Object.entries(rawServices)) {
+      if (serviceId.length === 0) fatal('module entry exports a service with an empty id')
+      if (typeof factory !== 'function') {
+        fatal(`service "${serviceId}" must be a factory function (ctx) => instance`)
+      }
+      let instance: unknown
+      try {
+        instance = await (factory as (ctx: ModuleServiceContext) => unknown)(
+          serviceContext(serviceId, services),
+        )
+      } catch (error) {
+        fatal(`service "${serviceId}" failed to start: ${errorText(error)}`)
+      }
+      if (!isRecord(instance)) {
+        fatal(`service "${serviceId}" factory did not return an object`)
+      }
+      services.set(serviceId, instance)
+      const dispose = instance['dispose']
+      if (typeof dispose === 'function') {
+        const callable = dispose as () => unknown
+        disposables.push(async () => await callable.call(instance))
+      }
     }
-    if (!isRecord(instance)) {
-      fatal(`service "${serviceId}" factory did not return an object`)
-    }
-    services.set(serviceId, instance)
   }
 }
 
@@ -516,6 +608,8 @@ async function runNode(
 /** Service call ids in flight, and those the host cancelled. */
 const activeServiceCalls = new Set<number>()
 const cancelledServices = new Set<number>()
+/** Per-call controllers, so a cancel can abort `ctx.signal` (best-effort). */
+const serviceCallSignals = new Map<number, AbortController>()
 
 function sendServiceDelta(id: number, delta: unknown): void {
   send({ t: 'service-delta', id, delta: toJsonValue(delta) })
@@ -536,25 +630,30 @@ async function runServiceCall(
   serviceId: string,
   method: string,
   rawArgs: unknown,
+  runId: string,
 ): Promise<void> {
   activeServiceCalls.add(id)
+  const controller = new AbortController()
+  serviceCallSignals.set(id, controller)
   try {
-    const instance = services.get(serviceId)
-    if (instance === undefined) {
-      throw new Error(`module entry does not export service "${serviceId}"`)
-    }
-    const member = instance[method]
-    if (typeof member !== 'function') {
-      throw new Error(`service "${serviceId}" has no method "${method}"`)
-    }
-    const callable = member as (...callArgs: unknown[]) => unknown
-    const args: unknown[] = Array.isArray(rawArgs) ? [...rawArgs] : []
-    // A streaming method declares it by taking an extra parameter.
-    if (method === 'chat' && callable.length > args.length) {
-      args.push((delta: unknown) => sendServiceDelta(id, delta))
-    }
+    const produced = await callContext.run({ runId, signal: controller.signal }, async () => {
+      const instance = services.get(serviceId)
+      if (instance === undefined) {
+        throw new Error(`module entry does not export service "${serviceId}"`)
+      }
+      const member = instance[method]
+      if (typeof member !== 'function') {
+        throw new Error(`service "${serviceId}" has no method "${method}"`)
+      }
+      const callable = member as (...callArgs: unknown[]) => unknown
+      const args: unknown[] = Array.isArray(rawArgs) ? [...rawArgs] : []
+      // A streaming method declares it by taking an extra parameter.
+      if (method === 'chat' && callable.length > args.length) {
+        args.push((delta: unknown) => sendServiceDelta(id, delta))
+      }
 
-    const produced = await Reflect.apply(callable, instance, args)
+      return await Reflect.apply(callable, instance, args)
+    })
     if (dropCancelled(serviceId, method, id)) return
     const value = produced === undefined ? null : toJsonValue(produced)
     send({ t: 'service-result', id, value })
@@ -573,7 +672,23 @@ async function runServiceCall(
     }
   } finally {
     activeServiceCalls.delete(id)
+    serviceCallSignals.delete(id)
   }
+}
+
+let disposing: Promise<void> | undefined
+
+/** Dispose every instantiated service, then confirm on the wire. */
+function disposeServices(): Promise<void> {
+  disposing ??= (async () => {
+    await Promise.allSettled(disposables.map(async (dispose) => await dispose()))
+    try {
+      send({ t: 'disposed' })
+    } catch {
+      // The host is gone; the exit that follows is the real signal.
+    }
+  })()
+  return disposing
 }
 
 process.on('message', (raw: unknown) => {
@@ -587,13 +702,25 @@ process.on('message', (raw: unknown) => {
     if (typeof id !== 'number' || typeof serviceId !== 'string' || typeof method !== 'string') {
       return
     }
-    void runServiceCall(id, serviceId, method, raw['args'])
+    const context = raw['context']
+    const runId =
+      isRecord(context) && typeof context['runId'] === 'string' ? context['runId'] : ''
+    void runServiceCall(id, serviceId, method, raw['args'], runId)
     return
   }
 
   if (type === 'service-cancel') {
     const id = raw['id']
-    if (typeof id === 'number' && activeServiceCalls.has(id)) cancelledServices.add(id)
+    if (typeof id === 'number' && activeServiceCalls.has(id)) {
+      cancelledServices.add(id)
+      // Best-effort: services may watch `ctx.signal`, nothing waits for them.
+      serviceCallSignals.get(id)?.abort(new Error('service call was cancelled'))
+    }
+    return
+  }
+
+  if (type === 'dispose') {
+    void disposeServices()
     return
   }
 

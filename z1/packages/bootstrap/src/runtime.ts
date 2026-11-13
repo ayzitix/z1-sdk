@@ -3,6 +3,12 @@
  * branch memory and the provider registry, and hands a run its registry and
  * services.
  *
+ * A runtime owns **one** `ModuleRuntime` for its whole life: every active
+ * module gets a single child process that hosts both its nodes and its granted
+ * worker services. Runs share that process; only the services they select and
+ * the approvals they register are per run. Host-mode services are imported
+ * once into the host process by a `ModuleServiceRuntime`.
+ *
  * @module @z1/bootstrap/runtime
  */
 
@@ -11,21 +17,16 @@ import { mkdirSync } from 'node:fs'
 import { SqliteJournal } from '@z1/journal'
 import { BranchMemory } from '@z1/memory'
 import { ModuleStore, compareVersions, serviceMode } from '@z1/module'
-import type { InstalledModule, ModuleServiceDeclaration, ModuleServiceKind } from '@z1/module'
-import type { NodeRegistry } from '@z1/node'
+import type { InstalledModule, ModuleServiceKind } from '@z1/module'
+import type { ApprovalDecision, ApprovalRequest, NodeRegistry } from '@z1/node'
 import {
   ModuleRuntime,
   ModuleServiceRuntime,
-  ModuleWorker,
+  StartedServiceRegistry,
   cloneRegistry,
   declarationRegistry,
-  workerArtifactService,
-  workerFsService,
-  workerLlmService,
-  workerMemoryService,
-  workerToolService,
 } from '@z1/node-host'
-import type { ModuleServiceLog, StartedWorker, WorkerHostServices } from '@z1/node-host'
+import type { ModuleServiceLog, WorkerCapabilityDenial } from '@z1/node-host'
 import { createBuiltinRegistry } from '@z1/nodes'
 import { ProviderRegistry } from '@z1/provider'
 import type { TemplateRegistry } from '@z1/template'
@@ -44,6 +45,12 @@ import type { RuntimeConfig } from './config.ts'
 import { createAgentTemplateRegistry, createTemplateRegistry } from './templates.ts'
 
 export interface RunOverrides {
+  /**
+   * Identity the run is journaled under. When present, the run's approval is
+   * reachable from module code as `approvalFor(runId)` until the handle is
+   * disposed.
+   */
+  runId?: string
   approval: ApprovalService
   /**
    * Approval policy for module code. Module code is less trusted than a graph,
@@ -54,6 +61,13 @@ export interface RunOverrides {
   tools?: ToolService
   fs?: FsService
   artifacts?: ArtifactService
+  /**
+   * Per-run switch for service modules, host and worker alike. `false` keeps
+   * service adapters out of this run while node modules still execute; `true`
+   * uses them even when the runtime config turned them off. Defaults to
+   * `RuntimeConfig.useServiceModules`.
+   */
+  useServiceModules?: boolean
   onEvent?: (event: RunEvent) => void
   onLog?: RuntimeServices['onLog']
 }
@@ -61,7 +75,7 @@ export interface RunOverrides {
 export interface RunHandle {
   registry: NodeRegistry
   services: RuntimeServices
-  /** Stops this run's module workers; idempotent. */
+  /** Unregisters this run's approvals; never stops the shared module workers. */
   dispose(): Promise<void>
 }
 
@@ -73,9 +87,8 @@ export interface Runtime {
   readonly providers: ProviderRegistry
   readonly llm: LlmService
   /**
-   * Services of active modules; `undefined` when `useServiceModules` is off.
-   * Host-mode services start in-process, worker-mode ones in a child worker.
-   * Started lazily by the first `beginRun`.
+   * Host-process service runtime; `undefined` until a deployment that allows
+   * service modules needs it. Worker services live in the shared `ModuleRuntime`.
    */
   readonly serviceModules: ModuleServiceRuntime | undefined
   /**
@@ -104,6 +117,45 @@ function hasActiveModule(store: ModuleStore): boolean {
  */
 export function builtinRegistry(): NodeRegistry {
   return createBuiltinRegistry()
+}
+
+interface ProvidedService {
+  moduleId: string
+  version: string
+  kind: ModuleServiceKind
+  serviceId: string
+  instance: unknown
+  mode: 'host' | 'worker'
+}
+
+/**
+ * Pick one service per kind. Highest module version wins across host and
+ * worker providers; equal versions keep the lower module id. Every decision is
+ * logged to stderr so a `--json` run still shows which provider was chosen.
+ */
+function chooseServices(
+  candidates: readonly ProvidedService[],
+  log: ModuleServiceLog,
+): Partial<Record<ModuleServiceKind, ProvidedService>> {
+  const chosen: Partial<Record<ModuleServiceKind, ProvidedService>> = {}
+  for (const service of candidates) {
+    const current = chosen[service.kind]
+    if (current !== undefined) {
+      const order = compareVersions(service.version, current.version)
+      if (order < 0 || (order === 0 && service.moduleId >= current.moduleId)) {
+        log('info', `service ${service.kind} keeps ${current.moduleId}@${current.version}`, {
+          ignored: `${service.moduleId}@${service.version}`,
+          id: service.serviceId,
+        })
+        continue
+      }
+    }
+    chosen[service.kind] = service
+    log('info', `service ${service.kind} from ${service.moduleId}@${service.version} (${service.mode})`, {
+      id: service.serviceId,
+    })
+  }
+  return chosen
 }
 
 /**
@@ -154,26 +206,6 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   let closed = false
   let closing: Promise<void> | undefined
 
-  const serviceModules = config.useServiceModules ? new ModuleServiceRuntime() : undefined
-  interface ProvidedService {
-    moduleId: string
-    version: string
-    kind: ModuleServiceKind
-    serviceId: string
-    instance: unknown
-    /** Set for worker-mode services; absent for in-process ones. */
-    worker?: ModuleWorker
-  }
-  interface StartedServiceModule {
-    moduleId: string
-    version: string
-    started: { services: Record<string, unknown>; dispose(): Promise<void> }
-  }
-  const startedServiceModules: StartedServiceModule[] = []
-  const startedServiceWorkers: ModuleWorker[] = []
-  const startedById = new Map<string, unknown>()
-  let providedServices: Promise<Partial<Record<ModuleServiceKind, ProvidedService>>> | undefined
-
   const serviceLog: ModuleServiceLog = (level, message, data) => {
     // The choice of provider must be visible even in `--json` runs, so it goes
     // to stderr rather than stdout.
@@ -181,222 +213,239 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     process.stderr.write(`z1: [${level}] ${message}${suffix}\n`)
   }
 
-  /**
-   * A worker service is sandboxed: it may not reach the user for a decision.
-   * A refusal is the only answer that cannot escalate its authority.
-   */
-  const rejectAllApproval: ApprovalService = { request: async () => 'rejected' }
+  // --- approval bridge ----------------------------------------------------
 
-  /** One adapter per kind, all speaking the same `serviceCall` protocol. */
-  const SERVICE_ADAPTERS: Record<
-    ModuleServiceKind,
-    (worker: ModuleWorker, serviceId: string) => unknown
-  > = {
-    llm: workerLlmService,
-    tools: workerToolService,
-    fs: workerFsService,
-    artifacts: workerArtifactService,
-    memory: workerMemoryService,
+  /**
+   * Approvals of the runs currently in `beginRun`. Module code is shared across
+   * runs (one child per module), so the run id is the only way to reach the
+   * connection that started the call.
+   */
+  const runApprovals = new Map<string, ApprovalService>()
+
+  /**
+   * Resolve a run's approval. Module *nodes* arrive as the pseudo-run
+   * `'module'` (the node channel has no run id), which resolves to the most
+   * recent live run. A service call that names no run is refused: guessing
+   * would let one run answer another's request.
+   */
+  function approvalForRun(runId: string): ApprovalService | undefined {
+    const direct = runApprovals.get(runId)
+    if (direct !== undefined) return direct
+    if (runId === 'module') {
+      let latest: ApprovalService | undefined
+      for (const approval of runApprovals.values()) latest = approval
+      return latest
+    }
+    return undefined
   }
 
-  /** Host-side services a worker-mode module may call back into. */
-  function workerHostServices(installed: InstalledModule): WorkerHostServices {
-    const { id, version } = installed.manifest
-    return {
-      llm,
-      tools: mock.tools,
-      fs: mock.fs,
-      approval: rejectAllApproval,
-      onLog: (event) => {
-        serviceLog(event.level, `[${id}@${version}] ${event.message}`, event.data)
+  /** The channel module *nodes* use; kept in step with the per-run map. */
+  const moduleNodeApproval: ApprovalService = {
+    request: async (request: ApprovalRequest, context): Promise<ApprovalDecision> => {
+      const approval = approvalForRun('module')
+      if (approval === undefined) return 'rejected'
+      return await approval.request(request, context)
+    },
+  }
+
+  // --- persistent module runtime -----------------------------------------
+
+  let moduleRuntime: ModuleRuntime | undefined
+  let moduleRuntimeStart: Promise<NodeRegistry> | undefined
+
+  /**
+   * The one runtime that owns every module child. Created on first use and
+   * reused by every later run; a failed *load* discards it so the next run
+   * retries, while a crashed *child* is respawned inside it.
+   */
+  function moduleRuntimeFor(): ModuleRuntime | undefined {
+    if (!config.useModules || !hasActiveModule(modules)) return undefined
+    moduleRuntime ??= new ModuleRuntime({
+      store: modules,
+      services: {
+        llm,
+        tools: mock.tools,
+        fs: mock.fs,
+        approval: moduleNodeApproval,
+        approvalFor: approvalForRun,
       },
-      onCapabilityDenied: (info) => {
+      // A stub would collide with the real definition the worker registers.
+      baseRegistry: cloneRegistry(builtins),
+      onCapabilityDenied: (info: WorkerCapabilityDenial) => {
         modules.recordDenied(info.moduleId, info.version, `${info.kind}: ${info.detail}`)
       },
-    }
+      // Nodes and granted worker services share the module's single child.
+      loadServices: true,
+    })
+    return moduleRuntime
   }
 
-  /**
-   * Start one sandboxed worker for a module's worker-mode services.
-   *
-   * The same entry may also export nodes; the worker is told about them so the
-   * handshake agrees with the manifest, but only the services are used here.
-   * `ModuleRuntime` still starts its own worker for the nodes, so a module with
-   * both gets two children — a known duplication to optimize later.
-   */
-  async function startWorkerServices(
-    installed: InstalledModule,
-    declarations: readonly ModuleServiceDeclaration[],
-  ): Promise<ProvidedService[]> {
-    const manifest = installed.manifest
-    const worker = new ModuleWorker({
-      moduleDir: installed.directory,
-      entry: manifest.entry,
-      manifestNodeIds: manifest.nodes.map((node) => node.id),
-      manifestServiceIds: declarations.map((declaration) => declaration.id),
-      capabilities: manifest.capabilities ?? {},
-      services: workerHostServices(installed),
-      moduleId: manifest.id,
-      moduleVersion: manifest.version,
-      ...(manifest.limits?.timeoutMs !== undefined
-        ? { timeoutMs: manifest.limits.timeoutMs }
-        : {}),
-      ...(manifest.limits?.memoryMb !== undefined
-        ? { maxMemoryMb: manifest.limits.memoryMb }
-        : {}),
-    })
-    startedServiceWorkers.push(worker)
-
-    let started: StartedWorker
-    try {
-      started = await worker.startAll()
-    } catch (error) {
-      throw new Error(
-        `cannot start module "${manifest.id}"@${manifest.version} service worker: ${errorMessage(error)}`,
-      )
-    }
-
-    const exported = new Set(started.services.map((service) => service.id))
-    return declarations.map((declaration) => {
-      if (!exported.has(declaration.id)) {
-        throw new Error(
-          `module "${manifest.id}"@${manifest.version} declares service "${declaration.id}" (${declaration.kind}) but its entry exports no factory`,
-        )
-      }
-      return {
-        moduleId: manifest.id,
-        version: manifest.version,
-        kind: declaration.kind,
-        serviceId: declaration.id,
-        instance: SERVICE_ADAPTERS[declaration.kind](worker, declaration.id),
-        worker,
-      }
-    })
-  }
-
-  /** Start the in-process services of a module (the pre-worker path). */
-  async function startHostServices(
-    installed: InstalledModule,
-    declarations: readonly ModuleServiceDeclaration[],
-  ): Promise<ProvidedService[]> {
-    const hostRuntime = serviceModules
-    if (hostRuntime === undefined) throw new Error('service modules are disabled')
-    const { id: moduleId, version } = installed.manifest
-    // Only the host declarations: a mixed module must not import its worker
-    // services into the host process.
-    const projected: InstalledModule = {
-      ...installed,
-      manifest: { ...installed.manifest, services: [...declarations] },
-    }
-    const started = await hostRuntime.start(projected, {
-      log: serviceLog,
-      get: (id) => startedById.get(id),
-    })
-    startedServiceModules.push({ moduleId, version, started })
-    return declarations.map((declaration) => ({
-      moduleId,
-      version,
-      kind: declaration.kind,
-      serviceId: declaration.id,
-      instance: started.services[declaration.id],
-    }))
-  }
-
-  /**
-   * Start every active module that declares services and resolve one instance
-   * per kind. Host services are imported in-process, worker services run in a
-   * child; the highest module version wins across both, and ties keep the
-   * lower module id. Started once per runtime: instances are ambient.
-   * A failed attempt is not cached, so fixing a module lets the next run retry.
-   */
-  async function ensureServiceModules(): Promise<Partial<Record<ModuleServiceKind, ProvidedService>>> {
-    if (serviceModules === undefined) return {}
-    if (providedServices === undefined) {
-      const attempt = (async () => {
-        const active = modules
-          .list()
-          .filter((module) => module.active && (module.manifest.services?.length ?? 0) > 0)
-        const chosen: Partial<Record<ModuleServiceKind, ProvidedService>> = {}
-
-        const rollback = async (): Promise<void> => {
-          await Promise.allSettled(
-            startedServiceModules.splice(0).map((entry) => entry.started.dispose()),
-          )
-          await Promise.allSettled(
-            startedServiceWorkers.splice(0).map((worker) => worker.dispose()),
-          )
-          startedById.clear()
-        }
-
-        try {
-          for (const installed of active) {
-            // A close() while starting must not leave a started service behind
-            // with no owner to dispose it.
-            if (closed) throw new Error('runtime is closed')
-            const declarations = installed.manifest.services ?? []
-            const workerDeclarations = declarations.filter(
-              (declaration) => serviceMode(declaration) === 'worker',
-            )
-            const hostDeclarations = declarations.filter(
-              (declaration) => serviceMode(declaration) === 'host',
-            )
-
-            const provided: ProvidedService[] = []
-            if (workerDeclarations.length > 0) {
-              provided.push(...(await startWorkerServices(installed, workerDeclarations)))
-            }
-            if (closed) throw new Error('runtime is closed')
-            if (hostDeclarations.length > 0) {
-              provided.push(...(await startHostServices(installed, hostDeclarations)))
-            }
-            if (closed) throw new Error('runtime is closed')
-
-            for (const service of provided) {
-              // `ctx.get(id)` of a host service resolves any declaration by id.
-              if (!startedById.has(service.serviceId)) {
-                startedById.set(service.serviceId, service.instance)
-              }
-              const current = chosen[service.kind]
-              if (current !== undefined) {
-                const order = compareVersions(service.version, current.version)
-                if (order < 0 || (order === 0 && service.moduleId >= current.moduleId)) {
-                  serviceLog(
-                    'info',
-                    `service ${service.kind} keeps ${current.moduleId}@${current.version}`,
-                    {
-                      ignored: `${service.moduleId}@${service.version}`,
-                      id: service.serviceId,
-                    },
-                  )
-                  continue
-                }
-              }
-              chosen[service.kind] = service
-              serviceLog(
-                'info',
-                `service ${service.kind} from ${service.moduleId}@${service.version} (${
-                  service.worker === undefined ? 'host' : 'worker'
-                })`,
-                { id: service.serviceId },
-              )
-            }
-          }
-          return chosen
-        } catch (error) {
-          await rollback()
-          throw error instanceof Error && error.message === 'runtime is closed'
-            ? error
-            : new Error(`cannot start service modules: ${errorMessage(error)}`)
-        }
-      })()
-      providedServices = attempt
-      // Only the current attempt may clear the cache: a concurrent caller that
-      // arrived mid-flight must not see a cleared slot and start a second copy.
+  async function startModuleRuntime(runtime: ModuleRuntime): Promise<NodeRegistry> {
+    if (moduleRuntimeStart === undefined) {
+      const attempt = runtime.start()
+      moduleRuntimeStart = attempt
+      // Only the current attempt may clear the cache, and a rejected load
+      // disposes the object it came from: a later run needs a fresh one.
       void attempt.catch(() => {
-        if (providedServices === attempt) providedServices = undefined
+        if (moduleRuntimeStart === attempt) {
+          moduleRuntimeStart = undefined
+          moduleRuntime = undefined
+        }
       })
     }
-    return providedServices
+    return await moduleRuntimeStart
+  }
+
+  /**
+   * Worker-mode service adapters of every active module, taken from the shared
+   * `ModuleRuntime`. Built per run — with that run's id attached — so a
+   * respawn and a per-run approval are both picked up.
+   */
+  function workerServices(runId: string | undefined): ProvidedService[] {
+    const runtime = moduleRuntime
+    if (runtime === undefined) return []
+    const provided: ProvidedService[] = []
+    for (const installed of modules.list()) {
+      if (!installed.active) continue
+      const services = runtime.servicesFor(
+        installed.manifest.id,
+        runId === undefined ? {} : { runId },
+      )
+      for (const [serviceId, service] of Object.entries(services)) {
+        provided.push({
+          moduleId: installed.manifest.id,
+          version: installed.manifest.version,
+          kind: service.kind,
+          serviceId,
+          instance: service.instance,
+          mode: 'worker',
+        })
+      }
+    }
+    return provided
+  }
+
+  // --- host-mode service modules -----------------------------------------
+
+  let hostRuntime: ModuleServiceRuntime | undefined
+  if (config.useModules && config.useServiceModules) hostRuntime = new ModuleServiceRuntime()
+  const hostRegistry = new StartedServiceRegistry()
+
+  interface StartedHostModule {
+    moduleId: string
+    version: string
+    started: { services: Record<string, unknown>; dispose(): Promise<void> }
+  }
+  const startedHostModules: StartedHostModule[] = []
+  let providedHostServices: Promise<ProvidedService[]> | undefined
+
+  /**
+   * A host runtime exists whenever node modules are allowed: a per-run
+   * `useServiceModules: true` must be able to start one even when the config
+   * default is off.
+   */
+  function hostServiceRuntime(): ModuleServiceRuntime | undefined {
+    if (!config.useModules) return undefined
+    hostRuntime ??= new ModuleServiceRuntime()
+    return hostRuntime
+  }
+
+  /**
+   * Import the **granted** host services of every active module once. The
+   * grant is the approval record, so a service the grant omits is never
+   * imported; a pre-R3 grant (`services: []`) starts nothing.
+   */
+  async function ensureHostServices(): Promise<ProvidedService[]> {
+    const runtime = hostServiceRuntime()
+    if (runtime === undefined) return []
+    if (providedHostServices === undefined) {
+      const attempt = startHostServices(runtime)
+      providedHostServices = attempt
+      void attempt.catch(() => {
+        if (providedHostServices === attempt) providedHostServices = undefined
+      })
+    }
+    return await providedHostServices
+  }
+
+  async function startHostServices(runtime: ModuleServiceRuntime): Promise<ProvidedService[]> {
+    const provided: ProvidedService[] = []
+
+    const rollback = async (): Promise<void> => {
+      await Promise.allSettled(
+        startedHostModules.splice(0).map((entry) => entry.started.dispose()),
+      )
+      hostRegistry.clear()
+    }
+
+    try {
+      for (const installed of modules.list()) {
+        // A close() while starting must not leave a started service behind
+        // with no owner to dispose it.
+        if (closed) throw new Error('runtime is closed')
+        if (!installed.active) continue
+
+        const granted = installed.grant.services ?? []
+        const declarations = granted.filter(
+          (declaration) => serviceMode(declaration) === 'host',
+        )
+        if (declarations.length === 0) continue
+
+        const { id: moduleId, version } = installed.manifest
+        // Only the host declarations, and only the grant's capabilities: a
+        // mixed module must not import its worker services into the host, and
+        // the manifest is a request while the grant is the authority.
+        const projected: InstalledModule = {
+          ...installed,
+          manifest: {
+            ...installed.manifest,
+            services: [...declarations],
+            capabilities: installed.grant.capabilities,
+          },
+        }
+        let started: StartedHostModule['started']
+        try {
+          started = await runtime.start(projected, { log: serviceLog, registry: hostRegistry })
+        } catch (error) {
+          throw new Error(
+            `cannot start host service module "${moduleId}"@${version}: ${errorMessage(error)}`,
+          )
+        }
+        startedHostModules.push({ moduleId, version, started })
+        for (const declaration of declarations) {
+          provided.push({
+            moduleId,
+            version,
+            kind: declaration.kind,
+            serviceId: declaration.id,
+            instance: started.services[declaration.id],
+            mode: 'host',
+          })
+        }
+      }
+      return provided
+    } catch (error) {
+      await rollback()
+      throw error instanceof Error && error.message === 'runtime is closed'
+        ? error
+        : new Error(`cannot start service modules: ${errorMessage(error)}`)
+    }
+  }
+
+  /**
+   * One instance per kind for this run. Host services are started once (they
+   * are in-process and ambient); worker adapters are rebuilt per run. The
+   * choice itself is never cached, so run 1 can ignore services while run 2
+   * uses them.
+   */
+  async function selectServices(
+    runId: string | undefined,
+  ): Promise<Partial<Record<ModuleServiceKind, ProvidedService>>> {
+    const candidates: ProvidedService[] = []
+    candidates.push(...(await ensureHostServices()))
+    if (closed) throw new Error('runtime is closed')
+    candidates.push(...workerServices(runId))
+    return chooseServices(candidates, serviceLog)
   }
 
   const runtime: Runtime = {
@@ -406,7 +455,9 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     memory,
     providers,
     llm,
-    serviceModules,
+    get serviceModules(): ModuleServiceRuntime | undefined {
+      return hostRuntime
+    },
     get templates(): TemplateRegistry {
       return templates()
     },
@@ -417,14 +468,14 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     async beginRun(overrides: RunOverrides): Promise<RunHandle> {
       if (closed) throw new Error('runtime is closed')
 
-      let moduleRuntime: ModuleRuntime | undefined
       let registry: NodeRegistry = cloneRegistry(builtins)
       let services: RuntimeServices | undefined
+      const approval = overrides.moduleApproval ?? overrides.approval
 
       // A run is visible to `close()` from the moment it starts, even though
       // its services and module workers only exist after the first `await`.
       // `dispose()` waits for that startup to settle so a close mid-startup
-      // still disposes what the run created.
+      // still unregisters the run.
       let settleStartup = (): void => {}
       const startup = new Promise<void>((resolve) => {
         settleStartup = resolve
@@ -441,17 +492,35 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         dispose: (): Promise<void> => {
           disposed ??= (async () => {
             await startup
-            await moduleRuntime?.dispose()
+            if (overrides.runId !== undefined) {
+              // Only remove our own mapping: a resumed run may have re-bound it.
+              if (runApprovals.get(overrides.runId) === approval) {
+                runApprovals.delete(overrides.runId)
+              }
+            }
             handles.delete(handle)
           })()
           return disposed
         },
       }
       handles.add(handle)
+      if (overrides.runId !== undefined) runApprovals.set(overrides.runId, approval)
 
       try {
-        const provided = await ensureServiceModules()
+        const shared = moduleRuntimeFor()
+        if (shared !== undefined) {
+          // Execution uses the real registry; `runtime.registry` keeps the
+          // declaration stubs for validation and `node.list`.
+          registry = await startModuleRuntime(shared)
+        }
         if (closed) throw new Error('runtime is closed')
+
+        // `--no-modules` disables host *and* worker services: it removes the
+        // module layer, not just node execution.
+        const useServiceModules =
+          config.useModules && (overrides.useServiceModules ?? config.useServiceModules)
+        const provided = useServiceModules ? await selectServices(overrides.runId) : {}
+
         services = {
           llm: overrides.llm ?? (provided.llm?.instance as LlmService | undefined) ?? llm,
           tools:
@@ -471,27 +540,6 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
           ...(overrides.onLog === undefined ? {} : { onLog: overrides.onLog }),
         }
 
-        if (config.useModules && hasActiveModule(modules)) {
-          // Workers are per run: a module crash must not poison later runs, and
-          // an approval from module code must reach the connection that started it.
-          moduleRuntime = new ModuleRuntime({
-            store: modules,
-            services: {
-              llm: services.llm,
-              tools: services.tools,
-              fs: services.fs,
-              // Deliberately not `services.approval` when the caller separates
-              // them: graph autonomy must not silently grant module code rights.
-              approval: overrides.moduleApproval ?? overrides.approval,
-            },
-            // A stub would collide with the real definition the worker registers.
-            baseRegistry: cloneRegistry(builtins),
-            onCapabilityDenied: (info) => {
-              modules.recordDenied(info.moduleId, info.version, `${info.kind}: ${info.detail}`)
-            },
-          })
-          registry = await moduleRuntime.start()
-        }
         if (closed) throw new Error('runtime is closed')
         return handle
       } catch (error) {
@@ -507,14 +555,16 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
       closing ??= (async () => {
         closed = true
         await Promise.allSettled([...handles].map((handle) => handle.dispose()))
+        // The persistent runtime is disposed exactly once, after every run has
+        // unregistered: node executions and worker services share it.
+        await moduleRuntime?.dispose()
+        moduleRuntime = undefined
+        moduleRuntimeStart = undefined
         await Promise.allSettled(
-          startedServiceModules.splice(0).map((entry) => entry.started.dispose()),
+          startedHostModules.splice(0).map((entry) => entry.started.dispose()),
         )
-        // Workers last: a host service may still have been using one.
-        await Promise.allSettled(
-          startedServiceWorkers.splice(0).map((worker) => worker.dispose()),
-        )
-        startedById.clear()
+        hostRegistry.clear()
+        providedHostServices = undefined
         journal.close()
       })()
       return await closing

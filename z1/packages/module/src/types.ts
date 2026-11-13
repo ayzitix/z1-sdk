@@ -83,4 +83,16 @@ export interface ModuleCapabilities {
   process?: { spawn?: string[] }
   spend?: { currency: string; perCall?: number; perRun?: number }
   secrets?: string[]
+  /**
+   * Model providers this module may call through `ctx.llm.chat`. `true` grants
+   * every provider; `{ providers: [...] }` grants exactly the listed ones (an
+   * empty list grants none). Absent means `ctx.llm` is denied entirely.
+   */
+  llm?: { providers?: string[] } | true
+  /**
+   * Tools this module may call through `ctx.tools.call`. `true` grants every
+   * tool; `{ names: [...] }` grants exactly the listed ones. Absent means
+   * `ctx.tools.call` is denied entirely.
+   */
+  tools?: { names?: string[] } | true
 }

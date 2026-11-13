@@ -4,7 +4,9 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   checkFs,
+  checkLlm,
   checkNet,
+  checkTool,
   resolveCapabilityPath,
   type DeclaredPort,
   type ModuleCapabilities,
@@ -28,6 +30,8 @@ const PACKAGE = '@z1/node-host'
 
 const HANDSHAKE_TIMEOUT_MS = 10_000
 const KILL_GRACE_MS = 2_000
+/** How long `dispose()` waits for the child's `disposed` handshake. */
+const DISPOSE_GRACE_MS = 2_000
 const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_NET_BODY_BYTES = 1024 * 1024
 const FETCH_TIMEOUT_MS = 30_000
@@ -70,6 +74,12 @@ export interface WorkerHostServices {
   tools: ToolService
   fs: FsService
   approval: ApprovalService
+  /**
+   * Approval channel for *service*-originated requests, resolved per run. Node
+   * executions keep using `approval`; a service approval with no resolver here
+   * is rejected rather than silently borrowing the node channel.
+   */
+  approvalFor?: (runId: string) => ApprovalService | undefined
   /** Capability denials and piped stdout/stderr are reported here. */
   onLog?: (event: WorkerLogEvent) => void
   onStream?: (event: WorkerStreamEvent) => void
@@ -88,7 +98,16 @@ export interface WorkerHostOptions {
   /** Node ids the manifest declares; exported ids must be a subset. */
   manifestNodeIds: string[]
   /** Service ids the manifest declares; reported ids must be a subset. */
-  manifestServiceIds?: string[]
+  manifestServiceIds?: readonly string[]
+  /**
+   * Whether the child should instantiate the entry's `services`.
+   *
+   * Defaults to `manifestServiceIds !== undefined`, so a deployment that says
+   * nothing about services keeps loading them. A node-only worker passes
+   * `false`: its services are never read, so a throwing factory cannot break
+   * node execution.
+   */
+  loadServices?: boolean
   capabilities: ModuleCapabilities
   services: WorkerHostServices
   /** Identity reported with capability denials; the store knows it. */
@@ -111,6 +130,11 @@ export interface ServiceCallOptions {
   onDelta?: (delta: unknown) => void
   /** Defaults to 120_000 ms. */
   timeoutMs?: number
+  /**
+   * Run this call belongs to. The child receives it as the call context, so
+   * service approvals can be resolved per run. Defaults to `''`.
+   */
+  runId?: string
 }
 
 interface PendingExecution {
@@ -387,6 +411,7 @@ export class ModuleWorker {
   readonly #options: WorkerHostOptions
   readonly #moduleDir: string
   readonly #capabilities: ModuleCapabilities
+  readonly #loadServices: boolean
   readonly #bootstrap: string
   readonly #bootstrapPackage: string
   readonly #executions = new Map<number, PendingExecution>()
@@ -405,11 +430,14 @@ export class ModuleWorker {
   #sequence = 0
   #serviceSequence = 0
   #disposePromise: Promise<void> | undefined
+  /** Set while `dispose()` waits for the child's `disposed` handshake. */
+  #disposeWait: (() => void) | undefined
 
   constructor(options: WorkerHostOptions) {
     this.#options = options
     this.#moduleDir = resolve(options.moduleDir)
     this.#capabilities = options.capabilities
+    this.#loadServices = options.loadServices ?? options.manifestServiceIds !== undefined
     this.#bootstrap = bootstrapPath()
     this.#bootstrapPackage = bootstrapPackageRoot(this.#bootstrap)
     this.#moduleId = options.moduleId ?? 'unknown'
@@ -423,6 +451,14 @@ export class ModuleWorker {
   /** True while a child is spawned and ready for `execute`. */
   get alive(): boolean {
     return this.#state === 'ready'
+  }
+
+  /**
+   * Lifecycle of this worker object. `dead` means the child exited (or failed
+   * to start) and a call must go through the owner that can respawn it.
+   */
+  get state(): 'idle' | 'starting' | 'ready' | 'dead' | 'disposed' {
+    return this.#state
   }
 
   get nodes(): readonly WorkerNodeInfo[] {
@@ -474,13 +510,14 @@ export class ModuleWorker {
     return promise
   }
 
-  execute(
+  async execute(
     nodeId: string,
     config: unknown,
     inputs: Record<string, unknown>,
     seed: unknown,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
+    await this.#awaitReady()
     return this.#execute(nodeId, config, inputs, seed, signal, undefined)
   }
 
@@ -488,7 +525,7 @@ export class ModuleWorker {
    * `execute` plus per-run sinks. The adapter uses this so a module's log and
    * stream calls reach the executor's NodeContext instead of a global service.
    */
-  executeWithHooks(
+  async executeWithHooks(
     nodeId: string,
     config: unknown,
     inputs: Record<string, unknown>,
@@ -496,7 +533,31 @@ export class ModuleWorker {
     signal: AbortSignal | undefined,
     hooks: WorkerExecutionHooks,
   ): Promise<Record<string, unknown>> {
+    await this.#awaitReady()
     return this.#execute(nodeId, config, inputs, seed, signal, hooks)
+  }
+
+  /**
+   * Wait for an in-flight handshake instead of rejecting a call that arrives
+   * while the child is still booting.
+   *
+   * A runtime that respawns a dead module returns the new worker immediately, so
+   * the very next call lands in `starting`; waiting makes the respawn
+   * transparent without hiding a failed handshake, which still rejects.
+   */
+  async #awaitReady(): Promise<void> {
+    if (this.#state === 'starting') {
+      const starting = this.#starting
+      if (starting !== undefined) await starting.catch(() => undefined)
+    }
+    if (this.#state === 'ready') return
+    throw new Error(
+      this.#state === 'disposed'
+        ? 'module worker has been disposed'
+        : this.#state === 'dead'
+          ? 'module worker exited; call start() to respawn'
+          : 'module worker is not ready; call start() first',
+    )
   }
 
   /**
@@ -505,24 +566,13 @@ export class ModuleWorker {
    * Numeric ids are internal; the returned value is whatever the method
    * returned (JSON-safe, `undefined` normalised to `null` by the child).
    */
-  serviceCall(
+  async serviceCall(
     serviceId: string,
     method: string,
     args: readonly unknown[],
     options: ServiceCallOptions = {},
   ): Promise<unknown> {
-    if (this.#state === 'disposed') {
-      return Promise.reject(new Error('module worker has been disposed'))
-    }
-    if (this.#state !== 'ready') {
-      return Promise.reject(
-        new Error(
-          this.#state === 'dead'
-            ? 'module worker exited; call start() to respawn'
-            : 'module worker is not ready; call start() first',
-        ),
-      )
-    }
+    await this.#awaitReady()
     const child = this.#child
     if (child === undefined) {
       return Promise.reject(new Error('module worker exited; call start() to respawn'))
@@ -567,6 +617,7 @@ export class ModuleWorker {
         serviceId,
         method,
         args: [...args],
+        context: { runId: options.runId ?? '' },
       })
       if (!sent.ok) {
         this.#settleServiceCall(pending, {
@@ -598,8 +649,7 @@ export class ModuleWorker {
 
   async #dispose(): Promise<void> {
     const child = this.#child
-    this.#child = undefined
-    this.#state = 'disposed'
+    const wasReady = this.#state === 'ready'
     this.#clearHandshake()
     const failure = new Error('module worker was disposed')
     this.#failStart(failure)
@@ -609,13 +659,18 @@ export class ModuleWorker {
     for (const pending of [...this.#serviceCalls.values()]) {
       this.#settleServiceCall(pending, { ok: false, error: failure })
     }
+    this.#state = 'disposed'
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
+      // A started service may hold resources; let it release them. Node-only
+      // workers never instantiated services, so they skip the round trip.
+      if (this.#loadServices && wasReady) await this.#requestServiceDispose(child)
       try {
         child.send({ t: 'cancel', reason: 'disposed' } satisfies HostToWorker)
       } catch {
         // The channel may already be closed.
       }
-      child.kill('SIGKILL')
+      this.#killChild(child)
+      this.#child = undefined
       await new Promise<void>((settle) => {
         if (child.exitCode !== null || child.signalCode !== null) {
           settle()
@@ -629,6 +684,31 @@ export class ModuleWorker {
         })
       })
     }
+    this.#child = undefined
+  }
+
+  /** Send `dispose` and wait at most {@link DISPOSE_GRACE_MS} for `disposed`. */
+  #requestServiceDispose(child: ChildProcess): Promise<void> {
+    return new Promise<void>((settle) => {
+      let done = false
+      const finish = (): void => {
+        if (done) return
+        done = true
+        this.#disposeWait = undefined
+        clearTimeout(timer)
+        child.off('exit', finish)
+        settle()
+      }
+      const timer = setTimeout(finish, DISPOSE_GRACE_MS)
+      timer.unref?.()
+      this.#disposeWait = finish
+      child.once('exit', finish)
+      try {
+        child.send({ t: 'dispose' } satisfies HostToWorker)
+      } catch {
+        finish()
+      }
+    })
   }
 
   #spawn(): void {
@@ -658,6 +738,10 @@ export class ModuleWorker {
         moduleId: this.#moduleId,
         version: this.#moduleVersion,
         config: {},
+        // Node-only workers get `loadServices: false` so the child never reads
+        // or instantiates `services`.
+        loadServices: this.#loadServices,
+        serviceIds: [...(this.#options.manifestServiceIds ?? [])],
       }),
     )
 
@@ -767,6 +851,10 @@ export class ModuleWorker {
       const id = raw['id']
       if (typeof id !== 'number') return
       this.#serviceCalls.get(id)?.onDelta?.(raw['delta'])
+      return
+    }
+    if (type === 'disposed') {
+      this.#disposeWait?.()
       return
     }
 
@@ -1124,6 +1212,19 @@ export class ModuleWorker {
         if (!Array.isArray(args['messages'])) {
           throw new Error('llm.chat requires a messages array')
         }
+        const model = args['model']
+        const provider =
+          isRecord(model) && typeof model['provider'] === 'string' ? model['provider'] : ''
+        // Manifest gate: a module calls an LLM only when it declared one.
+        const check = checkLlm(this.#capabilities, provider)
+        if (!check.ok) {
+          throw this.#capabilityDenied(
+            nodeId,
+            'llm',
+            `model provider "${provider}": ${check.reason}`,
+            'llm.chat',
+          )
+        }
         const request = args as unknown as ChatRequest
         return this.#services.llm.chat(request, (delta: ChatDelta) => {
           if (this.#child !== child) return
@@ -1135,6 +1236,16 @@ export class ModuleWorker {
         const name = args['name']
         if (typeof name !== 'string' || name.length === 0) {
           throw new Error('tools.call requires a tool name')
+        }
+        // Manifest gate: a module calls a tool only when it declared one.
+        const check = checkTool(this.#capabilities, name)
+        if (!check.ok) {
+          throw this.#capabilityDenied(
+            nodeId,
+            'tools',
+            `tool "${name}": ${check.reason}`,
+            'tools.call',
+          )
         }
         return this.#services.tools.call(name, (args['args'] ?? null) as Json)
       }
@@ -1158,13 +1269,32 @@ export class ModuleWorker {
         return this.#netRequest(nodeId, args)
       case 'approval.request': {
         if (!isRecord(args)) throw new Error('approval.request requires a request object')
-        const request = args as unknown as ApprovalRequest
-        const decision: ApprovalDecision = await this.#services.approval.request(request, {
-          runId: 'module',
-          nodeId,
-        })
+        // Service calls wrap the request with their runId; a node sends the
+        // bare ApprovalRequest (which has no `runId` + nested `request` pair).
+        const fromService = typeof args['runId'] === 'string' && isRecord(args['request'])
+        const runId = fromService ? (args['runId'] as string) : 'module'
+        const request = (fromService ? args['request'] : args) as unknown as ApprovalRequest
+
+        let approval: ApprovalService | undefined
+        if (fromService) {
+          approval = this.#services.approvalFor?.(runId)
+          if (approval === undefined) {
+            const message = `approval.request is not available for run "${runId}": the host resolved no approval channel`
+            this.#reportDenied('approval.request', message)
+            throw new Error(message)
+          }
+        } else {
+          approval = this.#services.approval
+        }
+
+        const decision: ApprovalDecision = await approval.request(request, { runId, nodeId })
         if (decision !== 'allowed-once') {
           this.#reportDenied('approval.request', `approval was ${decision}`)
+          // A service has no node-level policy to fall back on, so a refusal is
+          // an error: it cannot proceed by accident.
+          if (fromService) {
+            throw new Error(`approval was ${decision} for run "${runId}"`)
+          }
         }
         return decision
       }
@@ -1235,6 +1365,22 @@ export class ModuleWorker {
       kind,
       detail,
     })
+  }
+
+  /**
+   * Refuse a manifest capability the module did not declare, e.g.
+   * `capability "llm" not granted for llm.chat (...)`.
+   */
+  #capabilityDenied(
+    nodeId: string,
+    capability: 'llm' | 'tools',
+    detail: string,
+    method: string,
+  ): Error {
+    const message = `capability "${capability}" not granted for ${method} (${detail})`
+    this.#reportDenied(method, message)
+    this.#services.onLog?.({ nodeId, level: 'warn', message })
+    return new Error(message)
   }
 
   #denied(nodeId: string, method: string, target: string, reason: string): Error {

@@ -37,7 +37,11 @@ export interface ModuleServiceContext {
   /** Per-module config; v1 manifests carry no config, so this is `{}`. */
   config: Record<string, unknown>
   log: ModuleServiceLog
-  /** Resolve another already-started service by declaration id. */
+  /**
+   * Resolve another service *of the same module* by declaration id. An id
+   * declared by another module resolves to `undefined`: one module's `llm` is
+   * never another module's `llm`.
+   */
   get(name: string): unknown
 }
 
@@ -51,8 +55,49 @@ export interface ModuleServiceEntrypoints {
 export interface ModuleServiceEnvironment {
   config?: Record<string, unknown>
   log?: ModuleServiceLog
-  /** Lookup across services started earlier by the host. */
+  /**
+   * @deprecated Ignored. `ctx.get` is module-scoped; pass `registry` when the
+   * host needs to resolve a service by module id.
+   */
   get?: (name: string) => unknown
+  /**
+   * Shared registry keyed by module id + service id. When supplied, `ctx.get`
+   * resolves only entries registered under the calling module's id.
+   */
+  registry?: StartedServiceRegistry
+}
+
+/**
+ * Services started by the host, keyed by module id and service id.
+ *
+ * The two-part key is the whole point: `startedById` keyed by service id alone
+ * lets module A's `ctx.get('llm')` reach module B's `llm`.
+ */
+export class StartedServiceRegistry {
+  readonly #byKey = new Map<string, unknown>()
+
+  static key(moduleId: string, serviceId: string): string {
+    return `${moduleId}\u0000${serviceId}`
+  }
+
+  set(moduleId: string, serviceId: string, instance: unknown): void {
+    this.#byKey.set(StartedServiceRegistry.key(moduleId, serviceId), instance)
+  }
+
+  get(moduleId: string, serviceId: string): unknown {
+    return this.#byKey.get(StartedServiceRegistry.key(moduleId, serviceId))
+  }
+
+  deleteModule(moduleId: string): void {
+    const prefix = `${moduleId}\u0000`
+    for (const key of [...this.#byKey.keys()]) {
+      if (key.startsWith(prefix)) this.#byKey.delete(key)
+    }
+  }
+
+  clear(): void {
+    this.#byKey.clear()
+  }
 }
 
 export interface StartedModuleServices {
@@ -127,6 +172,7 @@ export class ModuleServiceRuntime {
     const log = env.log ?? (() => {})
     const started: Record<string, unknown> = {}
     const disposeFactories: Array<() => Promise<unknown>> = []
+    const registry = env.registry
     const context = (declaration: ModuleServiceDeclaration): ModuleServiceContext => ({
       moduleId,
       version,
@@ -134,7 +180,9 @@ export class ModuleServiceRuntime {
       config: env.config ?? {},
       log: (level, message, data) =>
         log(level, `[${moduleId}/${declaration.id}] ${message}`, data),
-      get: (name) => started[name] ?? env.get?.(name),
+      // Same-module only: `started` belongs to this `start()` call and the
+      // shared registry is queried with this module's id.
+      get: (name) => started[name] ?? registry?.get(moduleId, name),
     })
 
     const disposeAll = async (): Promise<void> => {
@@ -166,6 +214,7 @@ export class ModuleServiceRuntime {
 
         checkInstance(instance, declaration, moduleId, version)
         started[declaration.id] = instance
+        registry?.set(moduleId, declaration.id, instance)
 
         if (typeof instance['dispose'] === 'function') {
           const dispose = instance['dispose'] as () => unknown
