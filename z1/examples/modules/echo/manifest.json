@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.echo",
+  "version": "1.0.0",
+  "title": "Echo example module",
+  "description": "Smallest possible module: turns text into text plus a bang, and proves the worker path.",
+  "author": "z1",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [
+    {
+      "id": "com.example.echo.echo",
+      "version": "1.0.0",
+      "title": "Echo",
+      "category": "example",
+      "inputs": [
+        {
+          "kind": "data",
+          "id": "text",
+          "title": "Text",
+          "schema": { "type": "string" },
+          "required": true
+        }
+      ],
+      "outputs": [
+        {
+          "kind": "data",
+          "id": "text",
+          "title": "Text",
+          "schema": { "type": "string" }
+        },
+        { "kind": "flow", "id": "out", "title": "Out" }
+      ]
+    }
+  ],
+  "capabilities": {
+    "fs": { "read": ["${moduleDir}/**"] }
+  }
+}

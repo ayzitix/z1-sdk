@@ -22,6 +22,8 @@
   "dependencies": {
     "@z1/graph": "workspace:*",
     "@z1/node": "workspace:*",
+    "@z1/module": "workspace:*",
+    "@z1/node-host": "workspace:*",
     "@z1/runtime": "workspace:*",
     "@z1/nodes": "workspace:*",
     "@z1/journal": "workspace:*",

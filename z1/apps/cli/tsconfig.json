@@ -11,6 +11,12 @@
       "path": "../../packages/node"
     },
     {
+      "path": "../../packages/module"
+    },
+    {
+      "path": "../../packages/node-host"
+    },
+    {
       "path": "../../packages/runtime"
     },
     {

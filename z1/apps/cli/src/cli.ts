@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { DatabaseSync } from 'node:sqlite'
@@ -12,7 +14,9 @@ import {
   type ValidationIssue,
 } from '@z1/graph'
 import { SqliteJournal } from '@z1/journal'
+import { ModuleStore, type ModuleCapabilities } from '@z1/module'
 import { createBuiltinRegistry } from '@z1/nodes'
+import { ModuleRuntime, type WorkerHostServices } from '@z1/node-host'
 import { createOpenAiLlmService } from '@z1/provider-openai'
 import { startServer, type Z1Server } from '@z1/server'
 import {
@@ -22,6 +26,7 @@ import {
   type MockApprovalBehavior,
   type RunEvent,
   type RunResult,
+  type RuntimeServices,
 } from '@z1/runtime'
 import type { ChatDelta, ChatRequest, ChatResult, Json } from '@z1/node'
 
@@ -42,9 +47,15 @@ const USAGE = [
   '  validate <graph.json>',
   '  run <graph.json> [--input <json>] [--input-file <path>] [--json] [--trace]',
   '      [--approve auto|ask|deny] [--db <path>] [--suspend] [--resume <runId>] [--live]',
+  '      [--modules-dir <path>] [--no-modules]',
   '  tree [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
   '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
+  '  module list [--modules-dir <path>] [--json]',
+  '  module propose <dir> [--modules-dir <path>] [--json]',
+  '  module approve <id>[@<version>] [--future] [--modules-dir <path>] [--json]',
+  '  module rollback <id> [--modules-dir <path>] [--json]',
+  '  module audit [--modules-dir <path>] [--json]',
   '',
 ].join('\n')
 
@@ -110,6 +121,23 @@ async function readTextFile(path: string): Promise<string> {
     }
   }
   throw new Error(`cannot read "${path}": ${errorMessage(lastError)}`)
+}
+
+/**
+ * Resolve a module directory the way graph paths resolve: relative to the
+ * working directory, then its ancestors. The `z1` script runs from `z1/` while
+ * the documented commands pass repo-root relative paths.
+ */
+function resolveExistingDirectory(path: string): string {
+  if (isAbsolute(path)) return path
+  let directory = process.cwd()
+  while (true) {
+    const candidate = join(directory, path)
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(directory)
+    if (parent === directory) return path
+    directory = parent
+  }
 }
 
 function parseJsonText(text: string, label: string): Json {
@@ -346,6 +374,322 @@ async function validateCommand(args: readonly string[], io: CliIO): Promise<numb
   return 2
 }
 
+const MODULE_COMMANDS = ['list', 'propose', 'approve', 'rollback', 'audit'] as const
+
+interface ModuleCommandValues {
+  json?: boolean
+  future?: boolean
+  'modules-dir'?: string
+}
+
+function modulesDirectory(
+  values: ModuleCommandValues,
+  io: CliIO,
+): string {
+  const env = io.env ?? process.env
+  return values['modules-dir'] ?? env['Z1_MODULES_DIR'] ?? join(homedir(), '.z1', 'modules')
+}
+
+function openModuleStore(directory: string, io: CliIO): ModuleStore | undefined {
+  try {
+    return new ModuleStore(directory)
+  } catch (error) {
+    io.stderr(`cannot open module store "${directory}": ${errorMessage(error)}\n`)
+    return undefined
+  }
+}
+
+/** Human-readable capability grant, also used by `module list`. */
+function capabilitySummary(capabilities: ModuleCapabilities | undefined): string {
+  const parts: string[] = []
+  const read = capabilities?.fs?.read?.length ?? 0
+  const write = capabilities?.fs?.write?.length ?? 0
+  if (read > 0) parts.push(`fs.read[${String(read)}]`)
+  if (write > 0) parts.push(`fs.write[${String(write)}]`)
+  const hosts = capabilities?.net?.hosts?.length ?? 0
+  if (hosts > 0) parts.push(`net[${String(hosts)}]`)
+  const spawn = capabilities?.process?.spawn?.length ?? 0
+  if (spawn > 0) parts.push(`process.spawn[${String(spawn)}]`)
+  if (capabilities?.spend !== undefined) parts.push('spend')
+  const secrets = capabilities?.secrets?.length ?? 0
+  if (secrets > 0) parts.push(`secrets[${String(secrets)}]`)
+  return parts.length > 0 ? parts.join(' ') : 'none'
+}
+
+function splitModuleSpec(spec: string): { moduleId: string; version?: string } {
+  const separator = spec.lastIndexOf('@')
+  if (separator > 0 && separator < spec.length - 1) {
+    return { moduleId: spec.slice(0, separator), version: spec.slice(separator + 1) }
+  }
+  return { moduleId: spec }
+}
+
+async function moduleCommand(args: readonly string[], io: CliIO): Promise<number> {
+  const [subcommand, ...rest] = args
+  switch (subcommand) {
+    case 'list':
+      return moduleListCommand(rest, io)
+    case 'propose':
+      return await moduleProposeCommand(rest, io)
+    case 'approve':
+      return moduleApproveCommand(rest, io)
+    case 'rollback':
+      return moduleRollbackCommand(rest, io)
+    case 'audit':
+      return moduleAuditCommand(rest, io)
+    case undefined:
+      io.stderr(`module requires one of: ${MODULE_COMMANDS.join(', ')}\n`)
+      return usage(io)
+    default:
+      io.stderr(`unknown module subcommand "${subcommand}"\n`)
+      return usage(io)
+  }
+}
+
+function parseModuleArgs(
+  args: readonly string[],
+  io: CliIO,
+): { values: ModuleCommandValues; positionals: string[] } | undefined {
+  try {
+    const parsed = parseArgs({
+      args: [...args],
+      options: {
+        json: { type: 'boolean' },
+        future: { type: 'boolean' },
+        'modules-dir': { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    })
+    return { values: parsed.values, positionals: [...parsed.positionals] }
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    usage(io)
+    return undefined
+  }
+}
+
+function moduleListCommand(args: readonly string[], io: CliIO): number {
+  const parsed = parseModuleArgs(args, io)
+  if (parsed === undefined) return 2
+  if (parsed.positionals.length > 0) return usage(io)
+
+  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  if (store === undefined) return 1
+
+  let modules: ReturnType<ModuleStore['list']>
+  try {
+    modules = store.list()
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+
+  if (parsed.values.json === true) {
+    io.stdout(
+      `${JSON.stringify(
+        modules.map((module) => ({
+          id: module.manifest.id,
+          version: module.manifest.version,
+          active: module.active,
+          integrity: module.integrity,
+          directory: module.directory,
+          capabilities: module.manifest.capabilities ?? {},
+        })),
+      )}\n`,
+    )
+    return 0
+  }
+
+  if (modules.length === 0) {
+    io.stdout('no modules installed\n')
+    return 0
+  }
+  for (const module of modules) {
+    const state = module.active ? 'active' : 'inactive'
+    io.stdout(
+      `${module.manifest.id}@${module.manifest.version}  ${state}  ${module.integrity.slice(0, 12)}  ${capabilitySummary(module.manifest.capabilities)}\n`,
+    )
+  }
+  return 0
+}
+
+async function moduleProposeCommand(args: readonly string[], io: CliIO): Promise<number> {
+  const parsed = parseModuleArgs(args, io)
+  if (parsed === undefined) return 2
+  const directory = parsed.positionals[0]
+  if (directory === undefined || parsed.positionals.length > 1) return usage(io)
+
+  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  if (store === undefined) return 1
+
+  let proposed: ReturnType<ModuleStore['propose']>
+  try {
+    proposed = store.propose(resolveExistingDirectory(directory))
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+
+  if (parsed.values.json === true) {
+    io.stdout(`${JSON.stringify(proposed)}\n`)
+    return 0
+  }
+
+  const { manifest } = proposed
+  const moduleSpec = `${manifest.id}@${manifest.version}`
+  io.stdout(`proposed ${moduleSpec}\n`)
+  io.stdout(`title: ${manifest.title}\n`)
+  io.stdout(`nodes: ${manifest.nodes.map((node) => `${node.id}@${node.version}`).join(', ')}\n`)
+  io.stdout(`capabilities: ${capabilitySummary(manifest.capabilities)}\n`)
+  io.stdout(`integrity: ${proposed.integrity}\n`)
+  io.stdout(`directory: ${proposed.directory}\n`)
+  io.stdout(`next: z1 module approve ${moduleSpec}\n`)
+  return 0
+}
+
+function moduleApproveCommand(args: readonly string[], io: CliIO): number {
+  const parsed = parseModuleArgs(args, io)
+  if (parsed === undefined) return 2
+  const spec = parsed.positionals[0]
+  if (spec === undefined || parsed.positionals.length > 1) return usage(io)
+
+  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  if (store === undefined) return 1
+
+  const { moduleId, version } = splitModuleSpec(spec)
+  let proposals: ReturnType<ModuleStore['proposals']>
+  try {
+    proposals = store.proposals()
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+
+  const matching = proposals.filter((proposal) => proposal.manifest.id === moduleId)
+  const proposal =
+    version === undefined
+      ? matching[matching.length - 1]
+      : matching.find((candidate) => candidate.manifest.version === version)
+  if (proposal === undefined) {
+    io.stderr(
+      version === undefined
+        ? `module "${moduleId}" has no proposal\n`
+        : `module "${moduleId}"@${version} has no proposal\n`,
+    )
+    return 1
+  }
+
+  const chosen = proposal.manifest.version
+  const futureVersions = parsed.values.future === true
+  let installed: ReturnType<ModuleStore['approve']>
+  try {
+    installed = store.approve(moduleId, chosen, { futureVersions })
+    // Approving makes the version the one `run` loads; the store itself keeps
+    // activation explicit so a silent install cannot change a run.
+    installed = store.activate(moduleId, chosen)
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+
+  if (parsed.values.json === true) {
+    io.stdout(
+      `${JSON.stringify({
+        moduleId,
+        version: chosen,
+        integrity: installed.integrity,
+        capabilities: installed.grant.capabilities,
+        futureVersions,
+        active: installed.active,
+        directory: installed.directory,
+      })}\n`,
+    )
+    return 0
+  }
+
+  io.stdout(`approved ${moduleId}@${chosen}\n`)
+  io.stdout(`grant: ${capabilitySummary(installed.grant.capabilities)}\n`)
+  io.stdout(`integrity: ${installed.integrity}\n`)
+  io.stdout(`installed: ${installed.directory}\n`)
+  return 0
+}
+
+function moduleRollbackCommand(args: readonly string[], io: CliIO): number {
+  const parsed = parseModuleArgs(args, io)
+  if (parsed === undefined) return 2
+  const moduleId = parsed.positionals[0]
+  if (moduleId === undefined || parsed.positionals.length > 1) return usage(io)
+
+  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  if (store === undefined) return 1
+
+  let rolledBack: ReturnType<ModuleStore['rollback']>
+  try {
+    rolledBack = store.rollback(moduleId)
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+  if (rolledBack === undefined) {
+    io.stderr(`no earlier version of "${moduleId}" to roll back to\n`)
+    return 1
+  }
+
+  if (parsed.values.json === true) {
+    io.stdout(
+      `${JSON.stringify({
+        moduleId,
+        version: rolledBack.manifest.version,
+        integrity: rolledBack.integrity,
+        directory: rolledBack.directory,
+      })}\n`,
+    )
+    return 0
+  }
+  io.stdout(`rolled back ${moduleId} to ${rolledBack.manifest.version}\n`)
+  return 0
+}
+
+function moduleAuditCommand(args: readonly string[], io: CliIO): number {
+  const parsed = parseModuleArgs(args, io)
+  if (parsed === undefined) return 2
+  if (parsed.positionals.length > 0) return usage(io)
+
+  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  if (store === undefined) return 1
+
+  let entries: ReturnType<ModuleStore['audit']>
+  try {
+    entries = store.audit()
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+
+  if (parsed.values.json === true) {
+    io.stdout(`${JSON.stringify(entries)}\n`)
+    return 0
+  }
+  for (const entry of entries) {
+    const detail = entry.detail === undefined ? '' : JSON.stringify(entry.detail)
+    io.stdout(
+      `${String(entry.seq)}  ${entry.type}  ${entry.moduleId}@${entry.version}  ${detail}\n`,
+    )
+  }
+  return 0
+}
+
+/** The subset of runtime services a module worker is allowed to call. */
+function moduleWorkerServices(services: RuntimeServices): WorkerHostServices {
+  return {
+    llm: services.llm,
+    tools: services.tools,
+    fs: services.fs,
+    approval: services.approval,
+  }
+}
+
 async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   let values: {
     input?: string
@@ -357,6 +701,8 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     suspend?: boolean
     resume?: string
     live?: boolean
+    'modules-dir'?: string
+    'no-modules'?: boolean
   }
   let positionals: string[]
   try {
@@ -372,6 +718,8 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         suspend: { type: 'boolean' },
         resume: { type: 'string' },
         live: { type: 'boolean' },
+        'modules-dir': { type: 'string' },
+        'no-modules': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -413,117 +761,158 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     return 2
   }
 
-  const registry = createBuiltinRegistry()
-  const issues = validateGraphTree(graph, registry)
-  if (issues.length > 0) {
-    for (const issue of issues) io.stderr(`${issueLine(issue)}\n`)
-    return 2
+  const env = io.env ?? process.env
+  const services = createMockRuntimeServices({ approval: approvalBehavior(approve, io) })
+  if (values.live === true) services.llm = new LiveLlmRouter(services.llm, env)
+  if (values.trace === true) {
+    services.onEvent = (event: RunEvent) => io.stderr(`${JSON.stringify(event)}\n`)
   }
 
-  const env = io.env ?? process.env
-  if (values.live === true) {
-    const missing = missingLiveCredential(graph, env)
-    if (missing !== undefined) {
-      io.stderr(missing)
+  const modulesDir =
+    values['modules-dir'] ??
+    env['Z1_MODULES_DIR'] ??
+    join(homedir(), '.z1', 'modules')
+
+  let moduleRuntime: ModuleRuntime | undefined
+  let registry = createBuiltinRegistry()
+  if (values['no-modules'] !== true) {
+    let store: ModuleStore
+    try {
+      store = new ModuleStore(modulesDir)
+    } catch (error) {
+      io.stderr(`cannot open module store "${modulesDir}": ${errorMessage(error)}\n`)
       return 1
     }
-  }
 
-  const dbPath = values.db ?? '.z1/runs.db'
-  let journal: SqliteJournal
-  try {
-    journal = new SqliteJournal(dbPath)
-  } catch (error) {
-    io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
-    return 1
-  }
-
-  const resume = values.resume
-  const runId = resume ?? `run_${randomUUID()}`
-
-  try {
-    const now = Date.now()
-    if (resume !== undefined) {
-      if (journal.getRun(runId) === undefined) {
-        io.stderr(`unknown run "${runId}"\n`)
+    // Spawning a worker per module is only worth it when one is active; an
+    // empty store keeps `run` exactly as fast and as isolated as before.
+    if (store.list().some((module) => module.active)) {
+      const runtime = new ModuleRuntime({
+        store,
+        services: moduleWorkerServices(services),
+        baseRegistry: registry,
+        onCapabilityDenied: (info) => {
+          store.recordDenied(info.moduleId, info.version, `${info.kind}: ${info.detail}`)
+        },
+      })
+      moduleRuntime = runtime
+      try {
+        registry = await runtime.start()
+      } catch (error) {
+        io.stderr(`cannot load modules from "${modulesDir}": ${errorMessage(error)}\n`)
+        await runtime.dispose()
         return 1
       }
-      journal.updateRun(runId, { status: 'running', updatedAt: now })
-    } else {
-      journal.createRun({
-        runId,
-        graphId: graph.id,
-        graphDigest: graphDigest(graph),
-        status: 'running',
-        createdAt: now,
-        updatedAt: now,
-      })
+    }
+  }
+
+  try {
+    const issues = validateGraphTree(graph, registry)
+    if (issues.length > 0) {
+      for (const issue of issues) io.stderr(`${issueLine(issue)}\n`)
+      return 2
     }
 
-    const services = createMockRuntimeServices({ approval: approvalBehavior(approve, io) })
-    if (values.live === true) services.llm = new LiveLlmRouter(services.llm, env)
-    if (values.trace === true) {
-      services.onEvent = (event: RunEvent) => io.stderr(`${JSON.stringify(event)}\n`)
+    if (values.live === true) {
+      const missing = missingLiveCredential(graph, env)
+      if (missing !== undefined) {
+        io.stderr(missing)
+        return 1
+      }
     }
 
-    let result: RunResult
+    const dbPath = values.db ?? '.z1/runs.db'
+    let journal: SqliteJournal
     try {
-      result = await runGraph({
-        graph,
-        registry,
-        services,
-        input,
-        journal,
-        runId,
-        ...(resume !== undefined ? { resume: true } : {}),
-        ...(values.suspend === true ? { suspendOnApproval: true } : {}),
-      })
+      journal = new SqliteJournal(dbPath)
     } catch (error) {
-      journal.updateRun(runId, { status: 'failed', updatedAt: Date.now() })
-      io.stderr(`run failed: ${errorMessage(error)}\n`)
+      io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
       return 1
     }
 
-    journal.updateRun(runId, { status: result.status, updatedAt: Date.now() })
+    const resume = values.resume
+    const runId = resume ?? `run_${randomUUID()}`
 
-    if (values.json === true) {
-      io.stdout(
-        `${JSON.stringify({
-          runId: result.runId,
-          status: result.status,
-          outputs: result.outputs,
-          ...(result.pendingApproval !== undefined
-            ? { pendingApproval: result.pendingApproval }
-            : {}),
-        })}\n`,
-      )
-    } else {
-      io.stdout(`status: ${result.status}\n`)
-      // Partial outputs of a failed run are internal: replaying them as a result
-      // would look like the graph produced them on purpose.
-      if (result.status !== 'failed') {
-        for (const [name, value] of Object.entries(result.outputs)) {
-          io.stdout(`${name} = ${JSON.stringify(value)}\n`)
+    try {
+      const now = Date.now()
+      if (resume !== undefined) {
+        if (journal.getRun(runId) === undefined) {
+          io.stderr(`unknown run "${runId}"\n`)
+          return 1
         }
+        journal.updateRun(runId, { status: 'running', updatedAt: now })
+      } else {
+        journal.createRun({
+          runId,
+          graphId: graph.id,
+          graphDigest: graphDigest(graph),
+          status: 'running',
+          createdAt: now,
+          updatedAt: now,
+        })
       }
-      if (result.status === 'suspended') io.stdout(`run: ${result.runId}\n`)
-    }
 
-    if (result.status === 'suspended' && result.pendingApproval !== undefined) {
-      const request = result.pendingApproval.request
-      const target = request.target === undefined ? '' : ` ${request.target}`
-      io.stderr(`pending approval: ${request.action}${target}\n`)
-    }
+      let result: RunResult
+      try {
+        result = await runGraph({
+          graph,
+          registry,
+          services,
+          input,
+          journal,
+          runId,
+          ...(resume !== undefined ? { resume: true } : {}),
+          ...(values.suspend === true ? { suspendOnApproval: true } : {}),
+        })
+      } catch (error) {
+        journal.updateRun(runId, { status: 'failed', updatedAt: Date.now() })
+        io.stderr(`run failed: ${errorMessage(error)}\n`)
+        return 1
+      }
 
-    if (result.status === 'failed' && result.error !== undefined) {
-      io.stderr(`error: ${result.error}\n`)
+      journal.updateRun(runId, { status: result.status, updatedAt: Date.now() })
+
+      if (values.json === true) {
+        io.stdout(
+          `${JSON.stringify({
+            runId: result.runId,
+            status: result.status,
+            outputs: result.outputs,
+            ...(result.pendingApproval !== undefined
+              ? { pendingApproval: result.pendingApproval }
+              : {}),
+          })}\n`,
+        )
+      } else {
+        io.stdout(`status: ${result.status}\n`)
+        // Partial outputs of a failed run are internal: replaying them as a result
+        // would look like the graph produced them on purpose.
+        if (result.status !== 'failed') {
+          for (const [name, value] of Object.entries(result.outputs)) {
+            io.stdout(`${name} = ${JSON.stringify(value)}\n`)
+          }
+        }
+        if (result.status === 'suspended') io.stdout(`run: ${result.runId}\n`)
+      }
+
+      if (result.status === 'suspended' && result.pendingApproval !== undefined) {
+        const request = result.pendingApproval.request
+        const target = request.target === undefined ? '' : ` ${request.target}`
+        io.stderr(`pending approval: ${request.action}${target}\n`)
+      }
+
+      if (result.status === 'failed' && result.error !== undefined) {
+        io.stderr(`error: ${result.error}\n`)
+      }
+      return exitCodeFor(result.status)
+    } catch (error) {
+      io.stderr(`run failed: ${errorMessage(error)}\n`)
+      return 1
+    } finally {
+      journal.close()
     }
-    return exitCodeFor(result.status)
-  } catch (error) {
-    io.stderr(`run failed: ${errorMessage(error)}\n`)
-    return 1
   } finally {
-    journal.close()
+    await moduleRuntime?.dispose()
   }
 }
 
@@ -815,6 +1204,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return await forkCommand(rest, io)
     case 'serve':
       return await serveCommand(rest, io)
+    case 'module':
+      return await moduleCommand(rest, io)
     default:
       io.stderr(`unknown command "${command}"\n`)
       return usage(io)

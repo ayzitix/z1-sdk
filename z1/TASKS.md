@@ -47,8 +47,18 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   console errors).
 - [x] T20 Review + commit.
 
+## M4 — executable modules
+
+- [ ] T21 `@z1/module`: manifest schema, capability model, integrity,
+  local store, grants, rollback, hash-chained audit log.
+- [ ] T22 `@z1/node-host`: child-process worker, Node permission flags,
+  capability RPC (llm/tools/fs/net/approval), streaming, cancel, crash containment.
+- [ ] T23 Runtime/CLI integration: load installed modules into the registry,
+  `z1 module list/propose/approve/rollback`, end-to-end fixture module.
+- [ ] T24 Protocol/server/canvas: module inventory + approval panel.
+- [ ] T25 Review + commit.
+
 ## Later
 
-- Module packaging/approval/rollback and sandboxed worker host (M4).
 - Agent-as-graph template + context assembly from the branch tree (M5).
 - z1-app editor integration (M6).

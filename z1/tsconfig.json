@@ -9,6 +9,9 @@
       "path": "./packages/node"
     },
     {
+      "path": "./packages/module"
+    },
+    {
       "path": "./packages/runtime"
     },
     {
@@ -28,6 +31,9 @@
     },
     {
       "path": "./packages/host-dsh"
+    },
+    {
+      "path": "./packages/node-host"
     },
     {
       "path": "./apps/cli"
