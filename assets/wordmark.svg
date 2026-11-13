@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 220" role="img" aria-label="z1 sdk">
+  <g transform="translate(0,30) scale(0.3125)">
+    <rect x="16" y="16" width="480" height="480" rx="112" fill="#0b0b0b"/>
+    <g fill="none" stroke="#ffffff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M150 168 H302 L150 344 H302"/>
+      <path d="M362 168 L404 138 V344"/>
+      <path d="M352 344 H424"/>
+    </g>
+    <g fill="#ffffff">
+      <circle cx="150" cy="168" r="11"/>
+      <circle cx="302" cy="168" r="11"/>
+      <circle cx="150" cy="344" r="11"/>
+      <circle cx="302" cy="344" r="11"/>
+      <circle cx="404" cy="138" r="11"/>
+    </g>
+  </g>
+  <text x="196" y="140" fill="#0b0b0b" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="92" font-weight="700" letter-spacing="-4">z1 sdk</text>
+</svg>

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" role="img" aria-label="z1 sdk — everything is a module">
+  <rect width="1280" height="360" fill="#f7f7f5"/>
+  <g transform="translate(96,100) scale(0.3125)">
+    <rect x="16" y="16" width="480" height="480" rx="112" fill="#0b0b0b"/>
+    <g fill="none" stroke="#ffffff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M150 168 H302 L150 344 H302"/>
+      <path d="M362 168 L404 138 V344"/>
+      <path d="M352 344 H424"/>
+    </g>
+    <g fill="#ffffff">
+      <circle cx="150" cy="168" r="11"/>
+      <circle cx="302" cy="168" r="11"/>
+      <circle cx="150" cy="344" r="11"/>
+      <circle cx="302" cy="344" r="11"/>
+      <circle cx="404" cy="138" r="11"/>
+    </g>
+  </g>
+  <text x="300" y="178" fill="#0b0b0b" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="76" font-weight="700" letter-spacing="-3">z1 sdk</text>
+  <text x="302" y="230" fill="#555555" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="25">Everything is a module. A module is a node.</text>
+  <g stroke="#d2d2ce" stroke-width="2" fill="none">
+    <path d="M846 128 L946 88 L1046 148 L1160 96"/>
+    <path d="M946 88 L972 232 L1086 276"/>
+    <path d="M1046 148 L1086 276"/>
+  </g>
+  <g fill="#d2d2ce">
+    <circle cx="846" cy="128" r="6"/>
+    <circle cx="1046" cy="148" r="6"/>
+    <circle cx="1160" cy="96" r="6"/>
+    <circle cx="972" cy="232" r="6"/>
+  </g>
+  <g fill="#0b0b0b">
+    <circle cx="946" cy="88" r="8"/>
+    <circle cx="1086" cy="276" r="8"/>
+  </g>
+</svg>

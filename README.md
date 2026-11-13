@@ -1,29 +1,79 @@
-<div align="center">
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner.svg" alt="z1 sdk — everything is a module" width="100%">
+  </picture>
+</p>
 
-# z1 sdk
+<p align="center">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-0b0b0b?style=flat-square"></a>
+  <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A524.9-0b0b0b?style=flat-square">
+  <img alt="tests" src="https://img.shields.io/badge/tests-690-0b0b0b?style=flat-square">
+  <img alt="status" src="https://img.shields.io/badge/status-early-0b0b0b?style=flat-square">
+</p>
 
-**A modular agent SDK. Everything is a module; a module is a node.**
+<p align="center">
+  <strong>A modular agent SDK where everything is a node.</strong><br>
+  Journaled graph runtime · branch memory · sandboxed modules · headless server · canvas
+</p>
 
-</div>
+---
 
-z1 is a node-graph agent SDK. Model providers, tools, filesystem access and the
-agent loop itself are executable nodes with typed ports; a workflow is assembled
-on a canvas instead of prompted into a chat window. Runs are journaled, approval
-is per node, and the history is a tree you can fork.
+## What is z1?
 
-Built on the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
-engine (MIT), which contributes the plugin runtime, sessions, providers, tools
-and sandboxes. The node-graph layer lives in [`z1/`](z1/SPEC.md) and does not
-modify the engine.
+z1 is an agent runtime built as a **graph of executable nodes** instead of a chat
+loop. A model provider, a tool call, filesystem access, the prompt itself, and the
+agent loop are all modules with declared inputs and outputs. A workflow is
+assembled, not prompted.
 
-## Status
+The runtime is small and durable: every node execution is a checkpoint in an
+append-only journal, a run can resume after a crash, a fork is a pointer rather
+than a copy, and approvals are data on the node rather than a global switch.
 
-**Working prototype.** The graph engine, durable journal, resume, approvals,
-branch forks, sandboxed executable modules with an approval panel, the agent
-loop as a real graph, branch-tree memory, a headless server, real
-OpenAI-compatible models and a browser canvas are implemented and tested
-(651 tests). Not implemented yet: editor integration and OS-level sandboxing
-for untrusted modules.
+```
+chat / CLI / canvas
+        │
+        ▼
+   graph template ──► executor ──► nodes
+                                      │
+                    journal ◄─────────┤
+                    branches ◄────────┤
+                    services ◄────────┘ (llm · fs · tools)
+                                      │
+                                      ▼
+                               worker modules
+```
+
+## Why
+
+- **Everything is a module.** Nodes, services, providers and graph templates are
+  packages with manifests. Third-party code is installed with an explicit grant,
+  runs in a child process, and reports every capability call back to the host.
+- **A graph run is the primitive.** The agent loop is a graph you can read, diff
+  and fork — not hidden control flow.
+- **The prompt is a graph.** Sections are nodes, the stack is a node, and the
+  rendered hash is journaled, so the prompt behind any branch is reproducible.
+- **Memory is the run tree.** Ancestors, siblings and recent steps become a
+  context envelope; a sibling records what was tried, not what is true.
+- **Approvals are per node.** `auto`, `ask`, `deny`, with runtime escalation as a
+  separate decision. A paused run is persisted, not a parked process.
+
+## Architecture
+
+```mermaid
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+  U[chat · CLI · canvas] --> T[graph template]
+  T --> G[graph document]
+  G --> E[executor]
+  E --> N[nodes]
+  N --> J[(run journal)]
+  N --> M[(branch memory)]
+  N --> S[services<br/>llm · fs · tools]
+  S --> W[worker module]
+  W --> C[capability broker]
+  C --> N
+```
 
 ## Quick start
 
@@ -31,81 +81,35 @@ Requires **Node.js 24.9+** and **pnpm 11**.
 
 ```bash
 pnpm install
-pnpm z1:build                 # typecheck every z1 package
-pnpm z1:test                  # 220 tests
+pnpm -C z1 build                 # typecheck every package
+pnpm -C z1 test                  # 690 tests
 
-# run a graph with the deterministic mock model
-pnpm z1 run z1/examples/hello.graph.json --input '{"name":"world"}'
-
-# run it with a real model (OpenAI-compatible endpoint)
-export RIVER_API_KEY=...
-pnpm z1 run z1/examples/agent.live.graph.json --live --input '"hello"'
-
-# inspect the run tree and fork a branch
-pnpm z1 tree
-pnpm z1 fork <runId> --at chat
-pnpm z1 run <graph> --resume <forkedRunId>
-
-# the agent loop as a graph (tool call, loop, memory)
-pnpm z1 run z1/examples/agent.loop.graph.json --message '[[tool:echo]] hi'
-
-# or run a template without a graph file
+# run the agent loop with the deterministic mock model
 pnpm z1 run --template agent.loop --message '[[tool:echo]] hi'
-pnpm z1 template list
 
-# executable modules: propose, review, approve, then run
-pnpm z1 module propose z1/examples/modules/echo
-pnpm z1 module approve com.example.echo
-pnpm z1 module list
-pnpm z1 memory context <runId>
+# real model (OpenAI-compatible endpoint)
+export RIVER_API_KEY=...
+pnpm z1 run --template agent.loop --live \
+  --model river/deepseek-ai/DeepSeek-V4.1-Flash --message 'hello'
+
+# canvas from one process
+pnpm z1:canvas:build
+pnpm z1 studio
 ```
 
-Commands: `z1 list`, `z1 validate`, `z1 run`, `z1 tree`, `z1 fork`, `z1 serve`.
-Run state lives in `.z1/runs.db` (SQLite).
+## Commands
 
-### Canvas
+| Command | What it does |
+| --- | --- |
+| `z1 run --template <id>` | run a graph template without a graph file |
+| `z1 run <graph.json>` | run a graph document |
+| `z1 tree` / `z1 fork` | inspect the run tree, fork a branch |
+| `z1 memory context <run>` | print the branch-tree context envelope |
+| `z1 module propose/approve/list` | review and install executable modules |
+| `z1 serve` | headless WebSocket server |
+| `z1 studio` | server + built canvas in one process |
 
-```bash
-pnpm z1 studio               # server + built canvas, one command, opens the browser
-```
-
-`z1 studio` serves the canvas and the WebSocket API from one process and prints
-the URL with the token. Graph documents are stored server-side
-(`.z1/graphs/<id>.json`) with versions; the canvas autosaves, detects write
-conflicts, and can create empty or hello graphs. The inspector shows the last
-run of the selected node (status, duration, outputs, prompt hash, fork), and the
-runs panel is a branch tree with a per-run timeline.
-
-For development with hot reload:
-
-```bash
-pnpm z1 serve --json          # prints {"url":"ws://…","token":"…"}
-pnpm z1:canvas                # Vite dev server on :5173
-```
-
-Open the canvas, paste the URL and token (or pass `?url=…&token=…`), then
-connect, load a graph JSON, press Run. Approvals appear as a dialog; the runs
-panel lists branches and forks; the modules panel proposes, approves and rolls
-back executable modules and shows the audit log.
-
-## How it works
-
-A **module** is an npm package. It contributes **nodes** (typed data inputs and
-outputs, plus explicit flow edges) and may contribute services. A module can
-also be **service-only** (`nodes: []`): it declares an ambient service such as
-`llm`, `tools`, `fs`, `artifacts` or `memory`, and once approved the runtime
-uses it instead of the built-in default. Services default to `mode: "worker"`
-(sandboxed child process, same capability broker as nodes); `mode: "host"` with
-`trusted: true` runs them in-process.
-
-Each active module gets **one child process**, shared by its nodes and its
-worker services: a node and the module's `llm` service report the same
-`process.pid`, and that child is reused by every later run of the runtime. A
-crashed child is respawned lazily by the next call, so one failed run does not
-poison later ones. A per-run switch (`useServiceModules`, CLI
-`--no-service-modules`) excludes services for that run only; the node modules
-keep running, and the next run can use the service again.
- A node is real code:
+## The node contract
 
 ```ts
 export const chat = defineNode({
@@ -128,121 +132,48 @@ export const chat = defineNode({
 })
 ```
 
-Execution is a hybrid scheduler: data ports are pulled from cache, flow edges
-order side effects. Cycles live only inside `flow.loop`, `flow.map` or a
-subgraph. Every node execution is a checkpoint in an append-only SQLite journal;
-a run resumes from it, and `fork` is a pointer, not a copy.
+Data ports are pulled from cache; flow edges order side effects. Cycles live only
+inside `flow.loop`, `flow.map` or a subgraph. Nested runs carry an iteration label,
+so a fork inside a loop replays only the earlier iterations.
 
-Approval is data on the node instance — `auto`, `ask` or `deny` — with runtime
-escalation as a separate decision. The server sends an `approval/request` over
-JSON-RPC and the canvas answers it. A paused run is persisted as
-`run.suspended`, not a parked process.
-
-The branch tree is the long-term memory: every node completion is a node in the
-tree, non-taken siblings are recorded as history, summaries are regenerated
-lazily with provenance back to the node or artifact, and `memory.context`
-injects an ancestor/sibling/recent envelope into the agent graph.
-
-The system prompt is a graph too. `prompt.section` nodes carry one section each
-(identity, success, graph contract, autonomy, loop, editing, failure, memory,
-communication, output, role), `core.concat` collects them and `prompt.stack`
-orders, deduplicates, budget-cuts and hashes the result; `llm.chat.system`
-consumes the text. Edit one section on the canvas, rewire the stack, or replace
-the whole thing with `prompt.text` — the run records the stack hash, so the
-prompt that produced a branch is reproducible.
-
-Modules are reviewed before they run. A module is an npm-shaped directory with a
-manifest (id, version, integrity, declared ports and capabilities) and a
-dependency-free ESM entry. `z1 module propose` copies it to a proposal store;
-`z1 module approve` installs an immutable version, records a grant and an audit
-entry. **The grant is the authority**: it may approve less than the manifest
-requests, and `z1 module list` shows the granted capabilities and services (the
-manifest is only the request). `z1 run --no-modules` removes the whole module
-layer — node modules and services, host and worker alike — from that run. A
-worker service that asks for approval is routed to the run that started the
-call, so an allow or reject reaches the same connection and no other run can
-answer it. At run time each module executes in a child process under Node's
-permission model, and every `ctx.*` capability call is checked against the
-manifest. Node's permission model does not block direct sockets, so untrusted
-modules still need an OS-level sandbox — this is documented in
-`z1/packages/node-host/README.md`.
-
-## Repository
+## What is in the repo
 
 | Path | Contents |
 | --- | --- |
-| `z1/packages/node` | node contract, ports, capabilities, autonomy, registry |
-| `z1/packages/graph` | graph document, validation, digest |
-| `z1/packages/runtime` | executor, cache, approvals, resume, nested runs |
-| `z1/packages/nodes` | core, flow, subgraph, llm and tool nodes |
-| `z1/packages/journal` | SQLite journal, forks, content-addressed blobs |
-| `z1/packages/module` | manifest, capabilities, integrity, store, grants, audit |
-| `z1/packages/node-host` | sandboxed child-process worker and capability RPC |
-| `z1/packages/memory` | branch-tree queries and context envelopes |
-| `z1/packages/agent` | the default agent loop as a graph |
-| `z1/packages/prompt` | prompt sections, role presets, stacking and hashing |
-| `z1/packages/protocol` | JSON-RPC 2.0 transport and method map |
-| `z1/packages/bootstrap` | one runtime composition from `z1.config.json` |
-| `z1/packages/provider` | provider registry and routing |
-| `z1/packages/template` | graph templates: builder and static, loaded by id |
-| `z1/packages/server` | headless WebSocket server |
-| `z1/packages/provider-openai` | OpenAI-compatible streaming provider |
-| `z1/apps/cli` | the `z1` executable |
-| `z1/apps/canvas` | React Flow canvas |
-| `z1/SPEC.md`, `z1/TASKS.md` | contract and milestone board |
+| `z1/packages/node`, `graph`, `runtime` | the kernel: contract, document, executor |
+| `z1/packages/nodes` | core, flow, llm, tool and prompt nodes |
+| `z1/packages/prompt` | sections, role presets, stacking and hashing |
+| `z1/packages/journal` | SQLite run journal, forks, blobs |
+| `z1/packages/memory`, `agent` | branch context and the agent loop as a graph |
+| `z1/packages/module`, `node-host` | executable modules and the worker sandbox |
+| `z1/packages/provider`, `template`, `bootstrap` | providers, templates, one runtime |
+| `z1/packages/protocol`, `server` | JSON-RPC over WebSocket and the headless server |
+| `z1/apps/cli`, `canvas` | the `z1` command and the React Flow canvas |
 | `packages/*`, `apps/*` | the upstream DeepSeek Harness engine |
-| `native`, `vendor`, `patches` | native addon, vendored Cordis packages, patches |
 
-The upstream engine still builds with its 10 gates (`pnpm run build`); the z1
-layer is a separate workspace group with its own tsconfig and test runner.
+## Status
 
-## Configuration
+**Early.** The graph engine, journal, resume, approvals, forks, prompt nodes,
+sandboxed modules, server and canvas are implemented and tested (690 tests). The
+upstream engine still builds with its 10 gates.
 
-`z1.config.json` (optional, in the working directory) configures one runtime for
-the CLI and the server:
+Not in this repository:
 
-```json
-{
-  "dbPath": ".z1/runs.db",
-  "graphsPath": ".z1/graphs",
-  "modulesPath": "~/.z1/modules",
-  "templatesPath": ".z1/templates",
-  "live": false,
-  "useModules": true,
-  "useMemory": true,
-  "providers": [
-    { "id": "river", "envKey": "RIVER_API_KEY", "baseURL": "https://api.river.ai/v1" },
-    { "id": "local", "envKey": "LOCAL_API_KEY", "baseURL": "http://127.0.0.1:11434/v1" }
-  ]
-}
-```
+- **concrete tools** — they live in a separate `z1-tools` package/repository; the
+  SDK keeps only the tools service contract and brokered capabilities;
+- **editor integration** — the canvas is a standalone app for now;
+- **OS-level sandboxing** for untrusted modules — Node's permission model is not
+  a network boundary, which is documented in `z1/packages/node-host/README.md`.
 
-Precedence: CLI flags > environment (`Z1_DB`, `Z1_GRAPHS_DIR`,
-`Z1_MODULES_DIR`, `Z1_TEMPLATES_DIR`, `Z1_LIVE`, `Z1_PROVIDERS`) > file > defaults. A provider is
-data: add one by config, not by editing the CLI. See
-[`z1.config.example.json`](z1.config.example.json). Static graph templates are
-`*.json` files under `templatesPath`, listed by `z1 template list` and run with
-`z1 run --template <id>`.
+## Documentation
 
-## Providers
-
-Bring your own key. The built-in OpenAI-compatible provider talks to any
-`/chat/completions` endpoint — River, OpenAI, or a local server — with streaming
-text, reasoning deltas and tool calls. Configure it with env vars:
-
-```bash
-export RIVER_API_KEY=...            # provider "river" in the graph
-export Z1_OPENAI_BASE_URL=...       # optional endpoint override
-pnpm z1 run <graph> --live
-```
-
-Rate limits are retried with exponential backoff and `retry-after`;
-`Z1_LLM_RETRY_ATTEMPTS`, `Z1_LLM_RETRY_BASE_MS` and `Z1_LLM_RETRY_MAX_MS` tune
-the budget. A live River turn was verified end to end: the model returned a tool
-call, the tool ran, and a second model round produced the final answer.
+- [`z1/SPEC.md`](z1/SPEC.md) — node, graph, executor, journal and module contracts
+- [`z1/TASKS.md`](z1/TASKS.md) — what was built, milestone by milestone
+- [`z1/README.md`](z1/README.md) — service modules and the trust boundary
+- [`NOTICE.md`](NOTICE.md) — fork provenance and what changed upstream
 
 ## Licence
 
 MIT. The upstream copyright notice is kept in [LICENSE](LICENSE); third-party
 components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and
-what this fork changed is recorded in [NOTICE.md](NOTICE.md).
+the fork is described in [NOTICE.md](NOTICE.md).

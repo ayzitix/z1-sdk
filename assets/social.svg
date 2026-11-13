@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-label="z1 sdk">
+  <defs>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0 H0 V64" fill="none" stroke="#161616" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="640" fill="#0b0b0b"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <g transform="translate(96,180) scale(0.45)">
+    <rect x="16" y="16" width="480" height="480" rx="112" fill="#f5f5f3"/>
+    <g fill="none" stroke="#0b0b0b" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M150 168 H302 L150 344 H302"/>
+      <path d="M362 168 L404 138 V344"/>
+      <path d="M352 344 H424"/>
+    </g>
+    <g fill="#0b0b0b">
+      <circle cx="150" cy="168" r="11"/>
+      <circle cx="302" cy="168" r="11"/>
+      <circle cx="150" cy="344" r="11"/>
+      <circle cx="302" cy="344" r="11"/>
+      <circle cx="404" cy="138" r="11"/>
+    </g>
+  </g>
+  <text x="380" y="330" fill="#f5f5f3" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="112" font-weight="700" letter-spacing="-5">z1 sdk</text>
+  <text x="384" y="404" fill="#a3a3a3" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="32">Everything is a module. A module is a node.</text>
+  <text x="384" y="500" fill="#6a6a6a" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22">journaled graph runtime · branch memory · sandboxed modules</text>
+  <text x="96" y="576" fill="#5a5a5a" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20">github.com/ayzitix/z1-sdk</text>
+  <g stroke="#232323" stroke-width="2" fill="none">
+    <path d="M920 150 L1030 104 L1140 170 L1218 128"/>
+    <path d="M1030 104 L1054 280 L1178 330"/>
+    <path d="M1140 170 L1178 330"/>
+  </g>
+  <g fill="#3a3a3a">
+    <circle cx="920" cy="150" r="5"/>
+    <circle cx="1140" cy="170" r="5"/>
+    <circle cx="1218" cy="128" r="5"/>
+    <circle cx="1054" cy="280" r="5"/>
+  </g>
+  <g fill="#f5f5f3">
+    <circle cx="1030" cy="104" r="7"/>
+    <circle cx="1178" cy="330" r="7"/>
+  </g>
+</svg>
