@@ -20,6 +20,12 @@
       "path": "../journal"
     },
     {
+      "path": "../module"
+    },
+    {
+      "path": "../node-host"
+    },
+    {
       "path": "../protocol"
     },
     {

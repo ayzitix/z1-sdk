@@ -19,12 +19,15 @@
   "dependencies": {
     "@z1/graph": "workspace:*",
     "@z1/journal": "workspace:*",
+    "@z1/module": "workspace:*",
     "@z1/node": "workspace:*",
+    "@z1/node-host": "workspace:*",
     "@z1/nodes": "workspace:*",
     "@z1/protocol": "workspace:*",
     "@z1/provider-openai": "workspace:*",
     "@z1/runtime": "workspace:*",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1"

@@ -564,6 +564,87 @@ code {
   border-top: 1px solid var(--line);
 }
 
+/* --- modules panel ------------------------------------------------------ */
+
+.modules-panel {
+  border-top: 1px solid var(--line);
+}
+
+.modules-panel.is-open {
+  height: 280px;
+}
+
+.modules-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.modules-section h3 {
+  margin: 0 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.module-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.module-id {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--ink);
+}
+
+.module-badge {
+  padding: 0 4px;
+  border: 1px solid var(--ink);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.module-meta {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.module-error {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink);
+}
+
+.module-propose-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.module-propose-bar input {
+  flex: 1;
+  min-width: 0;
+}
+
+.module-audit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+}
+
 .runs-list {
   overflow-y: auto;
   padding: 6px;

@@ -43,6 +43,9 @@ The `z1/` workspace is new code, not derived from the upstream project:
 - `@z1/node`, `@z1/graph`, `@z1/runtime`, `@z1/nodes` — the node contract, graph
   document, executor and built-in nodes
 - `@z1/journal` — SQLite run journal with forks and blobs
+- `@z1/module`, `@z1/node-host` — executable module manifest/store and the
+  sandboxed child-process worker
+- `@z1/memory`, `@z1/agent` — branch-tree context and the agent loop as a graph
 - `@z1/protocol`, `@z1/server` — JSON-RPC over WebSocket and the headless server
 - `@z1/provider-openai` — OpenAI-compatible streaming provider
 - `@z1/cli`, `@z1/canvas` — the `z1` command and the browser canvas

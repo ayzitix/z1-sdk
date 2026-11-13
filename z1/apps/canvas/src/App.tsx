@@ -4,6 +4,7 @@ import type { ReactElement } from 'react'
 import { ApprovalDialog } from './components/ApprovalDialog.tsx'
 import { GraphCanvas } from './components/GraphCanvas.tsx'
 import { Inspector } from './components/Inspector.tsx'
+import { ModulesPanel } from './components/ModulesPanel.tsx'
 import { OutputsPanel } from './components/OutputsPanel.tsx'
 import { Palette } from './components/Palette.tsx'
 import { RunsPanel } from './components/RunsPanel.tsx'
@@ -25,6 +26,7 @@ export function App(): ReactElement {
           <OutputsPanel />
         </aside>
       </main>
+      <ModulesPanel />
       <RunsPanel />
       <ApprovalDialog />
     </div>

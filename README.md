@@ -19,10 +19,11 @@ modify the engine.
 ## Status
 
 **Working prototype.** The graph engine, durable journal, resume, approvals,
-branch forks, sandboxed executable modules, the agent loop as a real graph,
-branch-tree memory, a headless server, real OpenAI-compatible models and a
-browser canvas are implemented and tested (326 tests). Not implemented yet:
-the module approval panel in the canvas and editor integration.
+branch forks, sandboxed executable modules with an approval panel, the agent
+loop as a real graph, branch-tree memory, a headless server, real
+OpenAI-compatible models and a browser canvas are implemented and tested
+(342 tests). Not implemented yet: editor integration and OS-level sandboxing
+for untrusted modules.
 
 ## Quick start
 
@@ -67,7 +68,8 @@ pnpm z1:canvas                # Vite dev server on :5173
 
 Open the canvas, paste the URL and token (or pass `?url=…&token=…`), then
 connect, load a graph JSON, press Run. Approvals appear as a dialog; the runs
-panel lists branches and forks.
+panel lists branches and forks; the modules panel proposes, approves and rolls
+back executable modules and shows the audit log.
 
 ## How it works
 

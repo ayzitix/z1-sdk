@@ -11,6 +11,7 @@
 
 import type { ValidationIssue } from '@z1/graph'
 import type { RunRecord, RunStatus } from '@z1/journal'
+import type { AuditEntry, ModuleCapabilities } from '@z1/module'
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -21,6 +22,7 @@ import type {
 import type { PendingApproval, RunEvent } from '@z1/runtime'
 
 export type { RunStatus }
+export type { AuditEntry, ModuleCapabilities }
 
 /** JSON-RPC request id: a string or a number, echoed verbatim in the response. */
 export type JsonRpcId = string | number
@@ -133,8 +135,8 @@ export interface InitializeResult {
   capabilities: {
     runs: true
     approvals: true
-    /** Module packaging ships after M3. */
-    modules: false
+    /** Module propose/approve/rollback/audit are served on this connection. */
+    modules: boolean
   }
 }
 
@@ -230,6 +232,67 @@ export interface ArtifactGetResult {
   base64: string
 }
 
+// --- modules ---------------------------------------------------------------
+
+/** One declared node as the module panel shows it, flattened to counts. */
+export interface ModuleNodeSummary {
+  id: string
+  title: string
+  category: string
+  inputs: number
+  outputs: number
+}
+
+/** One installed module version, active or not. */
+export interface ModuleSummary {
+  moduleId: string
+  version: string
+  title: string
+  integrity: string
+  active: boolean
+  capabilities: ModuleCapabilities
+  nodes: ModuleNodeSummary[]
+}
+
+/** A proposed module directory that has not been approved yet. */
+export interface ProposalSummary {
+  moduleId: string
+  version: string
+  title: string
+  integrity: string
+  capabilities: ModuleCapabilities
+  directory: string
+}
+
+export type ModuleListParams = EmptyParams
+
+export interface ModuleListResult {
+  modules: ModuleSummary[]
+  proposals: ProposalSummary[]
+}
+
+export interface ModuleProposeParams {
+  /** Directory that holds `z1.module.json`/`manifest.json`; resolved server-side. */
+  directory: string
+}
+
+export interface ModuleApproveParams {
+  moduleId: string
+  /** Exact version of an existing proposal, never a range. */
+  version: string
+  /** Accept later versions of the same module without a new approval. */
+  futureVersions?: boolean
+}
+
+export interface ModuleRollbackParams {
+  moduleId: string
+}
+
+export type ModuleAuditParams = EmptyParams
+
+export type ModuleAuditResult = AuditEntry[]
+
+
 /**
  * The outcome of a `run.start`/`run.resume`. `error` is the engine's message;
  * `pendingApproval` is set when the run suspended on an `ask` node.
@@ -284,6 +347,11 @@ export interface MethodMap extends ClientMethodMap {
   'run.fork': { params: RunForkParams; result: RunForkResult }
   'approval.respond': { params: ApprovalRespondParams; result: EmptyParams }
   'artifact.get': { params: ArtifactGetParams; result: ArtifactGetResult }
+  'module.list': { params: ModuleListParams; result: ModuleListResult }
+  'module.propose': { params: ModuleProposeParams; result: ProposalSummary }
+  'module.approve': { params: ModuleApproveParams; result: ModuleSummary }
+  'module.rollback': { params: ModuleRollbackParams; result: ModuleSummary }
+  'module.audit': { params: ModuleAuditParams; result: ModuleAuditResult }
 }
 
 /** Client-to-server method names (everything except the server's own calls). */

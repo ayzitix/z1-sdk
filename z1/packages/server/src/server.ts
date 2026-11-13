@@ -10,7 +10,9 @@
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { homedir } from 'node:os'
 import { createServer, type IncomingMessage } from 'node:http'
+import { join } from 'node:path'
 
 import {
   GraphParseError,
@@ -22,8 +24,10 @@ import {
   type ValidationIssue,
 } from '@z1/graph'
 import { SqliteJournal, type RunRecord, type RunStatus } from '@z1/journal'
+import { ModuleStore } from '@z1/module'
 import type { ApprovalDecision, Json, NodeRegistry } from '@z1/node'
 import { createBuiltinRegistry } from '@z1/nodes'
+import { ModuleRuntime } from '@z1/node-host'
 import {
   APP_ERRORS,
   JsonRpcPeer,
@@ -50,6 +54,13 @@ import {
 import { WebSocketServer, type WebSocket } from 'ws'
 
 import { LiveLlmRouter } from './live-llm.ts'
+import {
+  cloneRegistry,
+  declarationRegistry,
+  moduleFault,
+  moduleSummary,
+  proposalSummary,
+} from './modules.ts'
 import { SocketTransport } from './socket-transport.ts'
 import { TeeJournal } from './tee-journal.ts'
 import type { ServerOptions, Z1Server } from './types.ts'
@@ -93,6 +104,7 @@ interface ResolvedConfig {
   readonly live: boolean
   readonly env: NodeJS.ProcessEnv
   readonly approvalTimeoutMs: number
+  readonly modulesPath: string
 }
 
 interface StartArgs {
@@ -178,8 +190,13 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     live: options.live ?? false,
     env: options.env ?? process.env,
     approvalTimeoutMs: options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
+    modulesPath:
+      options.modulesPath ??
+      (options.env ?? process.env)['Z1_MODULES_DIR'] ??
+      join(homedir(), '.z1', 'modules'),
   }
 
+  const modules = new ModuleStore(config.modulesPath)
   const journal = new SqliteJournal(options.dbPath)
   const runs = new Map<string, RunState>()
   const approvals = new Map<string, PendingApproval>()
@@ -231,8 +248,17 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     }
   }
 
+  /** Built-ins plus stubs for every active module declaration. */
+  function currentRegistry(): NodeRegistry {
+    return declarationRegistry(config.registry, modules)
+  }
+
+  function hasActiveModules(): boolean {
+    return modules.list().some((module) => module.active)
+  }
+
   function assertValid(graph: GraphDocument): void {
-    const issues = validateGraphTree(graph, config.registry)
+    const issues = validateGraphTree(graph, currentRegistry())
     if (issues.length === 0) return
     const codes = [...new Set(issues.map((issue) => issue.code))].join(', ')
     throw appFault(APP_ERRORS.graphInvalid, `invalid graph: ${codes}`, { issues })
@@ -325,12 +351,36 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     args: StartArgs,
     connection: Connection,
   ): Promise<RunReply> {
-    let result: RunResult
+    const services = createServices(state.runId, connection)
+    let moduleRuntime: ModuleRuntime | undefined
+    let registry: NodeRegistry = config.registry
+    let result: RunResult | undefined
+    let failure: string | undefined
     try {
+      if (hasActiveModules()) {
+        // Workers are per run: a module crash must not poison later runs, and an
+        // approval from module code must reach the connection that started it.
+        const runtime = new ModuleRuntime({
+          store: modules,
+          services: {
+            llm: services.llm,
+            tools: services.tools,
+            fs: services.fs,
+            approval: services.approval,
+          },
+          // The runtime registers into its base, so each run gets a fresh copy.
+          baseRegistry: cloneRegistry(config.registry),
+          onCapabilityDenied: (info) => {
+            modules.recordDenied(info.moduleId, info.version, `${info.kind}: ${info.detail}`)
+          },
+        })
+        moduleRuntime = runtime
+        registry = await runtime.start()
+      }
       result = await runGraph({
         graph: args.graph,
-        registry: config.registry,
-        services: createServices(state.runId, connection),
+        registry,
+        services,
         runId: state.runId,
         signal: state.controller.signal,
         journal: tee,
@@ -340,11 +390,17 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
         ...(args.input !== undefined ? { input: args.input } : {}),
       })
     } catch (error) {
-      const failure = errorMessage(error)
+      failure = errorMessage(error)
+    } finally {
+      await moduleRuntime?.dispose()
+    }
+
+    if (result === undefined) {
+      const message = failure ?? 'run failed'
       state.status = 'failed'
       journal.updateRun(state.runId, { status: 'failed', updatedAt: Date.now() })
       notifyStatus(state)
-      return { runId: state.runId, status: 'failed', outputs: {}, error: failure }
+      return { runId: state.runId, status: 'failed', outputs: {}, error: message }
     }
 
     state.status = result.status
@@ -405,16 +461,16 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     handle(connection, 'initialize', () => ({
       serverName: 'z1',
       protocolVersion: '1',
-      capabilities: { runs: true, approvals: true, modules: false },
+      capabilities: { runs: true, approvals: true, modules: true },
     }))
 
-    handle(connection, 'node.list', () => describeNodes(config.registry))
+    handle(connection, 'node.list', () => describeNodes(currentRegistry()))
 
     handle(connection, 'graph.validate', (params) => {
       assertParams(params, ['graph'])
       let issues: ValidationIssue[]
       try {
-        issues = [...validateGraphTree(parseGraph(params['graph']), config.registry)]
+        issues = [...validateGraphTree(parseGraph(params['graph']), currentRegistry())]
       } catch (error) {
         if (!(error instanceof GraphParseError)) throw error
         issues = error.issues.map(parseIssue)
@@ -556,6 +612,74 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
         base64: Buffer.from(blob.bytes).toString('base64'),
       }
     })
+
+    handle(connection, 'module.list', () => ({
+      modules: modules.list().map(moduleSummary),
+      proposals: modules.proposals().map(proposalSummary),
+    }))
+
+    handle(connection, 'module.propose', (params) => {
+      assertParams(params, ['directory'])
+      const directory = stringParam(params['directory'], 'directory')
+      try {
+        return proposalSummary(modules.propose(directory))
+      } catch (error) {
+        throw moduleFault(error)
+      }
+    })
+
+    handle(connection, 'module.approve', (params) => {
+      assertParams(params, ['moduleId', 'version'])
+      const moduleId = stringParam(params['moduleId'], 'moduleId')
+      const version = stringParam(params['version'], 'version')
+      const futureVersions = params['futureVersions']
+      if (futureVersions !== undefined && typeof futureVersions !== 'boolean') {
+        throw invalidParams('param "futureVersions" must be a boolean', {
+          param: 'futureVersions',
+        })
+      }
+      const proposal = modules
+        .proposals()
+        .find((candidate) => candidate.manifest.id === moduleId && candidate.manifest.version === version)
+      if (proposal === undefined) {
+        throw invalidParams(
+          `no proposal for "${moduleId}"@${version}; propose it first or pass the exact proposed version`,
+          { moduleId, version },
+        )
+      }
+      try {
+        modules.approve(moduleId, version, {
+          ...(futureVersions !== undefined ? { futureVersions } : {}),
+        })
+        // Approving makes the new version the active one; a later `node.list`
+        // therefore sees different declarations.
+        return moduleSummary(modules.activate(moduleId, version))
+      } catch (error) {
+        throw moduleFault(error)
+      }
+    })
+
+    handle(connection, 'module.rollback', (params) => {
+      assertParams(params, ['moduleId'])
+      const moduleId = stringParam(params['moduleId'], 'moduleId')
+      try {
+        const installed = modules.list().filter((module) => module.manifest.id === moduleId)
+        if (installed.length === 0) {
+          throw invalidParams(`module "${moduleId}" is not installed`, { moduleId })
+        }
+        const rolledBack = modules.rollback(moduleId)
+        if (rolledBack === undefined) {
+          throw invalidParams(`module "${moduleId}" has no earlier version to roll back to`, {
+            moduleId,
+          })
+        }
+        return moduleSummary(rolledBack)
+      } catch (error) {
+        throw moduleFault(error)
+      }
+    })
+
+    handle(connection, 'module.audit', () => [...modules.audit()])
   }
 
   function dropConnection(connection: Connection): void {

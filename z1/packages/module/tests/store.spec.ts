@@ -8,6 +8,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { ModuleStore } from '../src/index.ts'
 import { manifest, writeModule } from './fixtures.ts'
@@ -169,5 +170,40 @@ describe('ModuleStore activation, rollback and persistence', () => {
     const audit = store.audit()
     expect(audit.at(-1)?.type).toBe('capability.denied')
     expect(audit.at(-1)?.prev).toBe(audit[audit.length - 2]?.hash)
+  })
+})
+
+describe('ESM package scope', () => {
+  test('adds package.json to a plain payload before hashing, then installs it', async () => {
+    const { store, source } = setup()
+    expect(existsSync(join(source, 'package.json'))).toBe(false)
+
+    const proposed = store.propose(source)
+    expect(JSON.parse(readFileSync(join(proposed.directory, 'package.json'), 'utf8'))).toEqual({
+      type: 'module',
+    })
+    // The synthetic file is part of the identity, so re-proposing is stable.
+    expect(store.propose(source).integrity).toBe(proposed.integrity)
+
+    const installed = store.approve(id, '1.0.0')
+    expect(installed.integrity).toBe(proposed.integrity)
+    expect(JSON.parse(readFileSync(join(installed.directory, 'package.json'), 'utf8'))).toEqual({
+      type: 'module',
+    })
+
+    // The entry now imports as an ES module from an arbitrary install root.
+    const entry = await import(pathToFileURL(join(installed.directory, 'index.js')).href)
+    expect(entry.default).toEqual({})
+  })
+
+  test('keeps an authored package.json untouched', () => {
+    const { store, source } = setup()
+    const authored = '{"type":"module","sideEffects":false}\n'
+    writeFileSync(join(source, 'package.json'), authored)
+
+    const proposed = store.propose(source)
+    expect(readFileSync(join(proposed.directory, 'package.json'), 'utf8')).toBe(authored)
+    const installed = store.approve(id, '1.0.0')
+    expect(readFileSync(join(installed.directory, 'package.json'), 'utf8')).toBe(authored)
   })
 })

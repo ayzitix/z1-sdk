@@ -55,8 +55,8 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   capability RPC (llm/tools/fs/net/approval), streaming, cancel, crash containment.
 - [ ] T23 Runtime/CLI integration: load installed modules into the registry,
   `z1 module list/propose/approve/rollback`, end-to-end fixture module.
-- [ ] T24 Protocol/server/canvas: module inventory + approval panel.
-- [x] T25 Review + commit (module core).
+- [x] T24 Protocol/server/canvas: module inventory + approval panel.
+- [x] T25 Review + commit (modules end to end).
 
 ## M5 — agent as a graph and branch memory
 
@@ -67,4 +67,4 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   `memory.context` node, `z1 memory context`.
 - [x] T29 iteration-scoped execution paths (fork inside a loop replays only the
   earlier iterations).
-- [ ] T30 Review + commit.
+- [x] T30 Review + commit.

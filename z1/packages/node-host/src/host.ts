@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   checkFs,
@@ -123,11 +123,55 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/**
+ * Locate the child bootstrap for a given `host` module URL.
+ *
+ * The bootstrap is spawned as plain JavaScript: Node type-stripping a `.ts`
+ * bootstrap changes how it resolves imports, so TypeScript is only a last
+ * resort for tests that run straight from `src`. When the package is loaded
+ * from `src` (tsx, tsconfig paths), the built sibling lives one level up in
+ * `lib/`. A missing build is a configuration error, never a silent fallback.
+ */
+export function resolveWorkerBootstrap(moduleUrl: string | URL): string {
+  const candidates = [
+    // Built next to host.js (the normal installed/packaged path).
+    new URL('./worker.js', moduleUrl),
+    // Running from src/: the package's own build output.
+    new URL('../lib/worker.js', moduleUrl),
+    // Last resort for tests with no build present.
+    new URL('./worker.ts', moduleUrl),
+  ]
+  for (const candidate of candidates) {
+    const path = fileURLToPath(candidate)
+    if (existsSync(path)) return path
+  }
+  throw new Error(
+    `${PACKAGE}: worker bootstrap not found next to ${fileURLToPath(moduleUrl)}; ` +
+      'build @z1/node-host first (pnpm -C z1 build)',
+  )
+}
+
 function bootstrapPath(): string {
-  const compiled = fileURLToPath(new URL('./worker.js', import.meta.url))
-  if (existsSync(compiled)) return compiled
-  // Tests import src/host.ts directly, where the sibling is still TypeScript.
-  return fileURLToPath(new URL('./worker.ts', import.meta.url))
+  return resolveWorkerBootstrap(import.meta.url)
+}
+
+/**
+ * Directory whose `package.json` tells Node the bootstrap is ESM.
+ *
+ * The child runs under `--permission`, which also hides Node's own package
+ * lookups. Without this file the `.js` bootstrap is treated as CommonJS and
+ * `import()` of an ES module entry is routed through `require(esm)`, which is a
+ * cycle. Walk up from the bootstrap so both `lib/worker.js` and (`src/`) point
+ * at the package root.
+ */
+export function bootstrapPackageRoot(bootstrap: string): string {
+  let directory = dirname(bootstrap)
+  for (;;) {
+    if (existsSync(join(directory, 'package.json'))) return directory
+    const parent = dirname(directory)
+    if (parent === directory) return dirname(bootstrap)
+    directory = parent
+  }
 }
 
 function parsePort(raw: unknown, where: string): DeclaredPort {
@@ -258,6 +302,7 @@ export class ModuleWorker {
   readonly #moduleDir: string
   readonly #capabilities: ModuleCapabilities
   readonly #bootstrap: string
+  readonly #bootstrapPackage: string
   readonly #executions = new Map<number, PendingExecution>()
   #child: ChildProcess | undefined
   #state: 'idle' | 'starting' | 'ready' | 'dead' | 'disposed' = 'idle'
@@ -277,6 +322,7 @@ export class ModuleWorker {
     this.#moduleDir = resolve(options.moduleDir)
     this.#capabilities = options.capabilities
     this.#bootstrap = bootstrapPath()
+    this.#bootstrapPackage = bootstrapPackageRoot(this.#bootstrap)
     this.#moduleId = options.moduleId ?? 'unknown'
     this.#moduleVersion = options.moduleVersion ?? '0.0.0'
   }
@@ -401,6 +447,8 @@ export class ModuleWorker {
     const args = [
       '--permission',
       `--allow-fs-read=${this.#bootstrap}`,
+      // Let Node see the bootstrap package's "type": "module".
+      `--allow-fs-read=${join(this.#bootstrapPackage, 'package.json')}`,
       `--allow-fs-read=${this.#moduleDir}`,
     ]
 

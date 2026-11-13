@@ -69,10 +69,26 @@ export function walkIntegrityFiles(root: string): IntegrityFile[] {
  * manifest-only edit (for example widened capabilities) changes integrity even
  * though the file list does not.
  */
-export function directoryIntegrity(root: string, manifest: ModuleManifest): string {
-  const lines = walkIntegrityFiles(root).map(
-    (file) => `${file.path}\0${file.size}\0${file.sha256}`,
-  )
+export function directoryIntegrity(
+  root: string,
+  manifest: ModuleManifest,
+  /**
+   * Files the store is about to add to a copy (currently only the synthetic
+   * `package.json` that marks a module as ESM). Folding them in lets the source
+   * digest match the digest of the normalised copy without touching the
+   * author's directory.
+   */
+  extraFiles: Readonly<Record<string, string>> = {},
+): string {
+  const files = walkIntegrityFiles(root)
+  const present = new Set(files.map((file) => file.path))
+  for (const [path, content] of Object.entries(extraFiles)) {
+    if (present.has(path)) continue
+    const bytes = new TextEncoder().encode(content)
+    files.push({ path, size: bytes.byteLength, sha256: sha256Hex(bytes) })
+  }
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  const lines = files.map((file) => `${file.path}\0${file.size}\0${file.sha256}`)
   lines.push(`manifest\0${manifestDigest(manifest)}`)
   return sha256Hex(lines.join('\n'))
 }

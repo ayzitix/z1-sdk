@@ -16,8 +16,12 @@ import {
   type ArtifactGetResult,
   type GraphValidateResult,
   type InitializeResult,
+  type ModuleAuditResult,
+  type ModuleListResult,
+  type ModuleSummary,
   type NodeDescriptor,
   type NotificationMap,
+  type ProposalSummary,
   type RunForkResult,
   type RunGetResult,
   type RunListResult,
@@ -243,6 +247,33 @@ export class CanvasClient {
 
   artifactGet(hash: string): Promise<ArtifactGetResult> {
     return this.#peer.request('artifact.get', { hash })
+  }
+
+  moduleList(): Promise<ModuleListResult> {
+    return this.#peer.request('module.list', {})
+  }
+
+  modulePropose(directory: string): Promise<ProposalSummary> {
+    return this.#peer.request('module.propose', { directory })
+  }
+
+  moduleApprove(
+    moduleId: string,
+    version: string,
+    futureVersions?: boolean,
+  ): Promise<ModuleSummary> {
+    return this.#peer.request(
+      'module.approve',
+      futureVersions === undefined ? { moduleId, version } : { moduleId, version, futureVersions },
+    )
+  }
+
+  moduleRollback(moduleId: string): Promise<ModuleSummary> {
+    return this.#peer.request('module.rollback', { moduleId })
+  }
+
+  moduleAudit(): Promise<ModuleAuditResult> {
+    return this.#peer.request('module.audit', {})
   }
 
   /** Answer server approval requests. The last registered handler wins. */

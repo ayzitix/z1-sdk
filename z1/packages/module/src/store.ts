@@ -100,6 +100,21 @@ function toGrant(value: unknown): ModuleGrant | undefined {
   }
 }
 
+/**
+ * Byte-for-byte content of the `package.json` added to a module payload that
+ * has none. It makes the entry (and any relative imports) unambiguously ESM
+ * inside an arbitrary install root.
+ */
+export const MODULE_PACKAGE_JSON = '{"type":"module"}\n'
+
+/** Add the ESM marker to a copied payload, before it is hashed. Idempotent. */
+function ensureModuleType(directory: string): boolean {
+  const file = join(directory, 'package.json')
+  if (existsSync(file)) return false
+  writeFileSync(file, MODULE_PACKAGE_JSON, 'utf8')
+  return true
+}
+
 function readManifestFromDirectory(directory: string): ModuleManifest {
   for (const name of MODULE_MANIFEST_FILES) {
     const file = join(directory, name)
@@ -360,11 +375,19 @@ export class ModuleStore {
       )
     }
 
-    const sourceIntegrity = directoryIntegrity(source, manifest)
+    // A source shipped without package.json still installs as ESM: the copy
+    // gains one, and the source digest is computed as if it already had it so
+    // both sides agree.
+    const sourceAdditions = existsSync(join(source, 'package.json'))
+      ? {}
+      : { 'package.json': MODULE_PACKAGE_JSON }
+    const sourceIntegrity = directoryIntegrity(source, manifest, sourceAdditions)
     mkdirSync(this.proposalsDir, { recursive: true })
     const target = join(this.proposalsDir, `${manifest.id}@${manifest.version}`)
 
     if (existsSync(target)) {
+      // Heal proposals made before the ESM marker existed.
+      ensureModuleType(target)
       const existingManifest = readManifestFromDirectory(target)
       const existingIntegrity = directoryIntegrity(target, existingManifest)
       if (existingIntegrity !== sourceIntegrity) {
@@ -383,6 +406,7 @@ export class ModuleStore {
 
     const temporary = join(this.proposalsDir, `.${manifest.id}@${manifest.version}.${randomUUID()}.tmp`)
     copyPayload(source, temporary)
+    ensureModuleType(temporary)
     const copiedIntegrity = directoryIntegrity(temporary, manifest)
     if (copiedIntegrity !== sourceIntegrity) {
       rmSync(temporary, { recursive: true, force: true })
@@ -506,6 +530,7 @@ export class ModuleStore {
       )
     }
 
+    ensureModuleType(proposalDirectory)
     const integrity = directoryIntegrity(proposalDirectory, manifest)
     const existingGrant = this.findGrant(moduleId, version)
     if (existingGrant !== undefined && existingGrant.integrity !== integrity) {
@@ -531,6 +556,7 @@ export class ModuleStore {
     mkdirSync(join(this.modulesDir, moduleId), { recursive: true })
     const temporary = join(this.modulesDir, moduleId, `.${version}.${randomUUID()}.tmp`)
     copyPayload(proposalDirectory, temporary)
+    ensureModuleType(temporary)
 
     const copiedIntegrity = directoryIntegrity(temporary, manifest)
     if (copiedIntegrity !== integrity) {

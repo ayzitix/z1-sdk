@@ -8,7 +8,7 @@ export type {
   WorkerLogEvent,
   WorkerStreamEvent,
 } from './host.ts'
-export { ModuleWorker } from './host.ts'
+export { ModuleWorker, bootstrapPackageRoot, resolveWorkerBootstrap } from './host.ts'
 export type { ModuleRuntimeOptions } from './runtime.ts'
 export { ModuleRuntime } from './runtime.ts'
 export type { WorkerNodeInfo } from './protocol.ts'

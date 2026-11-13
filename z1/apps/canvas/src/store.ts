@@ -11,7 +11,10 @@ import type { GraphDocument, ValidationIssue } from '@z1/graph'
 import type { ApprovalDecision, AutonomyMode, Json } from '@z1/node'
 import type {
   ApprovalRequestParams,
+  AuditEntry,
+  ModuleSummary,
   NodeDescriptor,
+  ProposalSummary,
   RunGetResult,
   RunListResult,
   RunStatus,
@@ -75,6 +78,11 @@ export interface CanvasStore {
   /** Raw JSON typed into the run input field; parsed when the run starts. */
   runInput: string
   runsOpen: boolean
+  modules: ModuleSummary[]
+  proposals: ProposalSummary[]
+  moduleAudit: AuditEntry[]
+  moduleError: string | null
+  modulesOpen: boolean
 
   setUrl(url: string): void
   setToken(token: string): void
@@ -100,6 +108,12 @@ export interface CanvasStore {
   forkRun(): Promise<void>
   respondApproval(approvalId: string, decision: Extract<ApprovalDecision, 'allowed-once' | 'rejected'>): void
   toggleRunsPanel(): void
+  refreshModules(): Promise<void>
+  proposeModule(directory: string): Promise<void>
+  approveModule(moduleId: string, version: string): Promise<void>
+  rollbackModule(moduleId: string): Promise<void>
+  loadAudit(): Promise<void>
+  toggleModulesPanel(): void
 }
 
 const STORAGE_URL = 'z1.canvas.url'
@@ -174,6 +188,17 @@ function applyStatuses(
   })
 }
 
+/** Parse the run input field; `null` means "invalid JSON". */
+function parseRunInput(raw: string): { ok: true; input?: Json } | { ok: false; error: string } {
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return { ok: true }
+  try {
+    return { ok: true, input: JSON.parse(trimmed) as Json }
+  } catch (error) {
+    return { ok: false, error: `run input is not valid JSON: ${errorText(error)}` }
+  }
+}
+
 /** Pick the next grid slot not already taken by a node. */
 function freePosition(nodes: readonly Z1FlowNode[]): { x: number; y: number } {
   const stepX = 260
@@ -226,6 +251,11 @@ export const useCanvas = create<CanvasStore>()((set, get) => ({
   forkInput: '',
   runInput: '',
   runsOpen: false,
+  modules: [],
+  proposals: [],
+  moduleAudit: [],
+  moduleError: null,
+  modulesOpen: false,
 
   setUrl(url) {
     writeStored(STORAGE_URL, url)
@@ -268,6 +298,7 @@ export const useCanvas = create<CanvasStore>()((set, get) => ({
       await next.initialize('z1-canvas')
       const [descriptors, runs] = await Promise.all([next.nodeList(), next.runList()])
       set({ connection: 'connected', connectionError: null, descriptors, runs })
+      await get().refreshModules()
     } catch (error) {
       unsubscribeAll()
       client = null
@@ -377,16 +408,12 @@ export const useCanvas = create<CanvasStore>()((set, get) => ({
       return
     }
     if (get().runStatus === 'running') return
-    const rawInput = get().runInput.trim()
-    let input: Json | undefined
-    if (rawInput.length > 0) {
-      try {
-        input = JSON.parse(rawInput) as Json
-      } catch (error) {
-        set({ runError: `run input is not valid JSON: ${errorText(error)}` })
-        return
-      }
+    const parsedInput = parseRunInput(get().runInput)
+    if (!parsedInput.ok) {
+      set({ runError: parsedInput.error })
+      return
     }
+    const { input } = parsedInput
     const graph = fromFlow(get().nodes, get().edges, get().title)
     set({
       runId: null,
@@ -512,6 +539,14 @@ export const useCanvas = create<CanvasStore>()((set, get) => ({
       return
     }
     if (get().runStatus === 'running') return
+    // A fork is a journal prefix, but the branch still needs the input the
+    // original run was started with: resume replays nodes, not the entry input.
+    const parsedInput = parseRunInput(get().runInput)
+    if (!parsedInput.ok) {
+      set({ runError: parsedInput.error })
+      return
+    }
+    const { input } = parsedInput
     const graph = fromFlow(get().nodes, get().edges, get().title)
     try {
       const fork = /^\d+$/.test(raw) ? { atSeq: Number(raw) } : { nodePath: raw }
@@ -527,7 +562,9 @@ export const useCanvas = create<CanvasStore>()((set, get) => ({
       })
       // A fork is only a journal prefix: the branch continues by resuming it.
       // Status and outputs then arrive as `run.status`/`run.event` notifications.
-      const reply = await active.runResume({ runId: result.runId, graph })
+      const reply = await active.runResume(
+        input === undefined ? { runId: result.runId, graph } : { runId: result.runId, graph, input },
+      )
       // A resume rejected before execution reports failure in the reply rather
       // than throwing (e.g. a graph that no longer matches the journal).
       if (reply.status === 'failed') {
@@ -551,6 +588,78 @@ export const useCanvas = create<CanvasStore>()((set, get) => ({
 
   toggleRunsPanel() {
     set({ runsOpen: !get().runsOpen })
+  },
+
+  async refreshModules() {
+    const active = client
+    if (active === null) return
+    try {
+      const list = await active.moduleList()
+      set({ modules: list.modules, proposals: list.proposals, moduleError: null })
+    } catch (error) {
+      set({ moduleError: errorText(error) })
+    }
+  },
+
+  async proposeModule(directory) {
+    const active = client
+    if (active === null) return
+    try {
+      await active.modulePropose(directory)
+      await get().refreshModules()
+    } catch (error) {
+      set({ moduleError: errorText(error) })
+    }
+  },
+
+  async approveModule(moduleId, version) {
+    const active = client
+    if (active === null) return
+    try {
+      await active.moduleApprove(moduleId, version)
+      // Approval changes both the module list and the declared node catalogue,
+      // so the palette must be reloaded from the server, not patched locally.
+      const [descriptors, list] = await Promise.all([active.nodeList(), active.moduleList()])
+      set({
+        descriptors,
+        modules: list.modules,
+        proposals: list.proposals,
+        moduleError: null,
+      })
+    } catch (error) {
+      set({ moduleError: errorText(error) })
+    }
+  },
+
+  async rollbackModule(moduleId) {
+    const active = client
+    if (active === null) return
+    try {
+      await active.moduleRollback(moduleId)
+      const [descriptors, list] = await Promise.all([active.nodeList(), active.moduleList()])
+      set({
+        descriptors,
+        modules: list.modules,
+        proposals: list.proposals,
+        moduleError: null,
+      })
+    } catch (error) {
+      set({ moduleError: errorText(error) })
+    }
+  },
+
+  async loadAudit() {
+    const active = client
+    if (active === null) return
+    try {
+      set({ moduleAudit: await active.moduleAudit(), moduleError: null })
+    } catch (error) {
+      set({ moduleError: errorText(error) })
+    }
+  },
+
+  toggleModulesPanel() {
+    set({ modulesOpen: !get().modulesOpen })
   },
 }))
 

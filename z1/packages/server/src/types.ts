@@ -23,6 +23,11 @@ export interface ServerOptions {
   env?: NodeJS.ProcessEnv
   /** How long `approval/request` may stay unanswered; default 300_000. */
   approvalTimeoutMs?: number
+  /**
+   * Module store root (proposals, installed versions, audit). Default
+   * `Z1_MODULES_DIR` or `~/.z1/modules`.
+   */
+  modulesPath?: string
 }
 
 export interface Z1Server {

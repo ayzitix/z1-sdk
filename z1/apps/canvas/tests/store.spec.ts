@@ -20,6 +20,7 @@ interface FakeClient {
   runFork: ReturnType<typeof vi.fn>
   runResume: ReturnType<typeof vi.fn>
   runCancel: ReturnType<typeof vi.fn>
+  moduleList: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
   /** Unsubscribers handed out by the handlers above. */
   unsubscribes: Array<ReturnType<typeof vi.fn>>
@@ -46,6 +47,7 @@ const fake: FakeClient = {
     outputs: {},
   })),
   runCancel: vi.fn(async () => ({})),
+  moduleList: vi.fn(async () => ({ modules: [], proposals: [] })),
   close: vi.fn(),
   unsubscribes: [],
 }
@@ -69,6 +71,7 @@ function resetClientMocks(): void {
     fake.runList,
     fake.runFork,
     fake.runResume,
+    fake.moduleList,
     fake.close,
   ]) {
     method.mockClear()
@@ -194,6 +197,7 @@ describe('fork', () => {
     useCanvas.setState({
       selectedRun: selected,
       forkInput: 'template',
+      runInput: '{"name":"world"}',
       runStatus: 'completed',
       outputs: { text: 'stale' },
     })
@@ -210,9 +214,12 @@ describe('fork', () => {
     const params = fake.runResume.mock.calls[0]?.[0] as unknown as {
       runId: string
       graph: { nodes: unknown[] }
+      input?: unknown
     }
     expect(params.runId).toBe('run_fork')
     expect(params.graph.nodes).toEqual([])
+    // The fork branch must still see the input the run was started with.
+    expect(params.input).toEqual({ name: 'world' })
 
     const state = useCanvas.getState()
     expect(state.runId).toBe('run_fork')
