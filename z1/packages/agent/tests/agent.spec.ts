@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { validateGraphTree, type GraphDocument } from '@z1/graph'
-import type { ChatRequest, ChatResult } from '@z1/node'
+import type { ChatRequest, ChatResult, ToolSchema } from '@z1/node'
 import { createBuiltinRegistry } from '@z1/nodes'
 import {
   createMockRuntimeServices,
@@ -88,6 +88,11 @@ function twoToolCalls(services: MockRuntimeServices): void {
   }
 }
 
+/** Replaces the tool service's `list` so the loop sees a live toolset. */
+function stubTools(services: MockRuntimeServices, tools: readonly ToolSchema[]): void {
+  services.tools = { ...services.tools, list: async () => tools }
+}
+
 describe('buildAgentGraph', () => {
   test('runs the tool round trip and terminates on the assistant answer', async () => {
     const { result, services } = await run({ model: MODEL }, '[[tool:echo]] hi')
@@ -171,6 +176,35 @@ describe('buildAgentGraph', () => {
     const graph = buildAgentGraph({ model: MODEL, tools: [{ name: 'echo', parameters: {} }] })
     expect(validateGraphTree(graph, createBuiltinRegistry())).toEqual([])
     expect(validateGraphTree(agentLoopExample, createBuiltinRegistry())).toEqual([])
+  })
+
+  test('declares the runtime tools to the model on the first turn', async () => {
+    const { services } = await run({ model: MODEL }, 'hello', (stub) => {
+      stubTools(stub, [{ name: 'echo', description: 'Echo', parameters: { type: 'object' } }])
+    })
+
+    expect(services.chatCalls[0]?.tools).toEqual([
+      { name: 'echo', description: 'Echo', parameters: { type: 'object' } },
+    ])
+  })
+
+  test('sends an empty tool list when the runtime exposes none', async () => {
+    const { services } = await run({ model: MODEL }, 'hello')
+
+    expect(services.chatCalls[0]?.tools ?? []).toEqual([])
+  })
+
+  test('keeps explicit tools as an override of the runtime list', async () => {
+    const { services } = await run(
+      { model: MODEL, tools: [{ name: 'override', parameters: {} }] },
+      'hello',
+      (stub) => {
+        stubTools(stub, [{ name: 'echo', parameters: {} }])
+      },
+    )
+
+    const tools = services.chatCalls[0]?.tools ?? []
+    expect(tools.map((tool) => tool.name)).toEqual(['override'])
   })
 
   test('runs every tool call of one assistant message and answers each', async () => {

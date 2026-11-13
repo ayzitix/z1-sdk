@@ -147,11 +147,9 @@
             },
             {
               "id": "tools",
-              "type": "z1.core.const",
+              "type": "z1.tools.list",
               "version": "1.0.0",
-              "config": {
-                "value": []
-              },
+              "config": {},
               "position": {
                 "x": 220,
                 "y": -140
@@ -603,7 +601,7 @@
               "kind": "data",
               "from": {
                 "node": "tools",
-                "port": "value"
+                "port": "tools"
               },
               "to": {
                 "node": "chat",

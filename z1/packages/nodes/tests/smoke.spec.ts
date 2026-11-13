@@ -33,6 +33,7 @@ test('registers every SPEC §7 node at 1.0.0', () => {
     'z1.prompt.stack',
     'z1.prompt.text',
     'z1.tool.call',
+    'z1.tools.list',
   ])
   expect(builtinNodes).toHaveLength(ids.length)
   for (const id of ids) expect(registry.has(id, '1.0.0')).toBe(true)

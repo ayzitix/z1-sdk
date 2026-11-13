@@ -155,6 +155,19 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
   // system message and is also exposed on the chat `system` port.
   const chatConfig: Record<string, Json> = { model: modelJson(options.model) }
 
+  // Explicit tools are a declaration the caller made, so they stay a const and
+  // override whatever the runtime exposes (tests and total conversions rely on
+  // it). Without them the body asks the run's tool service what is available,
+  // so the model sees the live toolset instead of a stale snapshot.
+  const explicitTools = options.tools ?? []
+  const usesExplicitTools = explicitTools.length > 0
+  const tools = usesExplicitTools
+    ? node('tools', 'z1.core.const', 220, -140, { value: toolsJson(explicitTools) })
+    : node('tools', 'z1.tools.list', 220, -140)
+  // Both declarations feed `chat.tools`, but their source ports differ: a const
+  // publishes `value`, the list publishes `tools`.
+  const toolsPort = usesExplicitTools ? 'value' : 'tools'
+
   return {
     schemaVersion: 1,
     id: 'agent.loop.body',
@@ -165,10 +178,8 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       // The seed's first entry is the system message built from the prompt
       // stack; it feeds the chat's `system` port and the message list alike.
       node('systemText', 'z1.core.get', 440, -300, { path: '0.content' }),
-      // A root const, so the tool declaration is available on every iteration.
-      node('tools', 'z1.core.const', 220, -140, {
-        value: toolsJson(options.tools ?? []),
-      }),
+      // Root, so the tool declaration is available on every iteration.
+      tools,
       node('chat', 'z1.llm.chat', 440, 0, chatConfig),
       node('branch', 'z1.flow.if', 660, 0),
       // The chat `message` carries every `toolCalls` entry, so the assistant
@@ -191,7 +202,7 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       // Data
       data('d1', 'body', 'value', 'messages', 'value'),
       data('d2', 'messages', 'value', 'chat', 'messages'),
-      data('d3', 'tools', 'value', 'chat', 'tools'),
+      data('d3', 'tools', toolsPort, 'chat', 'tools'),
       data('d4', 'chat', 'hasToolCalls', 'branch', 'condition'),
       data('d5', 'chat', 'text', 'assistantMsg', 'content'),
       data('d6', 'chat', 'toolCalls', 'assistantMsg', 'toolCalls'),

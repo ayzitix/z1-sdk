@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { defineNode, type NodeDefinition } from '@z1/node'
 import {
+  asJson,
   dataPort,
   errorMessage,
   flowPort,
@@ -8,6 +9,17 @@ import {
   jsonValue,
   NODE_VERSION,
 } from './shared.ts'
+
+/**
+ * Wire shape of a declared tool. It mirrors the `z1.llm.chat` tools port so the
+ * two can be wired directly: `parameters` is optional on the wire and the chat
+ * node fills in an empty object.
+ */
+const toolSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  parameters: z.record(z.string(), jsonValue).optional(),
+})
 
 const call = defineNode({
   id: 'z1.tool.call',
@@ -55,5 +67,23 @@ const call = defineNode({
   },
 })
 
-export const toolNodes: readonly NodeDefinition[] = [call]
-export { call as toolCall }
+/**
+ * Lists the tools the runtime exposes as a root, so a graph can declare to the
+ * model exactly what it can call. A runtime with no registered tools yields an
+ * empty array, which the chat node treats as "no tools" rather than a failure.
+ */
+const list = defineNode({
+  id: 'z1.tools.list',
+  version: NODE_VERSION,
+  title: 'List tools',
+  description: 'Reads the tool declarations the runtime service exposes.',
+  category: 'tool',
+  config: z.object({}),
+  defaultConfig: {},
+  inputs: [],
+  outputs: [dataPort('tools', z.array(toolSchema))],
+  execute: async (ctx) => ({ tools: asJson([...(await ctx.tools.list())]) }),
+})
+
+export const toolNodes: readonly NodeDefinition[] = [call, list]
+export { call as toolCall, list as toolList }

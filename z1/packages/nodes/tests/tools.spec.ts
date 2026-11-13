@@ -21,6 +21,48 @@ function toolGraph(config: unknown = {}) {
   )
 }
 
+describe('z1.tools.list', () => {
+  /** A root-only graph: the list is a root, so no flow token is needed. */
+  function listGraph() {
+    return makeGraph(
+      'tools-list',
+      [
+        graphNode('list1', 'z1.tools.list'),
+        graphNode('outTools', 'z1.core.output', { port: 'tools' }),
+      ],
+      [dataEdge('d1', 'list1', 'tools', 'outTools', 'value')],
+    )
+  }
+
+  test('publishes the tools the runtime exposes', async () => {
+    const services = createMockRuntimeServices()
+    services.tools = {
+      ...services.tools,
+      list: async () => [
+        { name: 'echo', description: 'Echo', parameters: { type: 'object' } },
+        { name: 'read', parameters: {} },
+      ],
+    }
+
+    const { result } = await runBuiltins({ graph: listGraph(), services })
+
+    expect(result.status).toBe('completed')
+    expect(result.outputs).toEqual({
+      tools: [
+        { name: 'echo', description: 'Echo', parameters: { type: 'object' } },
+        { name: 'read', parameters: {} },
+      ],
+    })
+  })
+
+  test('returns an empty array when the runtime has no tools', async () => {
+    const { result } = await runBuiltins({ graph: listGraph() })
+
+    expect(result.status).toBe('completed')
+    expect(result.outputs).toEqual({ tools: [] })
+  })
+})
+
 describe('z1.tool.call', () => {
   test('returns the tool result', async () => {
     const { result, services } = await runBuiltins({ graph: toolGraph() })

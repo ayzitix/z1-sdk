@@ -18,7 +18,7 @@ import { graphNodes, graphSubgraph } from './graph.ts'
 import { llmChat, llmModel, llmNodes } from './llm.ts'
 import { memoryContext, memoryNodes } from './memory.ts'
 import { promptContext, promptNodes, promptSection, promptStack, promptText } from './prompt.ts'
-import { toolCall, toolNodes } from './tools.ts'
+import { toolCall, toolList, toolNodes } from './tools.ts'
 
 export const PACKAGE = '@z1/nodes'
 
@@ -74,4 +74,5 @@ export {
   promptContext,
   toolNodes,
   toolCall,
+  toolList,
 }
