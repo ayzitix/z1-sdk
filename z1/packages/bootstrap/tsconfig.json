@@ -1,0 +1,36 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../journal"
+    },
+    {
+      "path": "../memory"
+    },
+    {
+      "path": "../module"
+    },
+    {
+      "path": "../node"
+    },
+    {
+      "path": "../node-host"
+    },
+    {
+      "path": "../nodes"
+    },
+    {
+      "path": "../provider"
+    },
+    {
+      "path": "../runtime"
+    }
+  ],
+  "compilerOptions": {
+    "outDir": "lib",
+    "rootDir": "src"
+  }
+}

@@ -18994,6 +18994,9 @@ importers:
 
   z1/apps/cli:
     dependencies:
+      '@z1/bootstrap':
+        specifier: workspace:*
+        version: link:../../packages/bootstrap
       '@z1/graph':
         specifier: workspace:*
         version: link:../../packages/graph
@@ -19021,9 +19024,9 @@ importers:
       '@z1/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@z1/provider-openai':
+      '@z1/provider':
         specifier: workspace:*
-        version: link:../../packages/provider-openai
+        version: link:../../packages/provider
       '@z1/runtime':
         specifier: workspace:*
         version: link:../../packages/runtime
@@ -19045,6 +19048,33 @@ importers:
       '@z1/prompt':
         specifier: workspace:*
         version: link:../prompt
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
+  z1/packages/bootstrap:
+    dependencies:
+      '@z1/journal':
+        specifier: workspace:*
+        version: link:../journal
+      '@z1/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@z1/module':
+        specifier: workspace:*
+        version: link:../module
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/node-host':
+        specifier: workspace:*
+        version: link:../node-host
+      '@z1/nodes':
+        specifier: workspace:*
+        version: link:../nodes
+      '@z1/provider':
+        specifier: workspace:*
+        version: link:../provider
       '@z1/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -19139,6 +19169,15 @@ importers:
         specifier: workspace:*
         version: link:../runtime
 
+  z1/packages/provider:
+    dependencies:
+      '@z1/provider-openai':
+        specifier: workspace:*
+        version: link:../provider-openai
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
   z1/packages/provider-openai:
     dependencies:
       '@z1/node':
@@ -19162,6 +19201,9 @@ importers:
 
   z1/packages/server:
     dependencies:
+      '@z1/bootstrap':
+        specifier: workspace:*
+        version: link:../bootstrap
       '@z1/graph':
         specifier: workspace:*
         version: link:../graph
@@ -19186,9 +19228,9 @@ importers:
       '@z1/protocol':
         specifier: workspace:*
         version: link:../protocol
-      '@z1/provider-openai':
+      '@z1/provider':
         specifier: workspace:*
-        version: link:../provider-openai
+        version: link:../provider
       '@z1/runtime':
         specifier: workspace:*
         version: link:../runtime

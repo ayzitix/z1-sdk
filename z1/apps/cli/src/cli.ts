@@ -9,30 +9,34 @@ import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import {
+  builtinRegistry,
+  createRuntime,
+  loadRuntimeConfig,
+  type Runtime,
+  type RuntimeConfig,
+} from '@z1/bootstrap'
+import {
   graphDigest,
   parseGraph,
   validateGraphTree,
   type GraphDocument,
   type ValidationIssue,
 } from '@z1/graph'
-import { SqliteJournal } from '@z1/journal'
-import { BranchMemory } from '@z1/memory'
 import { ModuleStore, type ModuleCapabilities } from '@z1/module'
-import { createBuiltinRegistry } from '@z1/nodes'
-import { ModuleRuntime, type WorkerHostServices } from '@z1/node-host'
-import { createOpenAiLlmService, retryOptionsFromEnv } from '@z1/provider-openai'
+import {
+  MOCK_PROVIDER,
+  resolveApiKey,
+  type ProviderRegistry,
+} from '@z1/provider'
 import { startServer, type Z1Server } from '@z1/server'
 import {
-  createMockRuntimeServices,
   runGraph,
   type ApprovalService,
-  type LlmService,
   type MockApprovalBehavior,
   type RunEvent,
   type RunResult,
-  type RuntimeServices,
 } from '@z1/runtime'
-import type { ChatDelta, ChatRequest, ChatResult, Json } from '@z1/node'
+import type { Json } from '@z1/node'
 
 /** Everything the CLI is allowed to touch outside the graph itself. */
 export interface CliIO {
@@ -217,37 +221,26 @@ function moduleApprovalService(mode: ApproveMode, io: CliIO): ApprovalService {
   }
 }
 
-type LiveProvider = 'river' | 'openai'
-
-interface ProviderEnv {
-  apiKey: string
-  baseUrl: string
-  defaultBaseUrl: string
-}
-
-const PROVIDER_ENV: Record<LiveProvider, ProviderEnv> = {
-  river: {
-    apiKey: 'RIVER_API_KEY',
-    baseUrl: 'RIVER_BASE_URL',
-    defaultBaseUrl: 'https://api.river.ai/v1',
-  },
-  openai: {
-    apiKey: 'OPENAI_API_KEY',
-    baseUrl: 'OPENAI_BASE_URL',
-    defaultBaseUrl: 'https://api.openai.com/v1',
-  },
-}
-
-function isLiveProvider(value: string): value is LiveProvider {
-  return value === 'river' || value === 'openai'
-}
-
-function hasText(value: string | undefined): value is string {
-  return value !== undefined && value !== ''
-}
-
 function isJsonObject(value: Json | undefined): value is { [key: string]: Json } {
   return value !== null && value !== undefined && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** The provider a model node's config names, if it names one at all. */
+function nodeProvider(
+  type: Json | undefined,
+  config: Record<string, Json>,
+): string | undefined {
+  if (type === 'z1.llm.model') {
+    const provider = config['provider']
+    return typeof provider === 'string' ? provider : undefined
+  }
+  if (type === 'z1.llm.chat') {
+    const model = config['model']
+    if (!isJsonObject(model)) return undefined
+    const provider = model['provider']
+    return typeof provider === 'string' ? provider : undefined
+  }
+  return undefined
 }
 
 /**
@@ -255,22 +248,20 @@ function isJsonObject(value: Json | undefined): value is { [key: string]: Json }
  * in node config (`graph` / `body`), so the walk is structural rather than
  * typed: a body is only a GraphDocument after validation, which ran already.
  */
-function liveModelNodes(graph: GraphDocument): { provider: LiveProvider; nodeId: string }[] {
-  const found: { provider: LiveProvider; nodeId: string }[] = []
+function liveModelNodes(graph: GraphDocument): { provider: string; nodeId: string }[] {
+  const found: { provider: string; nodeId: string }[] = []
   const visit = (value: Json): void => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item)
       return
     }
     if (!isJsonObject(value)) return
-    if (value['type'] === 'z1.llm.model') {
-      const config = value['config']
-      const nodeId = value['id']
-      if (isJsonObject(config) && typeof nodeId === 'string') {
-        const provider = config['provider']
-        if (typeof provider === 'string' && isLiveProvider(provider)) {
-          found.push({ provider, nodeId })
-        }
+    const config = value['config']
+    const nodeId = value['id']
+    if (isJsonObject(config) && typeof nodeId === 'string') {
+      const provider = nodeProvider(value['type'], config)
+      if (provider !== undefined && provider !== MOCK_PROVIDER) {
+        found.push({ provider, nodeId })
       }
     }
     for (const item of Object.values(value)) visit(item)
@@ -280,65 +271,22 @@ function liveModelNodes(graph: GraphDocument): { provider: LiveProvider; nodeId:
   return found
 }
 
-/** A missing credential is reported before the run exists, not from a node. */
+/** A missing or unknown provider is reported before the run exists, not from a node. */
 function missingLiveCredential(
   graph: GraphDocument,
+  providers: ProviderRegistry,
   env: Record<string, string | undefined>,
 ): string | undefined {
   for (const { provider, nodeId } of liveModelNodes(graph)) {
-    const { apiKey } = PROVIDER_ENV[provider]
-    if (!hasText(env[apiKey])) {
-      return `missing ${apiKey} for provider "${provider}" (node "${nodeId}")\n`
+    const config = providers.configs().find((candidate) => candidate.id === provider)
+    if (!providers.has(provider) || config === undefined) {
+      return `unknown provider "${provider}" (node "${nodeId}"); add it to Z1_PROVIDERS or set --live off\n`
+    }
+    if (resolveApiKey(config, env) === undefined) {
+      return `missing ${config.envKey} for provider "${provider}" (node "${nodeId}")\n`
     }
   }
   return undefined
-}
-
-function resolveBaseUrl(provider: LiveProvider, env: Record<string, string | undefined>): string {
-  const spec = PROVIDER_ENV[provider]
-  // One shared override wins so a whole run can be pointed at a gateway.
-  for (const candidate of [env['Z1_OPENAI_BASE_URL'], env[spec.baseUrl]]) {
-    if (hasText(candidate)) return candidate
-  }
-  return spec.defaultBaseUrl
-}
-
-/**
- * Routes each chat request by `model.provider`: river/openai go to the
- * OpenAI-compatible client, everything else keeps the deterministic mock.
- * The real client is built on the first request for that provider so a
- * mock-only graph never needs a credential.
- */
-class LiveLlmRouter implements LlmService {
-  readonly #mock: LlmService
-  readonly #env: Record<string, string | undefined>
-  readonly #live = new Map<LiveProvider, LlmService>()
-
-  constructor(mock: LlmService, env: Record<string, string | undefined>) {
-    this.#mock = mock
-    this.#env = env
-  }
-
-  async chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult> {
-    const provider = request.model.provider
-    if (!isLiveProvider(provider)) return await this.#mock.chat(request, onDelta)
-    return await this.#service(provider).chat(request, onDelta)
-  }
-
-  #service(provider: LiveProvider): LlmService {
-    const existing = this.#live.get(provider)
-    if (existing !== undefined) return existing
-    const spec = PROVIDER_ENV[provider]
-    const apiKey = this.#env[spec.apiKey]
-    if (!hasText(apiKey)) throw new Error(`missing ${spec.apiKey} for provider "${provider}"`)
-    const created = createOpenAiLlmService({
-      apiKey,
-      baseURL: resolveBaseUrl(provider, this.#env),
-      retry: retryOptionsFromEnv(this.#env),
-    })
-    this.#live.set(provider, created)
-    return created
-  }
 }
 
 function exitCodeFor(status: RunResult['status']): number {
@@ -363,7 +311,7 @@ function listCommand(args: readonly string[], io: CliIO): number {
     return usage(io)
   }
 
-  for (const node of createBuiltinRegistry().list()) {
+  for (const node of builtinRegistry().list()) {
     io.stdout(`${node.id}  ${node.version}  ${node.category}  ${node.title}\n`)
   }
   return 0
@@ -395,7 +343,7 @@ async function validateCommand(args: readonly string[], io: CliIO): Promise<numb
     return 2
   }
 
-  const issues = validateGraphTree(graph, createBuiltinRegistry())
+  const issues = validateGraphTree(graph, builtinRegistry())
   if (issues.length === 0) {
     io.stdout(`ok: ${String(graph.nodes.length)} nodes, ${String(graph.edges.length)} edges\n`)
     return 0
@@ -710,18 +658,13 @@ function moduleAuditCommand(args: readonly string[], io: CliIO): number {
   return 0
 }
 
-/** The subset of runtime services a module worker is allowed to call. */
-function moduleWorkerServices(
-  services: RuntimeServices,
-  approval: ApprovalService,
-): WorkerHostServices {
+/** Graph nodes approve through the service `--approve` configures. */
+function nodeApprovalService(behavior: MockApprovalBehavior): ApprovalService {
   return {
-    llm: services.llm,
-    tools: services.tools,
-    fs: services.fs,
-    // Deliberately not `services.approval`: module approvals are their own
-    // policy, and `--approve auto` must not make module requests automatic.
-    approval,
+    async request(request, context) {
+      if (typeof behavior === 'function') return await behavior(request, context)
+      return behavior
+    },
   }
 }
 
@@ -823,78 +766,49 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   }
 
   const env = io.env ?? process.env
-  const services = createMockRuntimeServices({ approval: approvalBehavior(approve, io) })
-  if (values.live === true) services.llm = new LiveLlmRouter(services.llm, env)
-  if (values.trace === true) {
-    services.onEvent = (event: RunEvent) => io.stderr(`${JSON.stringify(event)}\n`)
+
+  let config: RuntimeConfig
+  try {
+    config = loadRuntimeConfig({
+      cwd: process.cwd(),
+      env,
+      overrides: {
+        ...(values.db === undefined ? {} : { dbPath: values.db }),
+        ...(values['modules-dir'] === undefined ? {} : { modulesPath: values['modules-dir'] }),
+        ...(values.live === undefined ? {} : { live: values.live }),
+        ...(values['no-modules'] === true ? { useModules: false } : {}),
+        ...(values['no-memory'] === true ? { useMemory: false } : {}),
+      },
+    })
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
   }
 
-  const modulesDir =
-    values['modules-dir'] ??
-    env['Z1_MODULES_DIR'] ??
-    join(homedir(), '.z1', 'modules')
-
-  let moduleRuntime: ModuleRuntime | undefined
-  let registry = createBuiltinRegistry()
-  if (values['no-modules'] !== true) {
-    let store: ModuleStore
-    try {
-      store = new ModuleStore(modulesDir)
-    } catch (error) {
-      io.stderr(`cannot open module store "${modulesDir}": ${errorMessage(error)}\n`)
-      return 1
-    }
-
-    // Spawning a worker per module is only worth it when one is active; an
-    // empty store keeps `run` exactly as fast and as isolated as before.
-    if (store.list().some((module) => module.active)) {
-      const runtime = new ModuleRuntime({
-        store,
-        services: moduleWorkerServices(services, moduleApprovalService(moduleApprove, io)),
-        baseRegistry: registry,
-        onCapabilityDenied: (info) => {
-          store.recordDenied(info.moduleId, info.version, `${info.kind}: ${info.detail}`)
-        },
-      })
-      moduleRuntime = runtime
-      try {
-        registry = await runtime.start()
-      } catch (error) {
-        io.stderr(`cannot load modules from "${modulesDir}": ${errorMessage(error)}\n`)
-        await runtime.dispose()
-        return 1
-      }
-    }
+  let runtime: Runtime
+  try {
+    runtime = await createRuntime(config)
+  } catch (error) {
+    io.stderr(`cannot start runtime: ${errorMessage(error)}\n`)
+    return 1
   }
 
   try {
-    const issues = validateGraphTree(graph, registry)
+    const issues = validateGraphTree(graph, runtime.registry)
     if (issues.length > 0) {
       for (const issue of issues) io.stderr(`${issueLine(issue)}\n`)
       return 2
     }
 
-    if (values.live === true) {
-      const missing = missingLiveCredential(graph, env)
+    if (config.live) {
+      const missing = missingLiveCredential(graph, runtime.providers, config.env)
       if (missing !== undefined) {
         io.stderr(missing)
         return 1
       }
     }
 
-    const dbPath = values.db ?? '.z1/runs.db'
-    let journal: SqliteJournal
-    try {
-      journal = new SqliteJournal(dbPath)
-    } catch (error) {
-      io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
-      return 1
-    }
-
-    // The journal is already the run tree, so a resumed or forked graph can read
-    // its ancestry from the same database without a second store.
-    if (values['no-memory'] !== true) services.memory = new BranchMemory(journal)
-
+    const journal = runtime.journal
     const resume = values.resume
     const runId = resume ?? `run_${randomUUID()}`
 
@@ -917,12 +831,29 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         })
       }
 
+      let handle
+      try {
+        handle = await runtime.beginRun({
+          approval: nodeApprovalService(approvalBehavior(approve, io)),
+          // Module code asks under its own policy: `--approve auto` describes
+          // node autonomy and must not silently grant it.
+          moduleApproval: moduleApprovalService(moduleApprove, io),
+          ...(values.trace === true
+            ? { onEvent: (event: RunEvent) => io.stderr(`${JSON.stringify(event)}\n`) }
+            : {}),
+        })
+      } catch (error) {
+        journal.updateRun(runId, { status: 'failed', updatedAt: Date.now() })
+        io.stderr(`cannot load modules: ${errorMessage(error)}\n`)
+        return 1
+      }
+
       let result: RunResult
       try {
         result = await runGraph({
           graph,
-          registry,
-          services,
+          registry: handle.registry,
+          services: handle.services,
           input,
           journal,
           runId,
@@ -933,6 +864,8 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         journal.updateRun(runId, { status: 'failed', updatedAt: Date.now() })
         io.stderr(`run failed: ${errorMessage(error)}\n`)
         return 1
+      } finally {
+        await handle.dispose()
       }
 
       journal.updateRun(runId, { status: result.status, updatedAt: Date.now() })
@@ -979,11 +912,27 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     } catch (error) {
       io.stderr(`run failed: ${errorMessage(error)}\n`)
       return 1
-    } finally {
-      journal.close()
     }
   } finally {
-    await moduleRuntime?.dispose()
+    await runtime.close()
+  }
+}
+
+/**
+ * A runtime for commands that only read the journal. `createRuntime` owns the
+ * journal/module-store wiring, so these commands never assemble it themselves.
+ */
+async function openRuntime(
+  io: CliIO,
+  overrides: Partial<RuntimeConfig>,
+): Promise<Runtime | undefined> {
+  try {
+    return await createRuntime(
+      loadRuntimeConfig({ cwd: process.cwd(), env: io.env ?? process.env, overrides }),
+    )
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return undefined
   }
 }
 
@@ -1005,17 +954,15 @@ async function treeCommand(args: readonly string[], io: CliIO): Promise<number> 
   }
   if (positionals.length > 0) return usage(io)
 
-  const dbPath = values.db ?? '.z1/runs.db'
-  let journal: SqliteJournal
-  try {
-    journal = new SqliteJournal(dbPath)
-  } catch (error) {
-    io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
-    return 1
-  }
+  const runtime = await openRuntime(io, {
+    ...(values.db === undefined ? {} : { dbPath: values.db }),
+    useMemory: false,
+    useModules: false,
+  })
+  if (runtime === undefined) return 1
 
   try {
-    const runs = journal.listRuns()
+    const runs = runtime.journal.listRuns()
     if (values.json === true) {
       io.stdout(`${JSON.stringify(runs)}\n`)
       return 0
@@ -1033,7 +980,7 @@ async function treeCommand(args: readonly string[], io: CliIO): Promise<number> 
     }
     return 0
   } finally {
-    journal.close()
+    await runtime.close()
   }
 }
 
@@ -1058,26 +1005,29 @@ async function memoryContextCommand(args: readonly string[], io: CliIO): Promise
   const runId = positionals[0]
   if (runId === undefined || positionals.length > 1) return usage(io)
 
-  const dbPath = values.db ?? '.z1/runs.db'
-  let journal: SqliteJournal
-  try {
-    journal = new SqliteJournal(dbPath)
-  } catch (error) {
-    io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
-    return 1
-  }
+  const runtime = await openRuntime(io, {
+    ...(values.db === undefined ? {} : { dbPath: values.db }),
+    useMemory: true,
+    useModules: false,
+  })
+  if (runtime === undefined) return 1
 
   try {
-    if (journal.getRun(runId) === undefined) {
+    if (runtime.journal.getRun(runId) === undefined) {
       io.stderr(`unknown run "${runId}"\n`)
       return 1
     }
-    const envelope = await new BranchMemory(journal).buildContext({ runId })
+    const memory = runtime.memory
+    if (memory === undefined) {
+      io.stderr('memory is disabled\n')
+      return 1
+    }
+    const envelope = await memory.buildContext({ runId })
     if (values.json === true) io.stdout(`${JSON.stringify(envelope)}\n`)
     else if (envelope.text !== '') io.stdout(`${envelope.text}\n`)
     return 0
   } finally {
-    journal.close()
+    await runtime.close()
   }
 }
 
@@ -1150,14 +1100,14 @@ async function forkCommand(args: readonly string[], io: CliIO): Promise<number> 
     return usage(io)
   }
 
-  const dbPath = values.db ?? '.z1/runs.db'
-  let journal: SqliteJournal
-  try {
-    journal = new SqliteJournal(dbPath)
-  } catch (error) {
-    io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
-    return 1
-  }
+  const runtime = await openRuntime(io, {
+    ...(values.db === undefined ? {} : { dbPath: values.db }),
+    useMemory: false,
+    useModules: false,
+  })
+  if (runtime === undefined) return 1
+  const dbPath = runtime.config.dbPath
+  const journal = runtime.journal
 
   try {
     if (journal.getRun(sourceId) === undefined) {
@@ -1196,7 +1146,7 @@ async function forkCommand(args: readonly string[], io: CliIO): Promise<number> 
     io.stderr(`cannot fork "${sourceId}": ${errorMessage(error)}\n`)
     return 1
   } finally {
-    journal.close()
+    await runtime.close()
   }
 }
 
@@ -1280,19 +1230,20 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
     return usage(io)
   }
 
-  const dbPath = values.db ?? '.z1/runs.db'
   const host = values.host ?? DEFAULT_SERVE_HOST
   const token = values.token
 
   let server: Z1Server
   try {
     server = await startServer({
-      dbPath,
       host,
       port,
+      env: io.env ?? process.env,
+      // Omitted paths fall back to `z1.config.json`, the environment, defaults.
+      ...(values.db === undefined ? {} : { dbPath: values.db }),
       // Omitting `token` keeps the server's own random generation.
       ...(token === undefined ? {} : { token }),
-      live: values.live === true,
+      ...(values.live === true ? { live: true } : {}),
     })
   } catch (error) {
     io.stderr(`cannot start server: ${errorMessage(error)}\n`)
@@ -1404,22 +1355,22 @@ async function studioCommand(args: readonly string[], io: CliIO): Promise<number
     return 1
   }
 
-  const env = io.env ?? process.env
   const host = values.host ?? DEFAULT_SERVE_HOST
   const token = values.token
   let server: Z1Server
   try {
     server = await startServer({
-      dbPath: values.db ?? '.z1/runs.db',
       host,
       port,
-      graphsPath: values['graphs-dir'] ?? join(process.cwd(), '.z1', 'graphs'),
-      modulesPath:
-        values['modules-dir'] ?? env['Z1_MODULES_DIR'] ?? join(homedir(), '.z1', 'modules'),
+      env: io.env ?? process.env,
       staticDir,
+      // Omitted paths fall back to `z1.config.json`, the environment, defaults.
+      ...(values.db === undefined ? {} : { dbPath: values.db }),
+      ...(values['graphs-dir'] === undefined ? {} : { graphsPath: values['graphs-dir'] }),
+      ...(values['modules-dir'] === undefined ? {} : { modulesPath: values['modules-dir'] }),
       // Omitting `token` keeps the server's own random generation.
       ...(token === undefined ? {} : { token }),
-      live: values.live === true,
+      ...(values.live === true ? { live: true } : {}),
     })
   } catch (error) {
     io.stderr(`cannot start server: ${errorMessage(error)}\n`)

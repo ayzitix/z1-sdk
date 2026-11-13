@@ -55,8 +55,14 @@
       "@z1/provider-openai": [
         "./packages/provider-openai/src/index.ts"
       ],
+      "@z1/provider": [
+        "./packages/provider/src/index.ts"
+      ],
       "@z1/server": [
         "./packages/server/src/index.ts"
+      ],
+      "@z1/bootstrap": [
+        "./packages/bootstrap/src/index.ts"
       ],
       "@z1/host-dsh": [
         "./packages/host-dsh/src/index.ts"

@@ -1,0 +1,29 @@
+{
+  "name": "@z1/bootstrap",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib",
+    "src"
+  ],
+  "dependencies": {
+    "@z1/journal": "workspace:*",
+    "@z1/memory": "workspace:*",
+    "@z1/module": "workspace:*",
+    "@z1/node": "workspace:*",
+    "@z1/node-host": "workspace:*",
+    "@z1/nodes": "workspace:*",
+    "@z1/provider": "workspace:*",
+    "@z1/runtime": "workspace:*"
+  }
+}

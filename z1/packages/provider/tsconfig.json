@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../provider-openai"
+    },
+    {
+      "path": "../runtime"
+    }
+  ],
+  "compilerOptions": {
+    "outDir": "lib",
+    "rootDir": "src"
+  }
+}

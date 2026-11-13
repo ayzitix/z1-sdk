@@ -4,20 +4,16 @@
  * @module @z1/server/types
  */
 
-import type { NodeRegistry } from '@z1/node'
-
 export interface ServerOptions {
-  /** SQLite journal shared by every run this server owns. */
-  dbPath: string
+  /** SQLite journal shared by every run this server owns. Default `.z1/runs.db`. */
+  dbPath?: string
   /** Default `127.0.0.1`: the server is local-only unless asked otherwise. */
   host?: string
   /** Default `0`: the OS picks a free port, which `Z1Server.port` reports. */
   port?: number
   /** Default: 32 random hex characters generated per start. */
   token?: string
-  /** Default `createBuiltinRegistry()`. */
-  registry?: NodeRegistry
-  /** Route `river`/`openai` model calls to the real provider; mock otherwise. */
+  /** Route registered providers' model calls to the real API; mock otherwise. */
   live?: boolean
   /** Credential source for `live`; default `process.env`. */
   env?: NodeJS.ProcessEnv

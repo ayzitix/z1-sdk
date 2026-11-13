@@ -5,6 +5,9 @@
   ],
   "references": [
     {
+      "path": "../bootstrap"
+    },
+    {
       "path": "../graph"
     },
     {
@@ -32,7 +35,7 @@
       "path": "../protocol"
     },
     {
-      "path": "../provider-openai"
+      "path": "../provider"
     }
   ],
   "compilerOptions": {

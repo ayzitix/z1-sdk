@@ -17,6 +17,7 @@
     "src"
   ],
   "dependencies": {
+    "@z1/bootstrap": "workspace:*",
     "@z1/graph": "workspace:*",
     "@z1/journal": "workspace:*",
     "@z1/memory": "workspace:*",
@@ -25,7 +26,7 @@
     "@z1/node-host": "workspace:*",
     "@z1/nodes": "workspace:*",
     "@z1/protocol": "workspace:*",
-    "@z1/provider-openai": "workspace:*",
+    "@z1/provider": "workspace:*",
     "@z1/runtime": "workspace:*",
     "ws": "^8.21.3",
     "zod": "4.6.6"

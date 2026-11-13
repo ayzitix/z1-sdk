@@ -67,7 +67,7 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   `memory.context` node, `z1 memory context`.
 - [x] T29 iteration-scoped execution paths (fork inside a loop replays only the
   earlier iterations).
-- [ ] T30 Review + commit.
+- [x] T30 Review + commit.
 - [x] T31 Provider retry on 429/5xx with backoff and `retry-after`.
   Live River verification: tool call + second model round.
 
@@ -77,7 +77,7 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   role presets, `buildPrompt`.
 - [x] T33 nodes `prompt.section/stack/text/context`; `llm.chat.system` input.
 - [x] T34 agent graph rebuilt on prompt nodes; canvas section editor.
-- [ ] T35 Review + commit.
+- [x] T35 Review + commit.
 
 ## M7 — the base as a usable tool
 
@@ -86,7 +86,7 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   `z1 studio` serves the built canvas from the server.
 - [x] T38 Per-node run inspector (outputs, errors, duration, prompt hash),
   run timeline and branch tree with fork-from-path.
-- [ ] T39 Review + commit.
+- [x] T39 Review + commit.
 
 ## Correctness fixes (from the bug audit)
 
@@ -100,3 +100,10 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] Module approvals default to `ask`; `--approve auto` does not cover them.
 - [x] Provider: stream errors throw, malformed tool args throw, synthetic ids are unique.
 - [x] Server: O(1) tee journal, memory attached, approvals keyed by id.
+
+## M8 — modular composition
+
+- [x] T40 Provider registry as data; `@z1/provider`, config-only providers.
+- [x] T41 `@z1/bootstrap` + `z1.config.json`; CLI and server share one runtime.
+- [ ] T42 Agent template and prompt presets as data.
+- [ ] T43 Journal interface, path defaults, dead dependency cleanup.

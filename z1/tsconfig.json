@@ -33,7 +33,13 @@
       "path": "./packages/provider-openai"
     },
     {
+      "path": "./packages/provider"
+    },
+    {
       "path": "./packages/server"
+    },
+    {
+      "path": "./packages/bootstrap"
     },
     {
       "path": "./packages/host-dsh"

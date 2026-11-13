@@ -29,13 +29,16 @@
       "path": "../../packages/journal"
     },
     {
-      "path": "../../packages/provider-openai"
+      "path": "../../packages/provider"
     },
     {
       "path": "../../packages/protocol"
     },
     {
       "path": "../../packages/server"
+    },
+    {
+      "path": "../../packages/bootstrap"
     },
     {
       "path": "../../packages/host-dsh"

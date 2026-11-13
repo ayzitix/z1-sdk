@@ -22,7 +22,7 @@ modify the engine.
 branch forks, sandboxed executable modules with an approval panel, the agent
 loop as a real graph, branch-tree memory, a headless server, real
 OpenAI-compatible models and a browser canvas are implemented and tested
-(483 tests). Not implemented yet: editor integration and OS-level sandboxing
+(516 tests). Not implemented yet: editor integration and OS-level sandboxing
 for untrusted modules.
 
 ## Quick start
@@ -159,6 +159,8 @@ modules still need an OS-level sandbox — this is documented in
 | `z1/packages/agent` | the default agent loop as a graph |
 | `z1/packages/prompt` | prompt sections, role presets, stacking and hashing |
 | `z1/packages/protocol` | JSON-RPC 2.0 transport and method map |
+| `z1/packages/bootstrap` | one runtime composition from `z1.config.json` |
+| `z1/packages/provider` | provider registry and routing |
 | `z1/packages/server` | headless WebSocket server |
 | `z1/packages/provider-openai` | OpenAI-compatible streaming provider |
 | `z1/apps/cli` | the `z1` executable |
@@ -169,6 +171,31 @@ modules still need an OS-level sandbox — this is documented in
 
 The upstream engine still builds with its 10 gates (`pnpm run build`); the z1
 layer is a separate workspace group with its own tsconfig and test runner.
+
+## Configuration
+
+`z1.config.json` (optional, in the working directory) configures one runtime for
+the CLI and the server:
+
+```json
+{
+  "dbPath": ".z1/runs.db",
+  "graphsPath": ".z1/graphs",
+  "modulesPath": "~/.z1/modules",
+  "live": false,
+  "useModules": true,
+  "useMemory": true,
+  "providers": [
+    { "id": "river", "envKey": "RIVER_API_KEY", "baseURL": "https://api.river.ai/v1" },
+    { "id": "local", "envKey": "LOCAL_API_KEY", "baseURL": "http://127.0.0.1:11434/v1" }
+  ]
+}
+```
+
+Precedence: CLI flags > environment (`Z1_DB`, `Z1_GRAPHS_DIR`,
+`Z1_MODULES_DIR`, `Z1_LIVE`, `Z1_PROVIDERS`) > file > defaults. A provider is
+data: add one by config, not by editing the CLI. See
+[`z1.config.example.json`](z1.config.example.json).
 
 ## Providers
 

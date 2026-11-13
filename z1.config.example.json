@@ -1,0 +1,25 @@
+{
+  "dbPath": ".z1/runs.db",
+  "graphsPath": ".z1/graphs",
+  "modulesPath": "~/.z1/modules",
+  "live": false,
+  "useModules": true,
+  "useMemory": true,
+  "providers": [
+    {
+      "id": "river",
+      "envKey": "RIVER_API_KEY",
+      "baseURL": "https://api.river.ai/v1"
+    },
+    {
+      "id": "openai",
+      "envKey": "OPENAI_API_KEY",
+      "baseURL": "https://api.openai.com/v1"
+    },
+    {
+      "id": "local",
+      "envKey": "LOCAL_API_KEY",
+      "baseURL": "http://127.0.0.1:11434/v1"
+    }
+  ]
+}
