@@ -19,6 +19,7 @@
   "dependencies": {
     "@z1/node": "workspace:*",
     "@z1/graph": "workspace:*",
+    "@z1/prompt": "workspace:*",
     "@z1/runtime": "workspace:*",
     "zod": "4.6.6"
   }

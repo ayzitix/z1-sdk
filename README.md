@@ -22,7 +22,7 @@ modify the engine.
 branch forks, sandboxed executable modules with an approval panel, the agent
 loop as a real graph, branch-tree memory, a headless server, real
 OpenAI-compatible models and a browser canvas are implemented and tested
-(348 tests). Not implemented yet: editor integration and OS-level sandboxing
+(412 tests). Not implemented yet: editor integration and OS-level sandboxing
 for untrusted modules.
 
 ## Quick start
@@ -113,6 +113,14 @@ tree, non-taken siblings are recorded as history, summaries are regenerated
 lazily with provenance back to the node or artifact, and `memory.context`
 injects an ancestor/sibling/recent envelope into the agent graph.
 
+The system prompt is a graph too. `prompt.section` nodes carry one section each
+(identity, success, graph contract, autonomy, loop, editing, failure, memory,
+communication, output, role), `core.concat` collects them and `prompt.stack`
+orders, deduplicates, budget-cuts and hashes the result; `llm.chat.system`
+consumes the text. Edit one section on the canvas, rewire the stack, or replace
+the whole thing with `prompt.text` — the run records the stack hash, so the
+prompt that produced a branch is reproducible.
+
 Modules are reviewed before they run. A module is an npm-shaped directory with a
 manifest (id, version, integrity, declared ports and capabilities) and a
 dependency-free ESM entry. `z1 module propose` copies it to a proposal store;
@@ -136,6 +144,7 @@ modules still need an OS-level sandbox — this is documented in
 | `z1/packages/node-host` | sandboxed child-process worker and capability RPC |
 | `z1/packages/memory` | branch-tree queries and context envelopes |
 | `z1/packages/agent` | the default agent loop as a graph |
+| `z1/packages/prompt` | prompt sections, role presets, stacking and hashing |
 | `z1/packages/protocol` | JSON-RPC 2.0 transport and method map |
 | `z1/packages/server` | headless WebSocket server |
 | `z1/packages/provider-openai` | OpenAI-compatible streaming provider |

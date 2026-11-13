@@ -64,6 +64,9 @@
       "@z1/node-host": [
         "./packages/node-host/src/index.ts"
       ],
+      "@z1/prompt": [
+        "./packages/prompt/src/index.ts"
+      ],
       "@z1/cli": [
         "./apps/cli/src/index.ts"
       ]

@@ -42,6 +42,9 @@
       "path": "./packages/node-host"
     },
     {
+      "path": "./packages/prompt"
+    },
+    {
       "path": "./apps/cli"
     },
     {

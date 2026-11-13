@@ -46,6 +46,7 @@ The `z1/` workspace is new code, not derived from the upstream project:
 - `@z1/module`, `@z1/node-host` — executable module manifest/store and the
   sandboxed child-process worker
 - `@z1/memory`, `@z1/agent` — branch-tree context and the agent loop as a graph
+- `@z1/prompt` — prompt sections, role presets, stacking and hashing
 - `@z1/protocol`, `@z1/server` — JSON-RPC over WebSocket and the headless server
 - `@z1/provider-openai` — OpenAI-compatible streaming provider
 - `@z1/cli`, `@z1/canvas` — the `z1` command and the browser canvas

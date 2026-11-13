@@ -20,6 +20,7 @@
     "@z1/graph": "workspace:*",
     "@z1/node": "workspace:*",
     "@z1/nodes": "workspace:*",
+    "@z1/prompt": "workspace:*",
     "@z1/runtime": "workspace:*"
   }
 }

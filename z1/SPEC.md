@@ -451,6 +451,10 @@ All ids are namespaced `z1.<name>`.
 | `z1.core.merge` | `in` (flow, optional), `a` (data Json, optional, `waitFor: any`), `b` (data Json, optional, `waitFor: any`) | `out` (flow), `value` (data Json) | first defined input |
 | `z1.core.value` | `in` (flow) | `out` (flow), `value` (data Json) | config `{ value }`; a branch-local constant |
 | `z1.memory.context` | — | `text` (data string), `messages` (data ChatMessage[]) | root; builds the branch-tree envelope through `ctx.memory` |
+| `z1.prompt.section` | `vars` (data object, optional) | `fragment` (data object) | config `{ id, slot, priority, required, body }`; renders `{{path}}` from vars |
+| `z1.prompt.stack` | `fragments` (data object[]) | `text` (string), `hash` (string), `sections` (object[]), `tokens` (number) | config `{ budgetTokens? }`; orders by slot/priority, dedupes, drops optional over budget |
+| `z1.prompt.text` | — | `text` (string), `hash` (string) | config `{ text }`; full replacement for a stack |
+| `z1.prompt.context` | `memory` (messages/string), `tools` (array), `autonomy` (string), `graph` (object) — all optional | `vars` (object) | normalises values for `{{memory}}`/`{{tools}}`/`{{autonomy}}`/`{{graph}}` |
 
 Nested-graph body contract: the body must contain exactly one rooted
 `z1.core.input` (fed `{ value, iteration }`) and exactly one `z1.core.output`

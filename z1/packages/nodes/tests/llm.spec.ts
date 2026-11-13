@@ -139,6 +139,79 @@ describe('z1.llm nodes', () => {
     expect(services.chatCalls[0]?.model).toEqual({ provider: 'mock', model: 'port-model' })
   })
 
+  test('a connected system port wins over config.system', async () => {
+    const graph = makeGraph(
+      'chat-system-port',
+      [
+        graphNode('model1', 'z1.llm.model', { provider: 'mock', model: 'mock-1' }),
+        graphNode('sys', 'z1.core.const', { value: 'from the port' }),
+        graphNode('msgs', 'z1.core.const', { value: [{ role: 'user', content: 'hi' }] }),
+        graphNode('chat1', 'z1.llm.chat', { system: 'from config' }),
+        graphNode('out1', 'z1.core.output'),
+      ],
+      [
+        dataEdge('d1', 'model1', 'model', 'chat1', 'model'),
+        dataEdge('d2', 'sys', 'value', 'chat1', 'system'),
+        dataEdge('d3', 'msgs', 'value', 'chat1', 'messages'),
+        dataEdge('d4', 'chat1', 'text', 'out1', 'value'),
+      ],
+    )
+
+    const { result, services } = await runBuiltins({ graph })
+
+    expect(result.status).toBe('completed')
+    expect(services.chatCalls[0]?.messages).toEqual([
+      { role: 'system', content: 'from the port' },
+      { role: 'user', content: 'hi' },
+    ])
+  })
+
+  test('an empty system port string means no system message', async () => {
+    const graph = makeGraph(
+      'chat-system-empty-port',
+      [
+        graphNode('model1', 'z1.llm.model', { provider: 'mock', model: 'mock-1' }),
+        graphNode('sys', 'z1.core.const', { value: '   ' }),
+        graphNode('msgs', 'z1.core.const', { value: [{ role: 'user', content: 'hi' }] }),
+        graphNode('chat1', 'z1.llm.chat', { system: 'from config' }),
+        graphNode('out1', 'z1.core.output'),
+      ],
+      [
+        dataEdge('d1', 'model1', 'model', 'chat1', 'model'),
+        dataEdge('d2', 'sys', 'value', 'chat1', 'system'),
+        dataEdge('d3', 'msgs', 'value', 'chat1', 'messages'),
+        dataEdge('d4', 'chat1', 'text', 'out1', 'value'),
+      ],
+    )
+
+    const { result, services } = await runBuiltins({ graph })
+
+    expect(result.status).toBe('completed')
+    expect(services.chatCalls[0]?.messages).toEqual([{ role: 'user', content: 'hi' }])
+  })
+
+  test('config.system still applies when the system port is disconnected', async () => {
+    const graph = makeGraph(
+      'chat-system-config',
+      [
+        graphNode('model1', 'z1.llm.model', { provider: 'mock', model: 'mock-1' }),
+        graphNode('msgs', 'z1.core.const', { value: [{ role: 'user', content: 'hi' }] }),
+        graphNode('chat1', 'z1.llm.chat', { system: 'config only' }),
+        graphNode('out1', 'z1.core.output'),
+      ],
+      [
+        dataEdge('d1', 'model1', 'model', 'chat1', 'model'),
+        dataEdge('d2', 'msgs', 'value', 'chat1', 'messages'),
+        dataEdge('d3', 'chat1', 'text', 'out1', 'value'),
+      ],
+    )
+
+    const { result, services } = await runBuiltins({ graph })
+
+    expect(result.status).toBe('completed')
+    expect(services.chatCalls[0]?.messages[0]).toEqual({ role: 'system', content: 'config only' })
+  })
+
   test('does not prepend the configured system message when messages already start with one', async () => {
     const graph = makeGraph(
       'chat-system-dedup',

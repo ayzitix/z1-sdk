@@ -149,6 +149,9 @@ const chat = defineNode({
     dataPort('model', modelHandleSchema, false),
     dataPort('messages', z.array(chatMessageSchema), false),
     dataPort('tools', z.array(toolSchema), false),
+    // A composed system prompt usually arrives from `z1.prompt.stack`; when the
+    // port is connected it wins over config.system.
+    dataPort('system', z.string(), false),
     // Convenience for one-shot turns: a single user message without building
     // the `messages` array in the graph.
     dataPort('prompt', z.string(), false),
@@ -184,8 +187,14 @@ const chat = defineNode({
     if (messages.length === 0 && typeof prompt === 'string') {
       messages.push({ role: 'user', content: prompt })
     }
+    // A connected `system` port is authoritative; config.system is the fallback.
+    // Either way, an empty or whitespace-only string means "no system message".
+    const rawSystem = Object.hasOwn(values, 'system')
+      ? values['system']
+      : ctx.config.system
+    const system =
+      typeof rawSystem === 'string' && rawSystem.trim() !== '' ? rawSystem : undefined
     // Never duplicate a system message the caller already put first.
-    const system = ctx.config.system
     const withSystem =
       system === undefined || messages[0]?.role === 'system'
         ? messages

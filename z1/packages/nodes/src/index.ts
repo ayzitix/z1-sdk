@@ -16,6 +16,7 @@ import { flowIf, flowLoop, flowMap, flowNodes } from './flow.ts'
 import { graphNodes, graphSubgraph } from './graph.ts'
 import { llmChat, llmModel, llmNodes } from './llm.ts'
 import { memoryContext, memoryNodes } from './memory.ts'
+import { promptContext, promptNodes, promptSection, promptStack, promptText } from './prompt.ts'
 import { toolCall, toolNodes } from './tools.ts'
 
 export const PACKAGE = '@z1/nodes'
@@ -31,6 +32,7 @@ export const builtinNodes: readonly NodeDefinition[] = [
   ...graphNodes,
   ...llmNodes,
   ...memoryNodes,
+  ...promptNodes,
   ...toolNodes,
 ]
 
@@ -63,6 +65,11 @@ export {
   llmModel,
   memoryNodes,
   memoryContext,
+  promptNodes,
+  promptSection,
+  promptStack,
+  promptText,
+  promptContext,
   toolNodes,
   toolCall,
 }

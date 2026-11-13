@@ -12,6 +12,9 @@
     },
     {
       "path": "../runtime"
+    },
+    {
+      "path": "../prompt"
     }
   ],
   "compilerOptions": {

@@ -27,6 +27,10 @@ test('registers every SPEC §7 node at 1.0.0', () => {
     'z1.llm.chat',
     'z1.llm.model',
     'z1.memory.context',
+    'z1.prompt.context',
+    'z1.prompt.section',
+    'z1.prompt.stack',
+    'z1.prompt.text',
     'z1.tool.call',
   ])
   expect(builtinNodes).toHaveLength(ids.length)

@@ -1,5 +1,11 @@
 import type { GraphDocument, GraphEdge, GraphNode } from '@z1/graph'
 import type { Json, ModelHandle, ToolSchema } from '@z1/node'
+import {
+  DEFAULT_SECTIONS,
+  ROLE_SECTIONS,
+  type PromptSection,
+  type RoleId,
+} from '@z1/prompt'
 
 export const PACKAGE = '@z1/agent'
 
@@ -8,10 +14,17 @@ const NODE_VERSION = '1.0.0'
 
 export interface AgentGraphOptions {
   model: ModelHandle
+  /** Role delta appended to the core prompt. Defaults to `coder`. */
+  role?: RoleId
+  /** Extra instructions, rendered as the last (custom) section. */
   system?: string
   /** Iteration cap of the `z1.flow.loop` body. Defaults to 12. */
   maxSteps?: number
   tools?: readonly ToolSchema[]
+  /** Token ceiling of the prompt stack. Defaults to the prompt package's own. */
+  budgetTokens?: number
+  /** Autonomy policy exposed to the prompt as `{{autonomy}}`. Defaults to `auto`. */
+  autonomyPolicy?: string
 }
 
 function node(id: string, type: string, x: number, y: number, config: Json = {}): GraphNode {
@@ -94,8 +107,9 @@ function toolsJson(tools: readonly ToolSchema[]): Json {
  * merge can never fire on the untaken branch.
  */
 function buildLoopBody(options: AgentGraphOptions): GraphDocument {
+  // The system prompt is never baked into config: it arrives in the seed as a
+  // system message and is also exposed on the chat `system` port.
   const chatConfig: Record<string, Json> = { model: modelJson(options.model) }
-  if (options.system !== undefined) chatConfig['system'] = options.system
 
   return {
     schemaVersion: 1,
@@ -104,6 +118,9 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
     nodes: [
       node('body', 'z1.core.input', 0, 0),
       node('messages', 'z1.core.get', 220, 0, { path: 'value' }),
+      // The seed's first entry is the system message built from the prompt
+      // stack; it feeds the chat's `system` port and the message list alike.
+      node('systemText', 'z1.core.get', 440, -300, { path: '0.content' }),
       // A root const, so the tool declaration is available on every iteration.
       node('tools', 'z1.core.const', 220, -140, {
         value: toolsJson(options.tools ?? []),
@@ -159,9 +176,12 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       data('d24', 'elseDone', 'value', 'doneMerge', 'b'),
       data('d25', 'messagesMerge', 'value', 'outValue', 'value'),
       data('d26', 'doneMerge', 'value', 'outDone', 'value'),
+      data('d27', 'body', 'value', 'systemText', 'value'),
+      data('d28', 'systemText', 'value', 'chat', 'system'),
       // Flow
       flow('f1', 'body', 'out', 'messages', 'in'),
-      flow('f2', 'messages', 'out', 'chat', 'in'),
+      flow('f2', 'messages', 'out', 'systemText', 'in'),
+      flow('f22', 'systemText', 'out', 'chat', 'in'),
       flow('f3', 'chat', 'out', 'branch', 'in'),
       flow('f4', 'branch', 'then', 'assistantMsg', 'in'),
       flow('f5', 'assistantMsg', 'out', 'callName', 'in'),
@@ -186,13 +206,101 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
   }
 }
 
+interface PromptChain {
+  readonly nodes: GraphNode[]
+  readonly edges: GraphEdge[]
+  /** First `z1.core.concat` of the fragment chain (the flow entry). */
+  readonly first: string
+  /** Last `z1.core.concat`, whose value feeds the stack. */
+  readonly last: string
+}
+
 /**
- * The default agent loop as a real graph: seed the transcript with the user
- * prompt, run `z1.flow.loop` over the model/tool body, then publish the last
- * message's content. No host-side loop is hidden behind a custom node.
+ * The system prompt as a visible graph: context → one section per default,
+ * role delta, memory and custom, then a concat chain the stack consumes.
+ */
+function promptChain(options: AgentGraphOptions): PromptChain {
+  const role = options.role ?? 'coder'
+  const sections: PromptSection[] = [
+    ...DEFAULT_SECTIONS,
+    ROLE_SECTIONS[role],
+    { id: 'context.memory', slot: 'context', priority: 0, required: false, body: '{{memory}}' },
+  ]
+  if (options.system !== undefined) {
+    sections.push({
+      id: 'custom.instructions',
+      slot: 'custom',
+      priority: 1000,
+      required: false,
+      body: options.system,
+    })
+  }
+
+  const nodes: GraphNode[] = [
+    node('promptTools', 'z1.core.const', 0, 240, {
+      value: toolsJson(options.tools ?? []),
+    }),
+    node('promptAutonomy', 'z1.core.const', 0, 380, {
+      value: options.autonomyPolicy ?? 'auto',
+    }),
+    // Reserved: the run's graph description is not part of the prompt yet.
+    node('promptGraph', 'z1.core.const', 0, 520, { value: {} }),
+    node('promptContext', 'z1.prompt.context', 220, 380),
+    node('promptFragments', 'z1.core.const', 440, 200, { value: [] }),
+  ]
+  const edges: GraphEdge[] = [
+    data('pc.memory', 'memory', 'text', 'promptContext', 'memory'),
+    data('pc.tools', 'promptTools', 'value', 'promptContext', 'tools'),
+    data('pc.autonomy', 'promptAutonomy', 'value', 'promptContext', 'autonomy'),
+    data('pc.graph', 'promptGraph', 'value', 'promptContext', 'graph'),
+  ]
+
+  for (const [index, section] of sections.entries()) {
+    const id = `promptSection.${section.id}`
+    const config: Record<string, Json> = {
+      id: section.id,
+      slot: section.slot,
+      priority: section.priority,
+      required: section.required === true,
+      body: section.body,
+    }
+    nodes.push(node(id, 'z1.prompt.section', 440, 360 + index * 150, config))
+    edges.push(data(`ps.vars.${section.id}`, 'promptContext', 'vars', id, 'vars'))
+  }
+
+  // `a` is the previous array, `b` the next fragment: the stack receives the
+  // same order the sections were declared in.
+  let previous = 'promptFragments'
+  for (const [index, section] of sections.entries()) {
+    const id = `promptConcat${String(index)}`
+    nodes.push(node(id, 'z1.core.concat', 660, 1980 + index * 90))
+    edges.push(data(`ps.a.${String(index)}`, previous, 'value', id, 'a'))
+    edges.push(
+      data(`ps.b.${String(index)}`, `promptSection.${section.id}`, 'fragment', id, 'b'),
+    )
+    if (index > 0) {
+      edges.push(flow(`ps.flow.${String(index)}`, previous, 'out', id, 'in'))
+    }
+    previous = id
+  }
+
+  const stackConfig: Record<string, Json> = {}
+  if (options.budgetTokens !== undefined) stackConfig['budgetTokens'] = options.budgetTokens
+  nodes.push(node('promptStack', 'z1.prompt.stack', 1200, 1980, stackConfig))
+  edges.push(data('ps.stack', previous, 'value', 'promptStack', 'fragments'))
+
+  return { nodes, edges, first: 'promptConcat0', last: previous }
+}
+
+/**
+ * The default agent loop as a real graph: compose the system prompt from
+ * sections, seed the transcript with that system message plus the user prompt,
+ * run `z1.flow.loop` over the model/tool body, then publish the last message's
+ * content. No host-side loop is hidden behind a custom node.
  */
 export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
   const maxSteps = options.maxSteps ?? 12
+  const prompt = promptChain(options)
   return {
     schemaVersion: 1,
     id: 'agent.loop',
@@ -202,29 +310,47 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
       // Memory is a root: it reads the run's own tree, not the prompt.
       node('memory', 'z1.memory.context', 0, -140),
       node('userMessage', 'z1.core.message', 220, 0, { role: 'user' }),
-      node('seed', 'z1.core.concat', 440, 0),
-      node('loop', 'z1.flow.loop', 660, 0, {
+      // The stack text is materialized as the transcript's system message; the
+      // body reads it back from the seed to fill the chat `system` port.
+      node('promptMessage', 'z1.core.message', 880, -300, { role: 'system' }),
+      node('promptEmpty', 'z1.core.const', 660, -300, { value: [] }),
+      node('promptHead', 'z1.core.concat', 1100, -300),
+      node('seedEmpty', 'z1.core.const', 660, 120, { value: [] }),
+      node('seedUser', 'z1.core.concat', 880, 120),
+      node('seed', 'z1.core.concat', 1320, 0),
+      node('loop', 'z1.flow.loop', 1540, 0, {
         body: graphJson(buildLoopBody(options)),
         maxIterations: maxSteps,
       }),
-      node('last', 'z1.core.last', 880, 0),
-      node('content', 'z1.core.get', 1100, 0, { path: 'content' }),
-      node('output', 'z1.core.output', 1320, 0, { port: 'output' }),
+      node('last', 'z1.core.last', 1760, 0),
+      node('content', 'z1.core.get', 1980, 0, { path: 'content' }),
+      node('output', 'z1.core.output', 2200, 0, { port: 'output' }),
+      ...prompt.nodes,
     ],
     edges: [
       data('d1', 'input', 'value', 'userMessage', 'content'),
-      data('d2', 'memory', 'messages', 'seed', 'a'),
-      data('d3', 'userMessage', 'message', 'seed', 'b'),
-      data('d4', 'seed', 'value', 'loop', 'seed'),
-      data('d5', 'loop', 'result', 'last', 'items'),
-      data('d6', 'last', 'value', 'content', 'value'),
-      data('d7', 'content', 'value', 'output', 'value'),
-      flow('f1', 'input', 'out', 'userMessage', 'in'),
-      flow('f2', 'userMessage', 'out', 'seed', 'in'),
-      flow('f3', 'seed', 'out', 'loop', 'in'),
-      flow('f4', 'loop', 'out', 'last', 'in'),
-      flow('f5', 'last', 'out', 'content', 'in'),
-      flow('f6', 'content', 'out', 'output', 'in'),
+      data('d12', 'promptStack', 'text', 'promptMessage', 'content'),
+      data('d2', 'userMessage', 'message', 'seedUser', 'b'),
+      data('d3', 'seedEmpty', 'value', 'seedUser', 'a'),
+      data('d4', 'promptMessage', 'message', 'promptHead', 'b'),
+      data('d5', 'promptEmpty', 'value', 'promptHead', 'a'),
+      data('d6', 'promptHead', 'value', 'seed', 'a'),
+      data('d7', 'seedUser', 'value', 'seed', 'b'),
+      data('d8', 'seed', 'value', 'loop', 'seed'),
+      data('d9', 'loop', 'result', 'last', 'items'),
+      data('d10', 'last', 'value', 'content', 'value'),
+      data('d11', 'content', 'value', 'output', 'value'),
+      ...prompt.edges,
+      flow('f1', 'input', 'out', prompt.first, 'in'),
+      flow('f2', prompt.last, 'out', 'userMessage', 'in'),
+      flow('f3', 'userMessage', 'out', 'promptMessage', 'in'),
+      flow('f4', 'promptMessage', 'out', 'promptHead', 'in'),
+      flow('f5', 'promptHead', 'out', 'seedUser', 'in'),
+      flow('f6', 'seedUser', 'out', 'seed', 'in'),
+      flow('f7', 'seed', 'out', 'loop', 'in'),
+      flow('f8', 'loop', 'out', 'last', 'in'),
+      flow('f9', 'last', 'out', 'content', 'in'),
+      flow('f10', 'content', 'out', 'output', 'in'),
     ],
   }
 }

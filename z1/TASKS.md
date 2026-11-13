@@ -67,6 +67,14 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   `memory.context` node, `z1 memory context`.
 - [x] T29 iteration-scoped execution paths (fork inside a loop replays only the
   earlier iterations).
-- [x] T30 Review + commit.
+- [ ] T30 Review + commit.
 - [x] T31 Provider retry on 429/5xx with backoff and `retry-after`.
   Live River verification: tool call + second model round.
+
+## M6 — prompt as nodes
+
+- [x] T32 `@z1/prompt`: sections, slots, priorities, budget, hash, defaults,
+  role presets, `buildPrompt`.
+- [x] T33 nodes `prompt.section/stack/text/context`; `llm.chat.system` input.
+- [x] T34 agent graph rebuilt on prompt nodes; canvas section editor.
+- [ ] T35 Review + commit.
