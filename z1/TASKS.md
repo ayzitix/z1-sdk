@@ -110,3 +110,17 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] T43 `RunJournal` interface (no raw SQL in CLI), centralized paths,
   `host-dsh` removed.
 - [ ] T44 Prompt presets as data files (deferred; the prompt is already nodes).
+
+## M9 — services in modules and the audit fixes
+
+- [x] R3 service modules: manifest `services`, trusted v1, `ModuleServiceRuntime`,
+  bootstrap precedence (`overrides > service module > built-in`), echo-llm example.
+- [x] Server fork uses own sequence numbers; journal rejects unknown runs and
+  past-end forks.
+- [x] Resume without repeating the input works; different input still fails.
+- [x] Template loading is lazy; a malformed file only affects template commands.
+- [x] Approval prompts show the actual capability patterns.
+- [x] `--model` without `--live` warns; `--template id@version`; template flags
+  require `--template`.
+- [x] Config env flags, duplicate provider rejection, `beginRun`/`close` race,
+  failed listen closes the runtime, runId reuse conflict.

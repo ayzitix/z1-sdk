@@ -29,6 +29,10 @@ export interface RunJournal {
   ownedEvents(runId: string): readonly SequencedEvent[]
   getRun(runId: string): RunRecord | undefined
   listRuns(): readonly RunRecord[]
+  /**
+   * Fork `sourceRunId` after its own event `atSeq` (own numbering, as reported
+   * by `ownedEvents` — never the merged numbering of `read`).
+   */
   fork(sourceRunId: string, atSeq: number, newRunId: string): RunRecord
   updateRun(runId: string, patch: Partial<Pick<RunRecord, 'status' | 'updatedAt'>>): void
 }

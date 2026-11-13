@@ -32,15 +32,13 @@ export class TeeJournal implements Journal {
   append(event: RunEvent): void {
     this.#inner.append(event)
     const known = this.#seqs.get(event.runId)
+    // Notifications use merged numbering (the parent prefix plus this run's own
+    // events), matching the `seq` values `run.get`/`run.subscribe` replay.
+    // `journal.fork` instead uses own numbering; the mapping between the two is
+    // deliberately not exposed here.
     const seq = known === undefined ? this.#inner.read(event.runId).length : known + 1
     this.#seqs.set(event.runId, seq)
     this.#sink(event.runId, seq, event)
-  }
-
-  /** Sequence number the next append of `runId` will receive. */
-  nextSeq(runId: string): number {
-    const known = this.#seqs.get(runId)
-    return (known === undefined ? this.#inner.read(runId).length : known) + 1
   }
 
   read(runId: string): readonly RunEvent[] {

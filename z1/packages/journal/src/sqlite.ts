@@ -159,6 +159,14 @@ export class SqliteJournal implements Journal, RunJournal {
 
   append(event: RunEvent): void {
     const db = this.#handle()
+    // The `UPDATE runs` below would silently match nothing for a run that was
+    // never created, leaving orphan events that `read` can still surface. Fail
+    // loudly instead: sequence numbers only mean something inside a run row.
+    if (this.getRun(event.runId) === undefined) {
+      throw new Error(
+        `journal: cannot append to unknown run ${event.runId}; create the run first`,
+      )
+    }
     const data = JSON.stringify(event)
     db.exec('BEGIN IMMEDIATE')
     try {
@@ -214,6 +222,17 @@ export class SqliteJournal implements Journal, RunJournal {
     if (source === undefined) throw new Error(`journal: unknown run ${sourceRunId}`)
     if (this.getRun(newRunId) !== undefined) {
       throw new Error(`journal: run ${newRunId} already exists`)
+    }
+    // `atSeq` is a position in the source's own numbering (the same numbering
+    // `ownedEvents` reports), not in the merged replay `read` returns. A
+    // position past the last own event would replay more than the caller asked
+    // for, so treat it as a caller bug rather than clamping.
+    const owned = this.ownedEvents(sourceRunId)
+    const lastSeq = owned.length === 0 ? 0 : owned[owned.length - 1]!.seq
+    if (atSeq > lastSeq) {
+      throw new Error(
+        `journal: fork seq ${atSeq} is past run ${sourceRunId}'s last own event (${lastSeq})`,
+      )
     }
     const now = Date.now()
     const record: RunRecord = {

@@ -372,6 +372,39 @@ describe('z1 cli', () => {
       expect(JSON.parse(resumed.out.trimEnd())).toMatchObject({ status: 'completed' })
     })
 
+    test('--resume without input reuses the journaled seed', async () => {
+      const suspended = await run([
+        'run',
+        asking,
+        '--input',
+        '{"name":"seeded"}',
+        '--json',
+        '--suspend',
+      ])
+
+      expect(suspended.code).toBe(4)
+      const payload = JSON.parse(suspended.out.trimEnd()) as { runId: string }
+
+      // No `--input` at all: the runtime must fall back to the seed recorded in
+      // `run.started` rather than seeing a different (`null`) seed.
+      const resumed = await run(['run', asking, '--json', '--resume', payload.runId])
+      expect(resumed.err).toBe('')
+      expect(resumed.code).toBe(0)
+      expect(JSON.parse(resumed.out.trimEnd())).toMatchObject({ status: 'completed' })
+
+      const mismatch = await run([
+        'run',
+        asking,
+        '--input',
+        '{"name":"different"}',
+        '--json',
+        '--resume',
+        payload.runId,
+      ])
+      expect(mismatch.code).toBe(1)
+      expect(mismatch.err).toMatch(/^RESUME_MISMATCH: /m)
+    })
+
     test('--resume with an unknown run id exits 1', async () => {
       const { code, err } = await run([
         'run',

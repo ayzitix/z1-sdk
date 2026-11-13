@@ -16,7 +16,11 @@ import { canonicalJson } from './canonical.ts'
 import { copyPayload, directoryIntegrity } from './integrity.ts'
 import { compareVersions, ModuleManifestError, parseManifest } from './manifest.ts'
 import { writeFileAtomic } from './fsutil.ts'
-import type { ModuleCapabilities, ModuleManifest } from './types.ts'
+import type {
+  ModuleCapabilities,
+  ModuleManifest,
+  ModuleServiceDeclaration,
+} from './types.ts'
 
 /** Accepted manifest file names, in precedence order. */
 export const MODULE_MANIFEST_FILES = ['z1.module.json', 'manifest.json'] as const
@@ -26,6 +30,8 @@ export interface ModuleGrant {
   version: string
   integrity: string
   capabilities: ModuleCapabilities
+  /** Ambient services the manifest declared and the grant approved. */
+  services: ModuleServiceDeclaration[]
   grantedAt: number
   futureVersions: boolean
 }
@@ -81,6 +87,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+function isServiceKind(value: unknown): value is ModuleServiceDeclaration['kind'] {
+  return (
+    value === 'llm' ||
+    value === 'tools' ||
+    value === 'fs' ||
+    value === 'artifacts' ||
+    value === 'memory'
+  )
+}
+
+/** Missing services (pre-R3 grants) is `[]`; a malformed array is a bad grant. */
+function toGrantServices(value: unknown): ModuleServiceDeclaration[] | undefined {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return undefined
+  const services: ModuleServiceDeclaration[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined
+    const id = entry['id']
+    const kind = entry['kind']
+    if (typeof id !== 'string' || !isServiceKind(kind) || entry['trusted'] !== true) {
+      return undefined
+    }
+    services.push({ id, kind, trusted: true })
+  }
+  return services
+}
+
 function toGrant(value: unknown): ModuleGrant | undefined {
   if (!isRecord(value)) return undefined
   const { moduleId, version, integrity, capabilities, grantedAt, futureVersions } = value
@@ -90,11 +123,14 @@ function toGrant(value: unknown): ModuleGrant | undefined {
   if (typeof grantedAt !== 'number' || !Number.isFinite(grantedAt)) return undefined
   if (typeof futureVersions !== 'boolean') return undefined
   if (!isRecord(capabilities)) return undefined
+  const services = toGrantServices(value['services'])
+  if (services === undefined) return undefined
   return {
     moduleId,
     version,
     integrity,
     capabilities: capabilities as ModuleCapabilities,
+    services,
     grantedAt,
     futureVersions,
   }
@@ -220,7 +256,7 @@ export class ModuleStore {
     moduleId: string,
     version: string,
     integrity: string,
-    input: Pick<ModuleGrant, 'capabilities' | 'futureVersions'>,
+    input: Pick<ModuleGrant, 'capabilities' | 'services' | 'futureVersions'>,
   ): ModuleGrant {
     const index = this.state.grants.findIndex(
       (grant) => grant.moduleId === moduleId && grant.version === version,
@@ -239,12 +275,14 @@ export class ModuleStore {
       }
       const unchanged =
         existing.futureVersions === input.futureVersions &&
-        canonicalJson(existing.capabilities) === canonicalJson(input.capabilities)
+        canonicalJson(existing.capabilities) === canonicalJson(input.capabilities) &&
+        canonicalJson(existing.services) === canonicalJson(input.services)
       if (unchanged) return existing
 
       const updated: ModuleGrant = {
         ...existing,
         capabilities: input.capabilities,
+        services: input.services,
         futureVersions: input.futureVersions,
       }
       this.state.grants = this.state.grants.map((grant, at) => (at === index ? updated : grant))
@@ -257,6 +295,7 @@ export class ModuleStore {
       version,
       integrity,
       capabilities: input.capabilities,
+      services: input.services,
       grantedAt: Date.now(),
       futureVersions: input.futureVersions,
     }
@@ -326,6 +365,7 @@ export class ModuleStore {
             version,
             integrity: record.integrity,
             capabilities: {},
+            services: [],
             grantedAt: record.installedAt,
             futureVersions: false,
           } satisfies ModuleGrant)
@@ -488,22 +528,25 @@ export class ModuleStore {
     }
 
     const futureVersions = options?.futureVersions ?? existing?.futureVersions ?? false
+    const services = manifest.services ?? []
     const installed = this.install(moduleId, version, {
       capabilities: manifest.capabilities ?? {},
+      services,
       futureVersions,
     })
 
     if (
       existing === undefined ||
       existing.futureVersions !== futureVersions ||
-      canonicalJson(existing.capabilities) !== canonicalJson(manifest.capabilities ?? {})
+      canonicalJson(existing.capabilities) !== canonicalJson(manifest.capabilities ?? {}) ||
+      canonicalJson(existing.services) !== canonicalJson(services)
     ) {
       this.auditLog.append({
         type: 'approve',
         moduleId,
         version,
         integrity,
-        detail: { futureVersions },
+        detail: { futureVersions, services },
       })
     }
     return installed
@@ -512,7 +555,12 @@ export class ModuleStore {
   install(
     moduleId: string,
     version: string,
-    grant: Omit<ModuleGrant, 'moduleId' | 'version' | 'integrity' | 'grantedAt'>,
+    grant: {
+      capabilities: ModuleCapabilities
+      /** Declared services; omitted by legacy callers means none. */
+      services?: ModuleServiceDeclaration[]
+      futureVersions: boolean
+    },
   ): InstalledModule {
     const proposalDirectory = join(this.proposalsDir, `${moduleId}@${version}`)
     if (!existsSync(proposalDirectory)) {
@@ -532,6 +580,11 @@ export class ModuleStore {
 
     ensureModuleType(proposalDirectory)
     const integrity = directoryIntegrity(proposalDirectory, manifest)
+    const grantInput = {
+      capabilities: grant.capabilities,
+      services: grant.services ?? [],
+      futureVersions: grant.futureVersions,
+    }
     const existingGrant = this.findGrant(moduleId, version)
     if (existingGrant !== undefined && existingGrant.integrity !== integrity) {
       throw new ModuleStoreError(
@@ -549,7 +602,7 @@ export class ModuleStore {
           `${moduleId}@${version} is installed with a different integrity`,
         )
       }
-      const savedGrant = this.persistGrant(moduleId, version, integrity, grant)
+      const savedGrant = this.persistGrant(moduleId, version, integrity, grantInput)
       return this.toInstalled(record, savedGrant)
     }
 
@@ -572,13 +625,13 @@ export class ModuleStore {
     writeFileSync(join(temporary, 'installed.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8')
     renameSync(temporary, directory)
 
-    const savedGrant = this.persistGrant(moduleId, version, integrity, grant)
+    const savedGrant = this.persistGrant(moduleId, version, integrity, grantInput)
     this.auditLog.append({
       type: 'install',
       moduleId,
       version,
       integrity,
-      detail: { directory },
+      detail: { directory, services: grantInput.services },
     })
     return this.toInstalled(record, savedGrant)
   }

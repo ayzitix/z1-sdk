@@ -28,6 +28,8 @@ export interface RuntimeConfig {
   live: boolean
   /** Load active module declarations and start their workers on a run. */
   useModules: boolean
+  /** Start trusted in-process service modules (`Z1_SERVICE_MODULES`). */
+  useServiceModules: boolean
   /** Give runs branch memory over the journal. */
   useMemory: boolean
   providers: readonly ProviderConfig[]
@@ -51,6 +53,7 @@ export const DEFAULT_CONFIG = {
   templatesPath: DEFAULT_TEMPLATES_PATH,
   live: false,
   useModules: true,
+  useServiceModules: true,
   useMemory: true,
 } as const
 
@@ -61,6 +64,7 @@ const FILE_KEYS = [
   'templatesPath',
   'live',
   'useModules',
+  'useServiceModules',
   'useMemory',
   'providers',
 ] as const
@@ -74,6 +78,7 @@ interface RuntimeConfigFile {
   templatesPath?: string
   live?: boolean
   useModules?: boolean
+  useServiceModules?: boolean
   useMemory?: boolean
   providers?: readonly ProviderConfig[]
 }
@@ -171,7 +176,7 @@ function readConfigFile(file: string): RuntimeConfigFile {
       config[key] = value
     }
   }
-  for (const key of ['live', 'useModules', 'useMemory'] as const) {
+  for (const key of ['live', 'useModules', 'useServiceModules', 'useMemory'] as const) {
     const value = raw[key]
     if (value !== undefined) {
       if (typeof value !== 'boolean') {
@@ -189,6 +194,15 @@ function readConfigFile(file: string): RuntimeConfigFile {
     config.providers = providers.map((entry, index) =>
       readProvider(entry, `"${file}": providers[${String(index)}]`),
     )
+    // Merging would silently keep the last one; a duplicate id is a typo the
+    // author needs told about.
+    const seen = new Set<string>()
+    for (const provider of config.providers) {
+      if (seen.has(provider.id)) {
+        throw new Error(`"${file}" lists provider "${provider.id}" more than once`)
+      }
+      seen.add(provider.id)
+    }
   }
 
   return config
@@ -229,12 +243,23 @@ function mergeProviders(
   return merged
 }
 
+/** `1`/`0` only: the strict form, kept for `Z1_LIVE`. */
 function envBoolean(name: string, env: Record<string, string | undefined>): boolean | undefined {
   const raw = env[name]
   if (raw === undefined || raw === '') return undefined
   if (raw === '1') return true
   if (raw === '0') return false
   throw new Error(`${name} must be 1 or 0, got "${raw}"`)
+}
+
+/** `1`/`0` plus the words `true`/`false`, for the newer feature switches. */
+function envFlag(name: string, env: Record<string, string | undefined>): boolean | undefined {
+  const raw = env[name]
+  if (raw === undefined || raw === '') return undefined
+  const lowered = raw.toLowerCase()
+  if (lowered === '1' || lowered === 'true') return true
+  if (lowered === '0' || lowered === 'false') return false
+  throw new Error(`${name} must be 1, 0, true or false, got "${raw}"`)
 }
 
 /**
@@ -275,8 +300,21 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
     modulesPath: expandPath(modulesPath, cwd),
     templatesPath: expandPath(templatesPath, cwd),
     live,
-    useModules: overrides.useModules ?? fromFile.useModules ?? DEFAULT_CONFIG.useModules,
-    useMemory: overrides.useMemory ?? fromFile.useMemory ?? DEFAULT_CONFIG.useMemory,
+    useModules:
+      overrides.useModules ??
+      envFlag('Z1_USE_MODULES', env) ??
+      fromFile.useModules ??
+      DEFAULT_CONFIG.useModules,
+    useServiceModules:
+      overrides.useServiceModules ??
+      envFlag('Z1_SERVICE_MODULES', env) ??
+      fromFile.useServiceModules ??
+      DEFAULT_CONFIG.useServiceModules,
+    useMemory:
+      overrides.useMemory ??
+      envFlag('Z1_USE_MEMORY', env) ??
+      fromFile.useMemory ??
+      DEFAULT_CONFIG.useMemory,
     providers,
     env: { ...env },
   }

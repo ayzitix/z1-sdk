@@ -5,6 +5,8 @@ export type {
   ModuleCapabilities,
   ModuleManifest,
   ModuleNodeDeclaration,
+  ModuleServiceDeclaration,
+  ModuleServiceKind,
 } from './types.ts'
 export type { ManifestIssue } from './manifest.ts'
 export {

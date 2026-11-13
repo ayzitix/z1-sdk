@@ -58,6 +58,9 @@ export class ModuleRuntime {
     const active = this.#options.store.list().filter((module) => module.active)
     try {
       for (const installed of active) {
+        // A service-only module has no node worker: `@z1/node-host/services`
+        // imports it in-process instead.
+        if (installed.manifest.nodes.length === 0) continue
         await this.#load(installed)
       }
     } catch (error) {

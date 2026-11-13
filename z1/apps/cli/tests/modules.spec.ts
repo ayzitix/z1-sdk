@@ -456,3 +456,100 @@ describe('z1 module', () => {
     expect(err).toContain(ECHO_NODE)
   })
 })
+
+const ECHO_LLM_SOURCE = fileURLToPath(
+  new URL('../../../examples/modules/echo-llm', import.meta.url),
+)
+
+describe('service modules', () => {
+  let serviceModulesDir = ''
+  let serviceDb = ''
+
+  beforeAll(async () => {
+    serviceModulesDir = join(directory, 'service-store')
+    serviceDb = join(directory, 'service.db')
+
+    const proposed = await run([
+      'module',
+      'propose',
+      ECHO_LLM_SOURCE,
+      '--modules-dir',
+      serviceModulesDir,
+    ])
+    expect(proposed.code).toBe(0)
+    expect(proposed.out).toContain('services: llm')
+
+    const approved = await run([
+      'module',
+      'approve',
+      'com.example.echo-llm',
+      '--modules-dir',
+      serviceModulesDir,
+    ])
+    expect(approved.code).toBe(0)
+    expect(approved.out).toContain('approved com.example.echo-llm@1.0.0')
+  })
+
+  test('module list shows the declared services', async () => {
+    const listed = await run([
+      'module',
+      'list',
+      '--modules-dir',
+      serviceModulesDir,
+    ])
+    expect(listed.code).toBe(0)
+    expect(listed.out).toContain('services: llm')
+
+    const json = await run([
+      'module',
+      'list',
+      '--json',
+      '--modules-dir',
+      serviceModulesDir,
+    ])
+    const modules = JSON.parse(json.out.trimEnd()) as {
+      id: string
+      services: { kind: string }[]
+    }[]
+    expect(modules[0]?.services).toEqual([{ id: 'llm', kind: 'llm', trusted: true }])
+  })
+
+  test('an approved service module answers the agent loop', async () => {
+    const { code, out } = await run([
+      'run',
+      '--template',
+      'agent.loop',
+      '--message',
+      'hello',
+      '--json',
+      '--db',
+      serviceDb,
+      '--modules-dir',
+      serviceModulesDir,
+    ])
+
+    expect(code).toBe(0)
+    const result = JSON.parse(out.trimEnd()) as { outputs: { output: string } }
+    expect(result.outputs.output).toBe('echo-llm: hello')
+  })
+
+  test('--no-service-modules falls back to the mock provider', async () => {
+    const { code, out } = await run([
+      'run',
+      '--template',
+      'agent.loop',
+      '--message',
+      'hello',
+      '--json',
+      '--db',
+      serviceDb,
+      '--modules-dir',
+      serviceModulesDir,
+      '--no-service-modules',
+    ])
+
+    expect(code).toBe(0)
+    const result = JSON.parse(out.trimEnd()) as { outputs: { output: string } }
+    expect(result.outputs.output).toBe('mock: hello')
+  })
+})

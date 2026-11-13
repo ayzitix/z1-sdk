@@ -339,6 +339,16 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     }
   }
 
+  /**
+   * A settled run with no watchers needs no server-side state: its events stay
+   * in the journal and `run.subscribe` rebuilds a dormant `RunState` on demand.
+   * A running run is never pruned, because its controller is the only cancel.
+   */
+  function pruneRun(state: RunState): void {
+    if (state.status === 'running' || state.subscribers.size > 0) return
+    runs.delete(state.runId)
+  }
+
   async function runAndSettle(
     state: RunState,
     args: StartArgs,
@@ -378,12 +388,14 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       state.status = 'failed'
       journal.updateRun(state.runId, { status: 'failed', updatedAt: Date.now() })
       notifyStatus(state)
+      pruneRun(state)
       return { runId: state.runId, status: 'failed', outputs: {}, error: message }
     }
 
     state.status = result.status
     journal.updateRun(state.runId, { status: result.status, updatedAt: Date.now() })
     notifyStatus(state)
+    pruneRun(state)
 
     const reply: RunReply = {
       runId: state.runId,
@@ -397,7 +409,15 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
 
   async function startRun(args: StartArgs, connection: Connection): Promise<RunReply> {
     const previous = runs.get(args.runId)
-    if (previous !== undefined && previous.status === 'running') {
+    if (!args.resume) {
+      // A client-chosen id is a claim on a fresh run: reuse would either
+      // overwrite the journal row or silently append to someone else's trace.
+      if (previous !== undefined || journal.getRun(args.runId) !== undefined) {
+        throw appFault(APP_ERRORS.conflict, `run ${args.runId} already exists`, {
+          runId: args.runId,
+        })
+      }
+    } else if (previous !== undefined && previous.status === 'running') {
       throw appFault(APP_ERRORS.conflict, `run ${args.runId} is already running`, {
         runId: args.runId,
       })
@@ -560,11 +580,15 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       if (journal.getRun(runId) === undefined) throw runNotFound(runId)
       const atSeq = optionalSeq(params['atSeq'], 'atSeq')
       const nodePath = optionalString(params['nodePath'], 'nodePath')
-      const events = readSequenced(runId, undefined)
+      // Fork points live in the run's own numbering (`ownedEvents`), because a
+      // prefix inherited from a parent is not this run's to truncate. `run.get`
+      // and `run.event` keep merged numbering for cursors; `atSeq` and the
+      // returned `forkSeq` are own numbering, like `journal.fork`.
+      const owned = journal.ownedEvents(runId)
 
       let forkSeq: number
       if (nodePath !== undefined) {
-        const started = events.find(
+        const started = owned.find(
           (item) => item.event.type === 'node.started' && item.event.path === nodePath,
         )
         if (started === undefined) {
@@ -573,7 +597,7 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
         // The fork happens just before that node ran.
         forkSeq = started.seq - 1
       } else {
-        forkSeq = atSeq ?? events.length
+        forkSeq = atSeq ?? (owned.length === 0 ? 0 : (owned[owned.length - 1]?.seq ?? 0))
       }
 
       const newRunId = `run_${randomUUID()}`
@@ -691,6 +715,7 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       if (entry !== undefined) entry.decide('cancelled')
     }
     for (const state of runs.values()) state.subscribers.delete(connection)
+    for (const state of [...runs.values()]) pruneRun(state)
   }
 
   function onSocket(socket: WebSocket): void {
@@ -752,19 +777,60 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     onSocket(socket)
   })
 
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error): void => {
-      httpServer.off('listening', onListening)
-      reject(error)
-    }
-    const onListening = (): void => {
-      httpServer.off('error', onError)
-      resolve()
-    }
-    httpServer.once('error', onError)
-    httpServer.once('listening', onListening)
-    httpServer.listen(config.port, config.host)
-  })
+  /**
+   * Bind the port. `ws` forwards the HTTP server's `error`/`listening` events
+   * onto the WebSocketServer, and an unhandled `error` there (or on the HTTP
+   * server) throws before the other listener runs, so both emitters are wired
+   * and a single settled flag makes the pair idempotent.
+   */
+  async function listenForRequests(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const cleanup = (): void => {
+        httpServer.off('error', onError)
+        httpServer.off('listening', onListening)
+        wss.off('error', onError)
+        wss.off('listening', onListening)
+      }
+      function onError(error: Error): void {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      }
+      function onListening(): void {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve()
+      }
+      httpServer.once('error', onError)
+      wss.once('error', onError)
+      httpServer.once('listening', onListening)
+      wss.once('listening', onListening)
+      httpServer.listen(config.port, config.host)
+    })
+  }
+
+  try {
+    await listenForRequests()
+  } catch (error) {
+    // EADDRINUSE (or a bad host) happens after the runtime opened the journal
+    // and module store; release both before surfacing the bind failure.
+    await new Promise<void>((resolve) => {
+      wss.close(() => {
+        resolve()
+      })
+    })
+    await new Promise<void>((resolve) => {
+      httpServer.close(() => {
+        resolve()
+      })
+      httpServer.closeAllConnections()
+    })
+    await runtime.close()
+    throw error
+  }
 
   const address = httpServer.address()
   if (address === null || typeof address === 'string') {

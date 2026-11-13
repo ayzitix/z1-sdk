@@ -21,7 +21,7 @@ import {
   type GraphDocument,
   type ValidationIssue,
 } from '@z1/graph'
-import { ModuleStore, type ModuleCapabilities } from '@z1/module'
+import { ModuleStore, type ModuleCapabilities, type ModuleServiceDeclaration } from '@z1/module'
 import type { SequencedEvent } from '@z1/journal'
 import {
   MOCK_PROVIDER,
@@ -57,7 +57,7 @@ const USAGE = [
   '  run <graph.json> [--input <json> | --message <text>] [--input-file <path>] [--json] [--trace]',
   '      [--approve auto|ask|deny] [--module-approve auto|ask|deny] [--db <path>]',
   '      [--suspend] [--resume <runId>] [--live]',
-  '      [--modules-dir <path>] [--no-modules] [--no-memory]',
+  '      [--modules-dir <path>] [--no-modules] [--no-service-modules] [--no-memory]',
   '  run --template <id> [--model <provider/model>] [--provider <id>] [--role <id>]',
   '      [--max-steps <n>] [--system <text>] [--budget-tokens <n>] [--json] [--db <path>]',
   '  template list [--templates-dir <path>] [--json]',
@@ -65,9 +65,10 @@ const USAGE = [
   '  memory context <runId> [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
   '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
-  '      [--templates-dir <path>]',
+  '      [--templates-dir <path>] [--no-service-modules]',
   '  studio [--host <host>] [--port <port>] [--db <path>] [--graphs-dir <path>]',
-  '      [--modules-dir <path>] [--templates-dir <path>] [--token <token>] [--live] [--no-open] [--json]',
+  '      [--modules-dir <path>] [--templates-dir <path>] [--token <token>] [--live] [--no-open]',
+  '      [--no-service-modules] [--json]',
   '  module list [--modules-dir <path>] [--json]',
   '  module propose <dir> [--modules-dir <path>] [--json]',
   '  module approve <id>[@<version>] [--future] [--modules-dir <path>] [--json]',
@@ -391,21 +392,56 @@ function openModuleStore(values: ModuleCommandValues, io: CliIO): ModuleStore | 
   }
 }
 
+/** How many declared patterns one capability line shows before eliding. */
+const CAPABILITY_PATTERNS_SHOWN = 3
+/** Longest single declaration printed before it is cut with an ellipsis. */
+const CAPABILITY_PATTERN_WIDTH = 48
+
+/**
+ * An approval prompt is the user's only chance to see what they are granting,
+ * so a count (`fs.read[1]`) is useless: print the declarations themselves,
+ * briefly truncated. `${moduleDir}` is kept as written because that is the
+ * portable spelling the manifest author chose.
+ */
+function declarationList(values: readonly string[]): string {
+  const shown = values
+    .slice(0, CAPABILITY_PATTERNS_SHOWN)
+    .map((value) =>
+      value.length <= CAPABILITY_PATTERN_WIDTH
+        ? value
+        : `${value.slice(0, CAPABILITY_PATTERN_WIDTH - 1)}…`,
+    )
+  const hidden = values.length - shown.length
+  return hidden > 0 ? `${shown.join(', ')} (+${String(hidden)} more)` : shown.join(', ')
+}
+
+function spendSummary(spend: NonNullable<ModuleCapabilities['spend']>): string {
+  const amounts: string[] = []
+  if (spend.perCall !== undefined) amounts.push(`${spend.currency} ${String(spend.perCall)}/call`)
+  if (spend.perRun !== undefined) amounts.push(`${spend.currency} ${String(spend.perRun)}/run`)
+  return amounts.length === 0 ? spend.currency : amounts.join(', ')
+}
+
 /** Human-readable capability grant, also used by `module list`. */
 function capabilitySummary(capabilities: ModuleCapabilities | undefined): string {
   const parts: string[] = []
-  const read = capabilities?.fs?.read?.length ?? 0
-  const write = capabilities?.fs?.write?.length ?? 0
-  if (read > 0) parts.push(`fs.read[${String(read)}]`)
-  if (write > 0) parts.push(`fs.write[${String(write)}]`)
-  const hosts = capabilities?.net?.hosts?.length ?? 0
-  if (hosts > 0) parts.push(`net[${String(hosts)}]`)
-  const spawn = capabilities?.process?.spawn?.length ?? 0
-  if (spawn > 0) parts.push(`process.spawn[${String(spawn)}]`)
-  if (capabilities?.spend !== undefined) parts.push('spend')
-  const secrets = capabilities?.secrets?.length ?? 0
-  if (secrets > 0) parts.push(`secrets[${String(secrets)}]`)
-  return parts.length > 0 ? parts.join(' ') : 'none'
+  const read = capabilities?.fs?.read ?? []
+  const write = capabilities?.fs?.write ?? []
+  if (read.length > 0) parts.push(`fs.read: ${declarationList(read)}`)
+  if (write.length > 0) parts.push(`fs.write: ${declarationList(write)}`)
+  const hosts = capabilities?.net?.hosts ?? []
+  if (hosts.length > 0) parts.push(`net: ${declarationList(hosts)}`)
+  const spawn = capabilities?.process?.spawn ?? []
+  if (spawn.length > 0) parts.push(`process: ${declarationList(spawn)}`)
+  if (capabilities?.spend !== undefined) parts.push(`spend: ${spendSummary(capabilities.spend)}`)
+  const secrets = capabilities?.secrets ?? []
+  if (secrets.length > 0) parts.push(`secrets: ${declarationList(secrets)}`)
+  return parts.length > 0 ? parts.join('  ') : 'none'
+}
+
+/** `services: llm, tools`; absent when the module declares none. */
+function serviceSummary(services: readonly ModuleServiceDeclaration[] | undefined): string {
+  return (services ?? []).map((service) => service.kind).join(', ')
 }
 
 function splitModuleSpec(spec: string): { moduleId: string; version?: string } {
@@ -487,6 +523,7 @@ function moduleListCommand(args: readonly string[], io: CliIO): number {
           integrity: module.integrity,
           directory: module.directory,
           capabilities: module.manifest.capabilities ?? {},
+          services: module.manifest.services ?? [],
         })),
       )}\n`,
     )
@@ -499,8 +536,10 @@ function moduleListCommand(args: readonly string[], io: CliIO): number {
   }
   for (const module of modules) {
     const state = module.active ? 'active' : 'inactive'
+    const services = serviceSummary(module.manifest.services)
+    const servicePart = services === '' ? '' : `  services: ${services}`
     io.stdout(
-      `${module.manifest.id}@${module.manifest.version}  ${state}  ${module.integrity.slice(0, 12)}  ${capabilitySummary(module.manifest.capabilities)}\n`,
+      `${module.manifest.id}@${module.manifest.version}  ${state}  ${module.integrity.slice(0, 12)}  ${capabilitySummary(module.manifest.capabilities)}${servicePart}\n`,
     )
   }
   return 0
@@ -533,6 +572,8 @@ async function moduleProposeCommand(args: readonly string[], io: CliIO): Promise
   io.stdout(`proposed ${moduleSpec}\n`)
   io.stdout(`title: ${manifest.title}\n`)
   io.stdout(`nodes: ${manifest.nodes.map((node) => `${node.id}@${node.version}`).join(', ')}\n`)
+  const services = serviceSummary(manifest.services)
+  if (services !== '') io.stdout(`services: ${services}\n`)
   io.stdout(`capabilities: ${capabilitySummary(manifest.capabilities)}\n`)
   io.stdout(`integrity: ${proposed.integrity}\n`)
   io.stdout(`directory: ${proposed.directory}\n`)
@@ -592,6 +633,7 @@ function moduleApproveCommand(args: readonly string[], io: CliIO): number {
         version: chosen,
         integrity: installed.integrity,
         capabilities: installed.grant.capabilities,
+        services: installed.grant.services,
         futureVersions,
         active: installed.active,
         directory: installed.directory,
@@ -602,6 +644,8 @@ function moduleApproveCommand(args: readonly string[], io: CliIO): number {
 
   io.stdout(`approved ${moduleId}@${chosen}\n`)
   io.stdout(`grant: ${capabilitySummary(installed.grant.capabilities)}\n`)
+  const services = serviceSummary(installed.grant.services)
+  if (services !== '') io.stdout(`services: ${services}\n`)
   io.stdout(`integrity: ${installed.integrity}\n`)
   io.stdout(`installed: ${installed.directory}\n`)
   return 0
@@ -798,6 +842,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     live?: boolean
     'modules-dir'?: string
     'no-modules'?: boolean
+    'no-service-modules'?: boolean
     'no-memory'?: boolean
     template?: string
     model?: string
@@ -826,6 +871,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         live: { type: 'boolean' },
         'modules-dir': { type: 'string' },
         'no-modules': { type: 'boolean' },
+        'no-service-modules': { type: 'boolean' },
         'no-memory': { type: 'boolean' },
         template: { type: 'string' },
         model: { type: 'string' },
@@ -885,6 +931,26 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     return usage(io)
   }
 
+  // These flags describe the graph a template builds; with a graph file they
+  // would be silently ignored, which reads as "the flag did not work".
+  if (templateId === undefined) {
+    const templateOnly = [
+      'model',
+      'provider',
+      'role',
+      'max-steps',
+      'system',
+      'budget-tokens',
+    ] as const
+    const used = templateOnly.filter((name) => values[name] !== undefined)
+    if (used.length > 0) {
+      io.stderr(
+        `${used.map((name) => `--${name}`).join(', ')} requires --template\n`,
+      )
+      return usage(io)
+    }
+  }
+
   let model: ModelHandle | undefined
   let maxSteps: number | undefined
   let budgetTokens: number | undefined
@@ -901,7 +967,9 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     return usage(io)
   }
 
-  let input: Json = null
+  // `undefined` means "the caller supplied no input": a resumed run must then
+  // reuse the seed recorded in its own journal, which a `null` would hide.
+  let input: Json | undefined
   let graph: GraphDocument | undefined
   try {
     if (values.message !== undefined) {
@@ -936,12 +1004,21 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
           : { templatesPath: values['templates-dir'] }),
         ...(values.live === undefined ? {} : { live: values.live }),
         ...(values['no-modules'] === true ? { useModules: false } : {}),
+        ...(values['no-service-modules'] === true ? { useServiceModules: false } : {}),
         ...(values['no-memory'] === true ? { useMemory: false } : {}),
       },
     })
   } catch (error) {
     io.stderr(`${errorMessage(error)}\n`)
     return 1
+  }
+
+  if (model !== undefined && model.provider !== MOCK_PROVIDER && !config.live) {
+    // Routing to a named provider is what `--live` turns on. Without it the
+    // run uses the deterministic mock, so say so instead of pretending.
+    io.stderr(
+      `model "${model.provider}/${model.model}" ignored without --live; using mock\n`,
+    )
   }
 
   let runtime: Runtime
@@ -1033,7 +1110,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
           graph,
           registry: handle.registry,
           services: handle.services,
-          input,
+          ...(input === undefined ? {} : { input }),
           journal,
           runId,
           ...(resume !== undefined ? { resume: true } : {}),
@@ -1351,6 +1428,7 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
     live?: boolean
     json?: boolean
     'templates-dir'?: string
+    'no-service-modules'?: boolean
   }
   let positionals: string[]
   try {
@@ -1364,6 +1442,7 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
         live: { type: 'boolean' },
         json: { type: 'boolean' },
         'templates-dir': { type: 'string' },
+        'no-service-modules': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -1395,10 +1474,11 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
   const host = values.host ?? DEFAULT_SERVE_HOST
   const token = values.token
   const baseEnv = io.env ?? process.env
+  const extraEnv: Record<string, string> = {}
+  if (values['templates-dir'] !== undefined) extraEnv['Z1_TEMPLATES_DIR'] = values['templates-dir']
+  if (values['no-service-modules'] === true) extraEnv['Z1_SERVICE_MODULES'] = '0'
   const env =
-    values['templates-dir'] === undefined
-      ? baseEnv
-      : { ...baseEnv, Z1_TEMPLATES_DIR: values['templates-dir'] }
+    Object.keys(extraEnv).length === 0 ? baseEnv : { ...baseEnv, ...extraEnv }
 
   let server: Z1Server
   try {
@@ -1475,6 +1555,7 @@ async function studioCommand(args: readonly string[], io: CliIO): Promise<number
     token?: string
     live?: boolean
     'no-open'?: boolean
+    'no-service-modules'?: boolean
     json?: boolean
   }
   let positionals: string[]
@@ -1491,6 +1572,7 @@ async function studioCommand(args: readonly string[], io: CliIO): Promise<number
         token: { type: 'string' },
         live: { type: 'boolean' },
         'no-open': { type: 'boolean' },
+        'no-service-modules': { type: 'boolean' },
         json: { type: 'boolean' },
       },
       allowPositionals: true,
@@ -1527,10 +1609,10 @@ async function studioCommand(args: readonly string[], io: CliIO): Promise<number
   const host = values.host ?? DEFAULT_SERVE_HOST
   const token = values.token
   const baseEnv = io.env ?? process.env
-  const env =
-    values['templates-dir'] === undefined
-      ? baseEnv
-      : { ...baseEnv, Z1_TEMPLATES_DIR: values['templates-dir'] }
+  const extraEnv: Record<string, string> = {}
+  if (values['templates-dir'] !== undefined) extraEnv['Z1_TEMPLATES_DIR'] = values['templates-dir']
+  if (values['no-service-modules'] === true) extraEnv['Z1_SERVICE_MODULES'] = '0'
+  const env = Object.keys(extraEnv).length === 0 ? baseEnv : { ...baseEnv, ...extraEnv }
   let server: Z1Server
   try {
     server = await startServer({

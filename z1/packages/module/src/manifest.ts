@@ -6,6 +6,7 @@ import type {
   ModuleCapabilities,
   ModuleManifest,
   ModuleNodeDeclaration,
+  ModuleServiceDeclaration,
 } from './types.ts'
 
 /**
@@ -20,6 +21,8 @@ const SEMVER_PATTERN =
 const NODE_ID_PATTERN =
   /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)+$/
 const PORT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/
+/** Service ids stay lower-kebab, like one segment of a node id. */
+const SERVICE_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 
 export interface ManifestIssue {
   path: string
@@ -103,6 +106,16 @@ type PortData = z.infer<typeof declaredPortSchema>
 type CapabilitiesData = z.infer<typeof capabilitiesSchema>
 type LimitsData = z.infer<typeof limitsSchema>
 
+const serviceDeclarationSchema = z.strictObject({
+  id: z.string().regex(SERVICE_ID_PATTERN, 'must be a lower-kebab service id'),
+  kind: z.enum(['llm', 'tools', 'fs', 'artifacts', 'memory']),
+  // v1 has no worker for services: only code that was explicitly trusted may
+  // run in-process, so any other value is a manifest error.
+  trusted: z.literal(true, 'v1 service modules must be trusted: true'),
+})
+
+type ServiceData = z.infer<typeof serviceDeclarationSchema>
+
 const nodeDeclarationSchema = z
   .strictObject({
     id: z.string().regex(NODE_ID_PATTERN, 'must be dotted lower-kebab segments'),
@@ -155,7 +168,8 @@ const manifestSchema = z
     license: nonEmpty('must not be empty'),
     engines: z.strictObject({ z1: nonEmpty('must not be empty') }),
     entry: z.string(),
-    nodes: z.array(nodeDeclarationSchema),
+    nodes: z.array(nodeDeclarationSchema).default([]),
+    services: z.array(serviceDeclarationSchema).optional(),
     capabilities: capabilitiesSchema.optional(),
     limits: limitsSchema.optional(),
   })
@@ -170,6 +184,20 @@ const manifestSchema = z
         })
       }
       seen.add(node.id)
+    })
+
+    const seenServices = new Set<string>()
+    ;(manifest.services ?? []).forEach((service, index) => {
+      // Duplicates *within* a module are meaningless: one id is one factory.
+      // The same kind in two different modules is fine and resolved by version.
+      if (seenServices.has(service.id)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['services', index, 'id'],
+          message: `duplicate service id "${service.id}"`,
+        })
+      }
+      seenServices.add(service.id)
     })
 
     const problem = entryProblem(manifest.entry)
@@ -231,6 +259,10 @@ function toLimits(data: LimitsData): NonNullable<ModuleManifest['limits']> {
   return result
 }
 
+function toService(data: ServiceData): ModuleServiceDeclaration {
+  return { id: data.id, kind: data.kind, trusted: true }
+}
+
 function toNode(data: NodeData): ModuleNodeDeclaration {
   const result: ModuleNodeDeclaration = {
     id: data.id,
@@ -265,6 +297,7 @@ export function parseManifest(input: unknown): ModuleManifest {
   }
   if (data.description !== undefined) result.description = data.description
   if (data.author !== undefined) result.author = data.author
+  if (data.services !== undefined) result.services = data.services.map(toService)
   if (data.capabilities !== undefined) result.capabilities = toCapabilities(data.capabilities)
   if (data.limits !== undefined) result.limits = toLimits(data.limits)
   return result

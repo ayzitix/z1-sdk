@@ -16,5 +16,15 @@ export {
 } from './declarations.ts'
 export type { ModuleRuntimeOptions } from './runtime.ts'
 export { ModuleRuntime } from './runtime.ts'
+export type {
+  ModuleServiceContext,
+  ModuleServiceEntrypoints,
+  ModuleServiceEnvironment,
+  ModuleServiceFactory,
+  ModuleServiceLog,
+  ModuleServiceLogLevel,
+  StartedModuleServices,
+} from './services.ts'
+export { ModuleServiceRuntime } from './services.ts'
 export type { WorkerNodeInfo } from './protocol.ts'
 export { asJsonOutputs, declaredPortToPortSpec, moduleCapabilities, moduleNodeDefinition } from './adapter.ts'

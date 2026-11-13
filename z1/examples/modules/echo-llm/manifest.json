@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.echo-llm",
+  "version": "1.0.0",
+  "title": "Echo LLM service",
+  "description": "A trusted in-process llm service that echoes the last user message.",
+  "author": "z1",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [],
+  "services": [{ "id": "llm", "kind": "llm", "trusted": true }]
+}

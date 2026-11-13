@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import type { GraphDocument } from '@z1/graph'
-import { TemplateRegistry, staticTemplate } from '../src/index.ts'
+import { TemplateRegistry, splitTemplateSpec, staticTemplate } from '../src/index.ts'
 import type { GraphTemplate, TemplateContext } from '../src/index.ts'
 
 function graph(id: string): GraphDocument {
@@ -70,5 +70,30 @@ describe('TemplateRegistry', () => {
     expect(registry.get('multi')?.version).toBe('1.10.0')
     expect(registry.get('multi', '1.2.0')?.version).toBe('1.2.0')
     expect(registry.list().map((meta) => meta.version)).toEqual(['1.2.0', '1.9.0', '1.10.0'])
+  })
+
+  test('an id@version spec selects exactly that version', () => {
+    const registry = new TemplateRegistry()
+    registry.register(builder('multi', '1.2.0'))
+    registry.register(builder('multi', '1.10.0'))
+
+    expect(registry.get('multi@1.2.0')?.version).toBe('1.2.0')
+    expect(registry.build('multi@1.2.0').id).toBe('multi:none')
+    expect(registry.get('multi@9.9.9')).toBeUndefined()
+    expect(() => registry.build('multi@9.9.9')).toThrow(/unknown template "multi@9.9.9"/)
+  })
+
+  test('the split happens at the last @ and only for a semver suffix', () => {
+    expect(splitTemplateSpec('agent.loop@1.0.0')).toEqual({
+      id: 'agent.loop',
+      version: '1.0.0',
+    })
+    expect(splitTemplateSpec('ns@scope@1.0.0-rc.1+build')).toEqual({
+      id: 'ns@scope',
+      version: '1.0.0-rc.1+build',
+    })
+    expect(splitTemplateSpec('a@b@main')).toEqual({ id: 'a@b@main' })
+    expect(splitTemplateSpec('a@1.0')).toEqual({ id: 'a@1.0' })
+    expect(splitTemplateSpec('@1.0.0')).toEqual({ id: '@1.0.0' })
   })
 })

@@ -13,6 +13,21 @@ function keyOf(id: string, version: string): string {
   return `${id}@${version}`
 }
 
+/** `1.2.3` with an optional pre-release/build suffix, nothing looser. */
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+
+/**
+ * `agent.loop@1.0.0` is one spec, but ids may contain `@` too, so the split
+ * happens at the last `@` and only when what follows is a version.
+ */
+export function splitTemplateSpec(spec: string): { id: string; version?: string } {
+  const at = spec.lastIndexOf('@')
+  if (at <= 0 || at === spec.length - 1) return { id: spec }
+  const suffix = spec.slice(at + 1)
+  if (!SEMVER.test(suffix)) return { id: spec }
+  return { id: spec.slice(0, at), version: suffix }
+}
+
 /** Numeric comparison per dot-separated part, so `1.10.0` beats `1.9.0`. */
 function compareVersions(a: string, b: string): number {
   const left = a.split('.')
@@ -55,13 +70,16 @@ export class TemplateRegistry {
   /**
    * Without a version, the highest registered version of `id` wins; templates
    * never silently shadow a newer one because a file happened to load last.
+   * `id` may also be a full `id@version` spec.
    */
   get(id: string, version?: string): GraphTemplate | undefined {
-    if (version !== undefined) return this.templates.get(keyOf(id, version))
+    const spec = splitTemplateSpec(id)
+    const wanted = version ?? spec.version
+    if (wanted !== undefined) return this.templates.get(keyOf(spec.id, wanted))
 
     let found: GraphTemplate | undefined
     for (const candidate of this.templates.values()) {
-      if (candidate.id !== id) continue
+      if (candidate.id !== spec.id) continue
       if (found === undefined || compareVersions(candidate.version, found.version) > 0) {
         found = candidate
       }

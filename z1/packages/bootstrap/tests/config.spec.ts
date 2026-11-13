@@ -35,6 +35,7 @@ test('defaults resolve the relative paths against cwd', () => {
     templatesPath: join(resolve(directory), DEFAULT_CONFIG.templatesPath),
     live: false,
     useModules: true,
+    useServiceModules: true,
     useMemory: true,
     providers: [
       {
@@ -62,6 +63,7 @@ test('a config file supplies paths, flags and providers', async () => {
     modulesPath: '~/.z1/custom-modules',
     live: true,
     useModules: false,
+    useServiceModules: false,
     useMemory: false,
     providers: [
       { id: 'river', envKey: 'LOCAL_RIVER', baseURL: 'https://river.local/v1' },
@@ -76,6 +78,7 @@ test('a config file supplies paths, flags and providers', async () => {
   expect(config.modulesPath).toBe(join(homedir(), '.z1', 'custom-modules'))
   expect(config.live).toBe(true)
   expect(config.useModules).toBe(false)
+  expect(config.useServiceModules).toBe(false)
   expect(config.useMemory).toBe(false)
   // The file replaces a default of the same id where it was, and appends.
   expect(config.providers.map((provider) => provider.id)).toEqual(['river', 'openai', 'local'])
@@ -93,6 +96,7 @@ test('the environment beats the file, overrides beat the environment', async () 
       Z1_GRAPHS_DIR: 'env-graphs',
       Z1_MODULES_DIR: 'env-modules',
       Z1_LIVE: '1',
+      Z1_SERVICE_MODULES: '0',
     },
     file,
   })
@@ -100,6 +104,7 @@ test('the environment beats the file, overrides beat the environment', async () 
   expect(fromEnv.graphsPath).toBe(join(resolve(directory), 'env-graphs'))
   expect(fromEnv.modulesPath).toBe(join(resolve(directory), 'env-modules'))
   expect(fromEnv.live).toBe(true)
+  expect(fromEnv.useServiceModules).toBe(false)
 
   const overridden = loadRuntimeConfig({
     cwd: directory,
@@ -134,6 +139,62 @@ test('an unknown config key is rejected', async () => {
 test('Z1_LIVE only accepts 1 or 0', () => {
   expect(() => loadRuntimeConfig({ cwd: directory, env: { Z1_LIVE: 'yes' } })).toThrow(
     /Z1_LIVE must be 1 or 0/,
+  )
+})
+
+test('Z1_USE_MODULES and Z1_USE_MEMORY switch features off', () => {
+  const config = loadRuntimeConfig({
+    cwd: directory,
+    env: { Z1_USE_MODULES: 'false', Z1_USE_MEMORY: '0' },
+  })
+
+  expect(config.useModules).toBe(false)
+  expect(config.useMemory).toBe(false)
+  // Untouched switches keep their default.
+  expect(config.useServiceModules).toBe(true)
+})
+
+test('Z1_SERVICE_MODULES accepts true, false, 1 and 0', () => {
+  for (const [raw, expected] of [
+    ['true', true],
+    ['1', true],
+    ['false', false],
+    ['0', false],
+  ] as const) {
+    const config = loadRuntimeConfig({
+      cwd: directory,
+      env: { Z1_SERVICE_MODULES: raw },
+    })
+    expect(config.useServiceModules).toBe(expected)
+  }
+
+  expect(() =>
+    loadRuntimeConfig({ cwd: directory, env: { Z1_SERVICE_MODULES: 'maybe' } }),
+  ).toThrow(/Z1_SERVICE_MODULES must be 1, 0, true or false/)
+})
+
+test('a config file listing the same provider twice is rejected', async () => {
+  const file = join(directory, 'duplicate-provider.json')
+  await writeConfig(file, {
+    providers: [
+      { id: 'local', envKey: 'LOCAL_KEY', baseURL: 'https://local/v1' },
+      { id: 'local', envKey: 'OTHER_KEY', baseURL: 'https://other/v1' },
+    ],
+  })
+
+  expect(() => loadRuntimeConfig({ cwd: directory, env: {}, file })).toThrow(
+    /lists provider "local" more than once/,
+  )
+})
+
+test('an unknown key inside a provider object is rejected', async () => {
+  const file = join(directory, 'unknown-provider-key.json')
+  await writeConfig(file, {
+    providers: [{ id: 'local', envKey: 'LOCAL_KEY', baseURL: 'https://local/v1', model: 'x' }],
+  })
+
+  expect(() => loadRuntimeConfig({ cwd: directory, env: {}, file })).toThrow(
+    /unknown key "model"; expected id, protocol, envKey, baseURL, headers/,
   )
 })
 

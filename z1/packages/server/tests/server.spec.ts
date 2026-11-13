@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises'
+import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,7 +11,7 @@ import {
   type NotificationMap,
   type SequencedEvent,
 } from '@z1/protocol'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import WebSocket from 'ws'
 
 import { SocketTransport, startServer, type ServerOptions, type Z1Server } from '../src/index.ts'
@@ -506,3 +507,156 @@ test('close is idempotent', async () => {
   await server.close()
   await expect(server.close()).resolves.toBeUndefined()
 })
+
+test('run.fork on a forked run uses own numbering and resumes before the node', async () => {
+  const { server, dbPath } = await makeServer()
+  const peer = await connect(server)
+
+  const started = await peer.request('run.start', {
+    graph: helloGraph(),
+    input: { name: 'prefix' },
+  })
+  // The first fork inherits the parent's prefix, so its merged numbering is
+  // already offset from its own.
+  const first = await peer.request('run.fork', { runId: started.runId, nodePath: 'template' })
+
+  // Before the fix the fork prefix ended after `template` had completed, so a
+  // resume replayed it as cached instead of re-executing it.
+  const resumedFirst = await peer.request('run.resume', {
+    runId: first.runId,
+    graph: helloGraph(),
+  })
+  expect(resumedFirst.status).toBe('completed')
+  expect(resumedFirst.outputs).toEqual({ output: 'hello prefix' })
+
+  const gotFirst = await peer.request('run.get', { runId: first.runId })
+  const firstOwnStart = gotFirst.events.find(
+    (item) => item.event.type === 'node.started' && item.event.path === 'template',
+  )
+  expect(firstOwnStart?.event.runId).toBe(first.runId)
+
+  const journal = new SqliteJournal(dbPath)
+  let expectedOwnSeq: number
+  try {
+    const own = journal.ownedEvents(first.runId)
+    const ownStart = own.find(
+      (entry) => entry.event.type === 'node.started' && entry.event.path === 'template',
+    )
+    expect(ownStart).toBeDefined()
+    expectedOwnSeq = (ownStart?.seq ?? 0) - 1
+    // The same event sits at a different position in the merged replay.
+    expect(ownStart?.seq).toBeLessThan((firstOwnStart?.seq ?? 0))
+  } finally {
+    journal.close()
+  }
+
+  const second = await peer.request('run.fork', {
+    runId: first.runId,
+    nodePath: 'template',
+  })
+  expect(second.forkSeq).toBe(expectedOwnSeq)
+  // Own numbering is strictly below the merged cursor for the same node.
+  expect(second.forkSeq).toBeLessThan((firstOwnStart?.seq ?? 0) - 1)
+
+  const resumedSecond = await peer.request('run.resume', {
+    runId: second.runId,
+    graph: helloGraph(),
+  })
+  expect(resumedSecond.status).toBe('completed')
+  expect(resumedSecond.outputs).toEqual({ output: 'hello prefix' })
+
+  const gotSecond = await peer.request('run.get', { runId: second.runId })
+  const reExecuted = gotSecond.events.filter(
+    (item) => item.event.type === 'node.started' && item.event.path === 'template',
+  )
+  // Exactly one `node.started` for template, and it belongs to the new run:
+  // the node ran again rather than being replayed from the parent prefix.
+  expect(reExecuted).toHaveLength(1)
+  expect(reExecuted[0]?.event.runId).toBe(second.runId)
+})
+
+test('run.start refuses a reused runId with a 1004 conflict', async () => {
+  const { server, dbPath } = await makeServer()
+  const peer = await connect(server)
+  expect(APP_ERRORS.conflict).toBe(1004)
+
+  const first = await peer.request('run.start', {
+    graph: helloGraph(),
+    input: { name: 'once' },
+    runId: 'run_fixed',
+  })
+  expect(first.runId).toBe('run_fixed')
+
+  await expect(
+    peer.request('run.start', { graph: helloGraph(), input: { name: 'twice' }, runId: 'run_fixed' }),
+  ).rejects.toMatchObject({ code: APP_ERRORS.conflict })
+
+  const got = await peer.request('run.get', { runId: 'run_fixed' })
+  expect(got.events.filter((item) => item.event.type === 'run.started')).toHaveLength(1)
+
+  // The journal alone (no live server state, as after a restart) is enough.
+  await server.close()
+  const restarted = await startServer({ dbPath })
+  servers.push(restarted)
+  const peer2 = await connect(restarted)
+  await expect(
+    peer2.request('run.start', { graph: helloGraph(), runId: 'run_fixed' }),
+  ).rejects.toMatchObject({ code: APP_ERRORS.conflict })
+})
+
+test('a settled run is pruned once its last subscriber disconnects', async () => {
+  const { server } = await makeServer()
+  const first = await connect(server)
+  const started = await first.request('run.start', { graph: helloGraph() })
+  expect(started.status).toBe('completed')
+
+  // While watched, the run still has server-side state.
+  await expect(first.request('run.cancel', { runId: started.runId })).resolves.toEqual({})
+
+  first.close()
+  const observer = await connect(server)
+  // `run.cancel` needs a `RunState`; once the settled run is pruned it is a
+  // not-found rather than a stale no-op abort.
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      await observer.request('run.cancel', { runId: started.runId })
+    } catch (error) {
+      expect(error).toMatchObject({ code: APP_ERRORS.runNotFound })
+      // The journal still has the trace, and subscribe rebuilds state.
+      const replay = await observer.request('run.subscribe', { runId: started.runId })
+      expect(replay.events.length).toBeGreaterThan(0)
+      const got = await observer.request('run.get', { runId: started.runId })
+      expect(got.record.status).toBe('completed')
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  throw new Error('settled run was never pruned from the runs map')
+})
+
+test('a failed listen closes the journal instead of leaking the runtime', async () => {
+  const blocker = createNetServer()
+  await new Promise<void>((resolve) => {
+    blocker.listen(0, '127.0.0.1', resolve)
+  })
+  const address = blocker.address()
+  const port = typeof address === 'object' && address !== null ? address.port : 0
+
+  const directory = await mkdtemp(join(tmpdir(), 'z1-server-'))
+  directories.push(directory)
+  const close = vi.spyOn(SqliteJournal.prototype, 'close')
+  try {
+    await expect(
+      startServer({ dbPath: join(directory, 'runs.db'), host: '127.0.0.1', port }),
+    ).rejects.toThrow(/EADDRINUSE|address already in use/i)
+    expect(close).toHaveBeenCalled()
+  } finally {
+    close.mockRestore()
+    await new Promise<void>((resolve) => {
+      blocker.close(() => {
+        resolve()
+      })
+    })
+  }
+})
+

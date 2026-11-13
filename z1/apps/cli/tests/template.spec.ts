@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -91,5 +91,107 @@ describe('z1 template', () => {
 
     expect(code).toBe(1)
     expect(err).toContain('unknown template "missing.template"')
+  })
+
+  test('--template accepts an id@version spec', async () => {
+    const { code, out, err } = await run([
+      'run',
+      '--template',
+      'agent.loop@1.0.0',
+      '--message',
+      'hi',
+      '--json',
+    ])
+
+    expect(err).toBe('')
+    expect(code).toBe(0)
+    expect(JSON.parse(out.trimEnd())).toMatchObject({ status: 'completed' })
+  })
+
+  test('--template with an unknown version exits 1', async () => {
+    const { code, err } = await run([
+      'run',
+      '--template',
+      'agent.loop@9.9.9',
+      '--message',
+      'hi',
+    ])
+
+    expect(code).toBe(1)
+    expect(err).toContain('agent.loop@9.9.9')
+  })
+
+  test('--model naming a provider without --live warns and keeps the mock', async () => {
+    const { code, out, err } = await run([
+      'run',
+      '--template',
+      'agent.loop',
+      '--model',
+      'river/fast',
+      '--message',
+      'hi',
+      '--json',
+    ])
+
+    expect(code).toBe(0)
+    expect(err).toContain('model "river/fast" ignored without --live; using mock')
+    expect(JSON.parse(out.trimEnd())).toMatchObject({ status: 'completed' })
+  })
+
+  test('--model on a graph file without --template is a usage error', async () => {
+    const { code, err } = await run(['run', HELLO, '--model', 'mock/mock-1'])
+
+    expect(code).toBe(2)
+    expect(err).toContain('--model requires --template')
+  })
+})
+
+describe('a malformed static template', () => {
+  let templatesDir = ''
+
+  beforeAll(async () => {
+    templatesDir = await mkdtemp(join(tmpdir(), 'z1-cli-broken-template-'))
+    await writeFile(join(templatesDir, 'broken.json'), '{ "id": "broken",', 'utf8')
+  })
+
+  afterAll(async () => {
+    await rm(templatesDir, { recursive: true, force: true })
+  })
+
+  test('does not affect a graph run', async () => {
+    const { code, err } = await run([
+      'run',
+      HELLO,
+      '--input',
+      '{"name":"a"}',
+      '--json',
+      '--templates-dir',
+      templatesDir,
+    ])
+
+    expect(err).toBe('')
+    expect(code).toBe(0)
+  })
+
+  test('template list names the file', async () => {
+    const { code, err } = await run(['template', 'list', '--templates-dir', templatesDir])
+
+    expect(code).toBe(1)
+    expect(err).toContain('broken.json')
+  })
+
+  test('run --template names the file', async () => {
+    const { code, err } = await run([
+      'run',
+      '--template',
+      'agent.loop',
+      '--message',
+      'hi',
+      '--templates-dir',
+      templatesDir,
+    ])
+
+    expect(code).toBe(1)
+    expect(err).toContain('broken.json')
   })
 })

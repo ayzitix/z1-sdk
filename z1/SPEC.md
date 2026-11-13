@@ -496,3 +496,66 @@ Approval pauses append `approval.requested` and return `status: 'suspended'`;
 - `pnpm z1 run z1/examples/agent.graph.json --input '{"prompt":"..."}' --json`
   completes a model→tool→model loop using the mock provider.
 - Upstream `pnpm run build` still passes 10/10 (checked once, not per task).
+
+## 11. Service modules (R3)
+
+A module may contribute ambient services in addition to (or instead of) nodes.
+A service-only module declares `nodes: []` and a non-empty `services` list:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "com.example.echo-llm",
+  "version": "1.0.0",
+  "title": "Echo LLM service",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [],
+  "services": [{ "id": "llm", "kind": "llm", "trusted": true }]
+}
+```
+
+`services` is optional. Each declaration has a unique-within-module `id`, a
+`kind` of `llm | tools | fs | artifacts | memory`, and `trusted`. Duplicate ids
+in one manifest, unknown kinds and `trusted` values other than `true` are
+manifest errors; the same kind declared by two different modules is not.
+
+**v1 runs service modules in-process**, not in the node worker. The approval
+grant is the security boundary: an approved service module can reach the whole
+host, so only code the operator trusts may declare `trusted: true`. Approving
+`com.example.echo-llm` therefore means trusting its code with the process.
+
+The entry exports factories alongside any `nodes`:
+
+```js
+export const services = {
+  llm: (ctx) => ({
+    async chat(request, onDelta) { /* ... */ },
+    dispose() { /* optional */ },
+  }),
+}
+```
+
+Each factory receives `{ moduleId, version, directory, config, log, get }`.
+Required instance methods per kind: `llm.chat`, `tools.call`/`list`,
+`fs.read`/`write`, `artifacts.put`/`get`, `memory.buildContext`. `dispose()` is
+optional and called once when the runtime closes.
+
+Service modules are approved through the normal store; the approved `services`
+list is recorded on the grant and in the audit log. The runtime starts active
+service modules lazily on the first `beginRun` and resolves one instance per
+kind. Multiple providers of the same kind resolve to the highest module
+version; ties keep the first module id. Service precedence for a run is:
+
+```
+overrides > approved service module > built-in default
+```
+
+Built-in defaults are the provider registry's `llm` (mock when `live` is off),
+the mock `tools`/`fs`/`artifacts`, and `BranchMemory` when enabled. Service
+modules do not need a per-call approval.
+
+`RuntimeConfig.useServiceModules` (default `true`, env `Z1_SERVICE_MODULES=0|1`,
+file key `useServiceModules`) disables all service modules; the CLI exposes
+`--no-service-modules` on `run`, `serve` and `studio`.

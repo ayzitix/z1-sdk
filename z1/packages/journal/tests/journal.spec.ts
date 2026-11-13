@@ -68,6 +68,21 @@ test('append numbers events per run and read returns them in order', () => {
   journal.close()
 })
 
+test('append refuses an unknown run instead of writing an orphan event', () => {
+  const journal = new SqliteJournal(':memory:')
+  expect(() => journal.append(started('ghost', 1))).toThrow(/unknown run ghost/)
+  expect(journal.read('ghost')).toEqual([])
+  expect(journal.listRuns()).toEqual([])
+
+  // A rejected append leaves the real run's sequence contiguous.
+  journal.createRun(run('r1'))
+  journal.append(node('r1', 1))
+  expect(() => journal.append(node('ghost', 2))).toThrow(/unknown run ghost/)
+  journal.append(node('r1', 2))
+  expect(journal.ownedEvents('r1').map((entry) => entry.seq)).toEqual([1, 2])
+  journal.close()
+})
+
 test('events survive close and reopen', () => {
   const file = join(tempDir(), 'nested', 'deep', 'runs.db')
   const first = new SqliteJournal(file)
@@ -124,6 +139,30 @@ test('fork replays the parent prefix, including nested forks', () => {
   expect(() => journal.fork('missing', 1, 'x')).toThrow(/unknown run/)
   expect(() => journal.fork('parent', -1, 'x')).toThrow(/non-negative/)
   expect(() => journal.fork('parent', 1, 'child')).toThrow(/already exists/)
+  journal.close()
+})
+
+test('fork rejects a fork point past the source’s own events', () => {
+  const journal = new SqliteJournal(':memory:')
+  journal.createRun(run('root'))
+  journal.append(node('root', 1))
+  journal.append(node('root', 2))
+  journal.fork('root', 1, 'child')
+  journal.append(node('child', 10))
+
+  // The child's merged replay is the parent prefix up to the fork point plus
+  // its one own event; a fork point is own numbering, so 2 (and the merged
+  // count) must be refused.
+  expect(journal.read('child')).toHaveLength(2)
+  expect(journal.ownedEvents('child')).toHaveLength(1)
+  expect(() => journal.fork('child', 2, 'too-far')).toThrow(/past run child/)
+  expect(() => journal.fork('child', 3, 'way-too-far')).toThrow(/past run child/)
+  expect(journal.fork('child', 1, 'ok').forkSeq).toBe(1)
+  expect(() => journal.fork('root', 3, 'x')).toThrow(/past run root/)
+  // An empty run can be forked at 0 only.
+  journal.createRun(run('empty'))
+  expect(journal.fork('empty', 0, 'empty-child').forkSeq).toBe(0)
+  expect(() => journal.fork('empty', 1, 'empty-child-2')).toThrow(/past run empty/)
   journal.close()
 })
 

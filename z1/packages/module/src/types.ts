@@ -18,8 +18,29 @@ export interface ModuleManifest {
   /** Relative POSIX path to the ESM entry point (`.js` / `.mjs`). */
   entry: string
   nodes: ModuleNodeDeclaration[]
+  /**
+   * Ambient services this module provides. v1 only accepts trusted in-process
+   * modules; see {@link ModuleServiceDeclaration}.
+   */
+  services?: ModuleServiceDeclaration[]
   capabilities?: ModuleCapabilities
   limits?: { timeoutMs?: number; memoryMb?: number }
+}
+
+/** The runtime service slots a module may replace. */
+export type ModuleServiceKind = 'llm' | 'tools' | 'fs' | 'artifacts' | 'memory'
+
+/**
+ * A service a module provides to the host process.
+ *
+ * v1 runs service modules in-process, so `trusted` must be literally `true`:
+ * the grant is the security boundary, not a worker sandbox.
+ */
+export interface ModuleServiceDeclaration {
+  /** Unique within this module, e.g. `llm` or `my-tools`. */
+  id: string
+  kind: ModuleServiceKind
+  trusted: true
 }
 
 export type DeclaredPort =
