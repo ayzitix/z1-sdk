@@ -541,6 +541,34 @@ permission model with read access to its module directory and write access only
 to declared `fs.write` globs. It sees no host memory and cannot call a host
 service that was not brokered to it.
 
+A manifest declares the brokered calls its nodes and worker services may use
+(`capabilities` is optional and defaults to nothing granted):
+
+| key | grant |
+| --- | --- |
+| `fs.read` | glob list for `ctx.fs.read` and `ctx.fs.list` |
+| `fs.write` | glob list for `ctx.fs.write` |
+| `net.hosts` | host glob list for `ctx.net.request` (HTTP(S) only) |
+| `process.spawn` | command glob list for `ctx.process.run` |
+| `llm.providers` / `true` | model providers for `ctx.llm.chat` |
+| `tools.names` / `true` | tools for `ctx.tools.call` |
+
+`fs.list` lists one directory level: `{ path, entries: [{ name, path, type,
+size? }] }`, sorted by name, with `type` one of `file | dir | symlink`.
+Symlinks are reported as `symlink` and never followed. `fs.list` is gated by
+`fs.read`, so a module can only list inside its granted read patterns.
+
+`process.run` spawns directly with `shell: false` and an argv array, so no
+argument is ever interpreted by a shell. `process.spawn` is a **command
+allowlist**: each entry is an anchored glob matched against the full command
+string or its basename, case-sensitively (`'*'` grants every command). An
+absent or empty list denies every command. An explicit `cwd` must be inside
+`fs.read`; otherwise the call is denied and audited. `timeoutMs` defaults to
+30 000 ms and is capped at 300 000 ms; `maxOutputBytes` is a shared
+stdout+stderr budget, defaults to 1 MiB, and is capped at 5 MiB. Hitting either
+limit kills the child, and `truncated` reports an output overrun. The child
+environment is minimal `{ PATH, ...request.env }`.
+
 The entry exports factories alongside any `nodes`:
 
 ```js

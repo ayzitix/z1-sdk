@@ -1,11 +1,13 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { lstat, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   checkFs,
   checkLlm,
   checkNet,
+  checkProcess,
   checkTool,
   resolveCapabilityPath,
   type DeclaredPort,
@@ -19,8 +21,19 @@ import type {
   Json,
 } from '@z1/node'
 import type { ApprovalService, FsService, LlmService, ToolService } from '@z1/runtime'
+import {
+  DEFAULT_PROCESS_MAX_OUTPUT_BYTES,
+  DEFAULT_PROCESS_TIMEOUT_MS,
+  MAX_PROCESS_MAX_OUTPUT_BYTES,
+  MAX_PROCESS_TIMEOUT_MS,
+  clampProcessOption,
+  runProcess,
+} from './process-run.ts'
 import type {
+  FsListEntry,
+  FsListResult,
   HostToWorker,
+  ProcessRunResult,
   WorkerLogLevel,
   WorkerNodeInfo,
   WorkerServiceInfo,
@@ -168,6 +181,79 @@ interface SendResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+interface ProcessRunArguments {
+  command: string
+  args: string[]
+  cwd: string | undefined
+  timeoutMs: number
+  maxOutputBytes: number
+  env: Record<string, string>
+}
+
+function stringArray(raw: unknown, where: string): string[] {
+  if (!Array.isArray(raw)) throw new Error(`${where} must be an array of strings`)
+  return raw.map((entry, index) => {
+    if (typeof entry !== 'string') throw new Error(`${where}[${index}] must be a string`)
+    return entry
+  })
+}
+
+function optionalPositiveNumber(raw: unknown, where: string): number | undefined {
+  if (raw === undefined) return undefined
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+    throw new Error(`${where} must be a positive number`)
+  }
+  return raw
+}
+
+/** Validate the untrusted `process.run` request shape. */
+function parseProcessRun(raw: unknown): ProcessRunArguments {
+  if (!isRecord(raw)) throw new Error('process.run requires a ProcessRunRequest object')
+  const command = raw['command']
+  if (typeof command !== 'string' || command.trim().length === 0) {
+    throw new Error('process.run requires a non-empty command string')
+  }
+
+  const args = raw['args'] === undefined ? [] : stringArray(raw['args'], 'process.run args')
+
+  const cwd = raw['cwd']
+  if (cwd !== undefined && (typeof cwd !== 'string' || cwd.length === 0)) {
+    throw new Error('process.run cwd must be a non-empty string')
+  }
+
+  const timeout = optionalPositiveNumber(raw['timeoutMs'], 'process.run timeoutMs')
+  const output = optionalPositiveNumber(raw['maxOutputBytes'], 'process.run maxOutputBytes')
+
+  const env: Record<string, string> = {}
+  if (raw['env'] !== undefined) {
+    if (!isRecord(raw['env'])) throw new Error('process.run env must be an object of strings')
+    for (const [key, value] of Object.entries(raw['env'])) {
+      if (typeof value !== 'string') throw new Error(`process.run env.${key} must be a string`)
+      if (key.includes('\0') || key.includes('=')) {
+        throw new Error(`process.run env.${key} is not a valid variable name`)
+      }
+      env[key] = value
+    }
+  }
+
+  return {
+    command: command.trim(),
+    args,
+    cwd,
+    timeoutMs: clampProcessOption(
+      timeout ?? DEFAULT_PROCESS_TIMEOUT_MS,
+      1,
+      MAX_PROCESS_TIMEOUT_MS,
+    ),
+    maxOutputBytes: clampProcessOption(
+      output ?? DEFAULT_PROCESS_MAX_OUTPUT_BYTES,
+      1,
+      MAX_PROCESS_MAX_OUTPUT_BYTES,
+    ),
+    env,
+  }
 }
 
 /**
@@ -1265,6 +1351,31 @@ export class ModuleWorker {
         if (!check.ok) throw this.#denied(nodeId, 'fs.write', path, check.reason)
         return this.#services.fs.write(path, data)
       }
+      case 'fs.list': {
+        const path = this.#requirePath(args, 'fs.list')
+        const check = checkFs(this.#capabilities, 'read', path, this.#moduleDir)
+        if (!check.ok) throw this.#denied(nodeId, 'fs.list', path, check.reason)
+        return this.#listDirectory(path)
+      }
+      case 'process.run': {
+        const request = parseProcessRun(args)
+        const allowed = checkProcess(this.#capabilities, request.command)
+        if (!allowed.ok) {
+          throw this.#denied(nodeId, 'process.run', request.command, allowed.reason)
+        }
+        if (request.cwd !== undefined) {
+          const cwdCheck = checkFs(this.#capabilities, 'read', request.cwd, this.#moduleDir)
+          if (!cwdCheck.ok) {
+            throw this.#denied(
+              nodeId,
+              'process.run',
+              `cwd ${request.cwd}`,
+              cwdCheck.reason,
+            )
+          }
+        }
+        return this.#runProcess(request)
+      }
       case 'net.request':
         return this.#netRequest(nodeId, args)
       case 'approval.request': {
@@ -1302,6 +1413,52 @@ export class ModuleWorker {
         this.#reportDenied('unsupported', `unknown capability call "${method}"`)
         throw new Error(`unknown capability call "${method}"`)
     }
+  }
+
+  /** List one directory level; capability was checked by the caller. */
+  async #listDirectory(requested: string): Promise<FsListResult> {
+    const directory = resolve(this.#moduleDir, requested)
+    const dirents = await readdir(directory, { withFileTypes: true })
+    const entries: FsListEntry[] = []
+
+    for (const dirent of dirents) {
+      const full = join(directory, dirent.name)
+      if (dirent.isSymbolicLink()) {
+        entries.push({ name: dirent.name, path: full, type: 'symlink' })
+        continue
+      }
+      if (dirent.isDirectory()) {
+        entries.push({ name: dirent.name, path: full, type: 'dir' })
+        continue
+      }
+      const entry: FsListEntry = { name: dirent.name, path: full, type: 'file' }
+      try {
+        // `lstat` does not follow links; only regular files report a size.
+        const info = await lstat(full)
+        if (info.isFile()) entry.size = info.size
+      } catch {
+        // The entry may vanish between readdir and lstat; keep the name.
+      }
+      entries.push(entry)
+    }
+
+    entries.sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    )
+    return { path: directory, entries }
+  }
+
+  /** Spawn the validated request with a minimal environment and shared cap. */
+  #runProcess(request: ProcessRunArguments): Promise<ProcessRunResult> {
+    const env: Record<string, string> = { PATH: process.env['PATH'] ?? '' }
+    for (const [key, value] of Object.entries(request.env)) env[key] = value
+
+    return runProcess(request.command, request.args, {
+      cwd: resolve(this.#moduleDir, request.cwd ?? this.#moduleDir),
+      env,
+      timeoutMs: request.timeoutMs,
+      maxOutputBytes: request.maxOutputBytes,
+    })
   }
 
   async #netRequest(nodeId: string, args: unknown): Promise<unknown> {

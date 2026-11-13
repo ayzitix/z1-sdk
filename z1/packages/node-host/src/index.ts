@@ -28,7 +28,14 @@ export type {
   StartedModuleServices,
 } from './services.ts'
 export { ModuleServiceRuntime, StartedServiceRegistry } from './services.ts'
-export type { WorkerNodeInfo, WorkerServiceInfo } from './protocol.ts'
+export type {
+  FsListEntry,
+  FsListResult,
+  ProcessRunRequest,
+  ProcessRunResult,
+  WorkerNodeInfo,
+  WorkerServiceInfo,
+} from './protocol.ts'
 export {
   workerArtifactService,
   workerFsService,

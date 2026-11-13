@@ -30,6 +30,7 @@ export {
   checkFs,
   checkLlm,
   checkNet,
+  checkProcess,
   checkTool,
   matchPath,
   resolveCapabilityPath,

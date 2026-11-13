@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import {
   checkFs,
   checkNet,
+  checkProcess,
   matchPath,
   resolveCapabilityPath,
 } from '../src/index.ts'
@@ -97,5 +98,38 @@ describe('checkNet', () => {
     expect(checkNet({ net: { hosts: ['api.example.com'] } }, 'api.example.com.evil.test').ok).toBe(
       false,
     )
+  })
+})
+
+describe('checkProcess', () => {
+  test('denies when the capability is absent or the list is empty', () => {
+    expect(checkProcess(undefined, 'node')).toEqual({
+      ok: false,
+      reason: 'no process.spawn capability granted',
+    })
+    expect(checkProcess({}, 'node').ok).toBe(false)
+    expect(checkProcess({ process: {} }, 'node').ok).toBe(false)
+    expect(checkProcess({ process: { spawn: [] } }, 'node').ok).toBe(false)
+  })
+
+  test('matches the command by full string or basename', () => {
+    const capabilities: ModuleCapabilities = { process: { spawn: ['node', 'git'] } }
+    expect(checkProcess(capabilities, 'node')).toEqual({ ok: true })
+    expect(checkProcess(capabilities, '/usr/local/bin/node')).toEqual({ ok: true })
+    expect(checkProcess(capabilities, 'C:/tools/git.exe').ok).toBe(false)
+
+    const absolute: ModuleCapabilities = { process: { spawn: ['/usr/local/bin/node'] } }
+    expect(checkProcess(absolute, '/usr/local/bin/node')).toEqual({ ok: true })
+    expect(checkProcess(absolute, 'node').ok).toBe(false)
+  })
+
+  test('`*` grants every command and matching is case-sensitive', () => {
+    expect(checkProcess({ process: { spawn: ['*'] } }, '/opt/bin/anything')).toEqual({ ok: true })
+    expect(checkProcess({ process: { spawn: ['Node'] } }, 'node').ok).toBe(false)
+    expect(checkProcess({ process: { spawn: ['node*'] } }, 'nodejs')).toEqual({ ok: true })
+  })
+
+  test('rejects empty commands', () => {
+    expect(checkProcess({ process: { spawn: ['*'] } }, '   ').ok).toBe(false)
   })
 })

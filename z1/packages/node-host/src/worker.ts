@@ -22,7 +22,10 @@ import type {
 } from '@z1/node'
 import type { DeclaredPort } from '@z1/module'
 import type {
+  FsListResult,
   HostToWorker,
+  ProcessRunRequest,
+  ProcessRunResult,
   WorkerLogLevel,
   WorkerNodeInfo,
   WorkerToHost,
@@ -66,7 +69,9 @@ interface ModuleContext {
   fs: {
     read(path: string): Promise<string>
     write(path: string, data: string): Promise<void>
+    list(path: string): Promise<FsListResult>
   }
+  process: { run(request: ProcessRunRequest): Promise<ProcessRunResult> }
   net: { request(request: NetRequest): Promise<NetResponse> }
   approval: { request(request: ApprovalRequest): Promise<ApprovalDecision> }
   runSubgraph(): never
@@ -94,7 +99,9 @@ interface ModuleServiceContext {
   fs: {
     read(path: string): Promise<string>
     write(path: string, data: string): Promise<void>
+    list(path: string): Promise<FsListResult>
   }
+  process: { run(request: ProcessRunRequest): Promise<ProcessRunResult> }
   net: { request(request: NetRequest): Promise<NetResponse> }
   llm: {
     chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult>
@@ -422,6 +429,11 @@ function serviceContext(
     fs: {
       read: (path) => invoke('fs.read', { path }) as Promise<string>,
       write: (path, data) => invoke('fs.write', { path, data }) as Promise<void>,
+      list: (path) => invoke('fs.list', { path }) as Promise<FsListResult>,
+    },
+    process: {
+      run: (runRequest) =>
+        invoke('process.run', runRequest) as Promise<ProcessRunResult>,
     },
     net: {
       request: (netRequest) => invoke('net.request', netRequest) as Promise<NetResponse>,
@@ -558,6 +570,11 @@ function createContext(
     fs: {
       read: (path) => invoke('fs.read', { path }) as Promise<string>,
       write: (path, data) => invoke('fs.write', { path, data }) as Promise<void>,
+      list: (path) => invoke('fs.list', { path }) as Promise<FsListResult>,
+    },
+    process: {
+      run: (runRequest) =>
+        invoke('process.run', runRequest) as Promise<ProcessRunResult>,
     },
     net: {
       request: (netRequest) => invoke('net.request', netRequest) as Promise<NetResponse>,

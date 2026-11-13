@@ -15,8 +15,22 @@ privileged operation back to host services.
 - Module entries are plain, dependency-free ESM exporting `nodes` (or a default
   array) with `{ id, version, title, category, inputs, outputs, execute(ctx) }`.
   `ctx` exposes data inputs, config, run seed, `signal`, `log`, `emit`,
-  `llm.chat`, `tools.call/list`, `fs.read/write`, `net.request`,
-  `approval.request`. `runSubgraph` throws: not available in M4.
+  `llm.chat`, `tools.call/list`, `fs.read/write/list`, `process.run`,
+  `net.request`, `approval.request`. `runSubgraph` throws: not available in M4.
+- `ctx.fs.list(path)` lists one directory level, gated by `fs.read`:
+  `{ path, entries: [{ name, path, type: 'file'|'dir'|'symlink', size? }] }`,
+  sorted by name. Symlinks are typed without being followed; there is no
+  recursion (callers recurse).
+- `ctx.process.run({ command, args?, cwd?, timeoutMs?, maxOutputBytes?, env? })`
+  is a brokered spawn: `shell: false` with an argv array and a minimal
+  `{ PATH, ...env }` environment. `process.spawn` is a case-sensitive command
+  allowlist of anchored globs matched against the full command and its
+  basename (`'*'` allows all; absent/empty denies all). An explicit `cwd` must
+  be inside `fs.read`, otherwise the call is denied. `timeoutMs` defaults to
+  30 000 ms (max 300 000 ms); `maxOutputBytes` is shared across stdout and
+  stderr, defaults to 1 MiB (max 5 MiB), and hitting it (or the timeout) kills
+  the child. The result is
+  `{ code, signal, stdout, stderr, truncated, durationMs }`.
 - `moduleNodeDefinition` adapts a declaration plus a live worker into a runtime
   `NodeDefinition`, so the executor handles validation, caching and approval.
 
@@ -37,3 +51,6 @@ a substitute for sandboxing.
 descriptors, streaming/logs, fs allow/deny, net allow/deny with a local HTTP
 server, LLM forwarding, crash + respawn, timeout, abort, undeclared exports,
 `runGraph` integration and idempotent `dispose`.
+`packages/node-host/tests/capabilities.spec.ts` covers brokered `fs.list`
+(sorting, types, sizes, symlinks, deny, missing directory) and `process.run`
+(allow/deny, cwd gate, timeout, truncation, env, argv without shell splitting).

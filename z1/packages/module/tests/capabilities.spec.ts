@@ -98,3 +98,24 @@ describe('manifest llm/tools capabilities', () => {
     )
   })
 })
+
+describe('manifest process.spawn capability', () => {
+  test('accepts a case-sensitive command list', () => {
+    const parsed = parseManifest(
+      withCapabilities({ process: { spawn: ['node', 'ffmpeg', 'Node'] } }),
+    )
+    expect(parsed.capabilities?.process?.spawn).toEqual(['node', 'ffmpeg', 'Node'])
+  })
+
+  test('rejects non-string and non-array spawn values', () => {
+    expect(() => parseManifest(withCapabilities({ process: { spawn: 'node' } }))).toThrow(
+      ModuleManifestError,
+    )
+    expect(() => parseManifest(withCapabilities({ process: { spawn: [1] } }))).toThrow(
+      ModuleManifestError,
+    )
+    expect(() => parseManifest(withCapabilities({ process: { spawn: ['  '] } }))).toThrow(
+      ModuleManifestError,
+    )
+  })
+})

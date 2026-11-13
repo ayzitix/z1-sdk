@@ -1,4 +1,4 @@
-import { isAbsolute, normalize, resolve, sep } from 'node:path'
+import { basename, isAbsolute, normalize, resolve, sep } from 'node:path'
 import type { ModuleCapabilities } from './types.ts'
 
 export type CapabilityCheck = { ok: true } | { ok: false; reason: string }
@@ -125,6 +125,37 @@ export function checkNet(
   }
 
   return deny(`host is outside the granted patterns: ${normalizedHost}`)
+}
+
+/**
+ * Gate `ctx.process.run` on the declared command allowlist.
+ *
+ * `process.spawn` is a list of command globs. A command matches either its
+ * full string (`/usr/local/bin/node`) or its basename (`node`), using the same
+ * anchored glob as {@link matchPath}. Matching is case-sensitive, and `'*'`
+ * grants every command. An absent or empty list grants nothing.
+ */
+export function checkProcess(
+  capabilities: ModuleCapabilities | undefined,
+  command: string,
+): CapabilityCheck {
+  const patterns = capabilities?.process?.spawn
+  if (patterns === undefined || patterns.length === 0) {
+    return deny('no process.spawn capability granted')
+  }
+
+  const wanted = command.trim()
+  if (wanted.length === 0) return deny('empty command')
+  const wantedBase = basename(wanted)
+
+  for (const pattern of patterns) {
+    const trimmed = pattern.trim()
+    if (trimmed.length === 0) continue
+    if (trimmed === '*') return { ok: true }
+    if (matchPath(trimmed, wanted) || matchPath(trimmed, wantedBase)) return { ok: true }
+  }
+
+  return deny(`command "${wanted}" is outside the granted process.spawn patterns`)
 }
 
 /**
