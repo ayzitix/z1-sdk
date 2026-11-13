@@ -1,10 +1,10 @@
-import { createServer, type Server } from 'node:http'
+import { execFile } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { access } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { promisify } from 'node:util'
 
 import { ModuleStore } from '@z1/module'
 import type { Json } from '@z1/node'
@@ -19,7 +19,39 @@ const MODULE_SOURCE = fileURLToPath(new URL('../../../examples/modules/z1-tools'
 const MODULE_ID = 'com.z1.tools'
 const MODULE_VERSION = '0.1.0'
 
-const allowAll: ApprovalService = { request: async () => 'allowed-once' }
+/** The exact v1 tool set, in the order the module advertises it. */
+const TOOL_NAMES = [
+  'read',
+  'write',
+  'edit',
+  'apply_patch',
+  'list',
+  'glob',
+  'grep',
+  'tree',
+  'stat',
+  'mkdir',
+  'move',
+  'shell',
+  'git.status',
+  'git.diff',
+  'git.log',
+  'system.info',
+  'todo.write',
+  'todo.read',
+]
+
+/**
+ * v1 tools must never ask for approval. Any request is a bug, so this service
+ * fails the test instead of answering: every tool below runs without it.
+ */
+const noApprovals: ApprovalService = {
+  request: async () => {
+    throw new Error('v1 tools must not request approval')
+  },
+}
+
+const exec = promisify(execFile)
 
 let root: string
 let workspace: string
@@ -27,12 +59,6 @@ let modulesDir: string
 let runtime: Runtime
 let handle: RunHandle
 let tools: ToolService
-let server: Server
-let serverUrl: string
-
-const NOTE = 'note.txt'
-const NOTE_RELATIVE = `raw/${NOTE}`
-const NOTE_ABSOLUTE = (): string => join(workspace, NOTE_RELATIVE)
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), 'z1-tools-module-'))
@@ -40,7 +66,6 @@ beforeAll(async () => {
   modulesDir = join(root, 'modules')
   await mkdir(workspace, { recursive: true })
 
-  // Propose -> approve -> activate the shipped example, then run it.
   const store = new ModuleStore(modulesDir)
   store.propose(MODULE_SOURCE)
   store.approve(MODULE_ID, MODULE_VERSION)
@@ -58,48 +83,29 @@ beforeAll(async () => {
     }),
   )
 
-  handle = await runtime.beginRun({ runId: `run_${randomUUID()}`, approval: allowAll })
+  handle = await runtime.beginRun({ runId: `run_${randomUUID()}`, approval: noApprovals })
   tools = handle.services.tools
-
-  server = createServer((request, response) => {
-    response.statusCode = 201
-    response.setHeader('content-type', 'text/plain')
-    response.end(`tools-ok ${request.method}`)
-  })
-  await new Promise<void>((done) => {
-    server.listen(0, '127.0.0.1', () => done())
-  })
-  const address = server.address()
-  if (address === null || typeof address === 'string') throw new Error('test server has no port')
-  serverUrl = `http://127.0.0.1:${address.port}/`
 })
 
 afterAll(async () => {
   await handle?.dispose()
   await runtime?.close()
-  await new Promise<void>((done) => {
-    server?.close(() => done())
-  })
   await rm(root, { recursive: true, force: true })
 })
 
-/** The tool result is JSON; tests read named fields. */
-function call(name: string, args: Record<string, Json>): Promise<Json> {
-  return tools.call(name, args as Json)
+/** Every tool returns text; `Json` is the service signature's type. */
+async function call(name: string, args: Record<string, Json> = {}): Promise<string> {
+  const result = await tools.call(name, args as Json)
+  expect(typeof result).toBe('string')
+  return result as string
 }
 
+const inWorkspace = (...segments: string[]): string => join(workspace, ...segments)
+
 describe('z1 tools module', () => {
-  test('exposes the seven tools with JSON Schema parameters', async () => {
+  test('exposes exactly the eighteen v1 tools', async () => {
     const schemas = await tools.list()
-    expect(schemas.map((schema) => schema.name)).toEqual([
-      'read',
-      'write',
-      'edit',
-      'list',
-      'glob',
-      'shell',
-      'http',
-    ])
+    expect(schemas.map((schema) => schema.name)).toEqual(TOOL_NAMES)
     for (const schema of schemas) {
       expect(schema.parameters['type']).toBe('object')
       expect(Array.isArray(schema.parameters['required'])).toBe(true)
@@ -107,137 +113,264 @@ describe('z1 tools module', () => {
     }
   })
 
-  test('write creates parent directories and reports bytes', async () => {
-    const result = (await call('write', { path: NOTE_RELATIVE, content: 'hello z1\n' })) as {
-      path: string
-      bytes: number
-    }
-    expect(result.path).toBe(NOTE_ABSOLUTE())
-    expect(result.bytes).toBe(Buffer.byteLength('hello z1\n', 'utf8'))
-    expect(await readFile(NOTE_ABSOLUTE(), 'utf8')).toBe('hello z1\n')
-  })
-
-  test('read returns the same text and honours the line window', async () => {
-    const all = (await call('read', { path: NOTE_RELATIVE })) as {
-      content: string
-      totalLines: number
-    }
-    expect(all.content).toBe('hello z1\n')
-
-    const window = (await call('read', { path: NOTE_ABSOLUTE(), offset: 1, limit: 1 })) as {
-      content: string
-      offset: number
-    }
-    expect(window.content).toBe('hello z1\n')
-    expect(window.offset).toBe(1)
-
-    await expect(call('read', { path: join(workspace, 'missing.txt') })).rejects.toThrow(
-      /cannot read/,
+  test('write reports bytes and read numbers lines', async () => {
+    expect(await call('write', { path: 'notes/a.txt', content: 'hello\nworld\n' })).toBe(
+      'wrote notes/a.txt (12 bytes)',
     )
+    expect(await readFile(inWorkspace('notes', 'a.txt'), 'utf8')).toBe('hello\nworld\n')
+
+    expect(await call('read', { path: 'notes/a.txt' })).toBe('1| hello\n2| world')
+    expect(await call('read', { path: inWorkspace('notes', 'a.txt'), offset: 2, limit: 1 })).toBe(
+      '2| world',
+    )
+    await expect(call('read', { path: 'notes/missing.txt' })).rejects.toThrow(/cannot read/)
   })
 
-  test('edit replaces text and refuses an ambiguous match', async () => {
-    const result = (await call('edit', {
-      path: NOTE_RELATIVE,
-      oldText: 'hello',
-      newText: 'hi',
-    })) as { path: string; replacements: number }
-    expect(result.replacements).toBe(1)
-    expect(await readFile(NOTE_ABSOLUTE(), 'utf8')).toBe('hi z1\n')
+  test('edit refuses an ambiguous match and replaceAll replaces every one', async () => {
+    await call('write', { path: 'notes/edit.txt', content: 'aa aa\n' })
 
-    await call('write', { path: NOTE_RELATIVE, content: 'aa aa\n' })
     await expect(
-      call('edit', { path: NOTE_RELATIVE, oldText: 'aa', newText: 'bb' }),
+      call('edit', { path: 'notes/edit.txt', oldText: 'aa', newText: 'bb' }),
     ).rejects.toThrow(/occurs 2 times/)
+    await expect(call('edit', { path: 'notes/edit.txt', oldText: '', newText: 'x' })).rejects.toThrow(
+      /non-empty/,
+    )
 
-    const all = (await call('edit', {
-      path: NOTE_RELATIVE,
-      oldText: 'aa',
-      newText: 'bb',
-      replaceAll: true,
-    })) as { replacements: number }
-    expect(all.replacements).toBe(2)
-    expect(await readFile(NOTE_ABSOLUTE(), 'utf8')).toBe('bb bb\n')
+    expect(
+      await call('edit', {
+        path: 'notes/edit.txt',
+        oldText: 'aa',
+        newText: 'bb',
+        replaceAll: true,
+      }),
+    ).toBe('edited notes/edit.txt (2 replacements)')
+    expect(await readFile(inWorkspace('notes', 'edit.txt'), 'utf8')).toBe('bb bb\n')
   })
 
-  test('glob finds the file under the workspace', async () => {
-    const result = (await call('glob', { pattern: '**/*.txt', path: '.' })) as {
-      matches: string[]
-    }
-    expect(result.matches).toContain(NOTE_ABSOLUTE())
+  test('apply_patch changes two files atomically', async () => {
+    await call('write', { path: 'patch/a.txt', content: 'one\ntwo\nthree\n' })
+    await call('write', { path: 'patch/b.txt', content: 'alpha\nbeta\n' })
 
-    const absolute = (await call('glob', { pattern: '**/note.txt', path: workspace })) as {
-      matches: string[]
-    }
-    expect(absolute.matches).toContain(NOTE_ABSOLUTE())
+    const patch = [
+      'patch/a.txt',
+      '<<<<<<< SEARCH',
+      'two',
+      '=======',
+      'TWO',
+      '>>>>>>> REPLACE',
+      'patch/a.txt',
+      '<<<<<<< SEARCH',
+      'three',
+      '=======',
+      'THREE!',
+      '>>>>>>> REPLACE',
+      'patch/b.txt',
+      '<<<<<<< SEARCH',
+      'beta',
+      '=======',
+      'BETA',
+      '>>>>>>> REPLACE',
+      '',
+    ].join('\n')
+
+    expect(await call('apply_patch', { patch })).toBe(
+      'patched 3 blocks in 2 files\npatch/a.txt (+2 -2)\npatch/b.txt (+1 -1)',
+    )
+    expect(await call('read', { path: 'patch/a.txt' })).toBe('1| one\n2| TWO\n3| THREE!')
+    expect(await call('read', { path: 'patch/b.txt' })).toBe('1| alpha\n2| BETA')
+
+    const mismatch = [
+      'patch/a.txt',
+      '<<<<<<< SEARCH',
+      'one',
+      '=======',
+      'ONE',
+      '>>>>>>> REPLACE',
+      'patch/b.txt',
+      '<<<<<<< SEARCH',
+      'not there',
+      '=======',
+      'x',
+      '>>>>>>> REPLACE',
+      '',
+    ].join('\n')
+    await expect(call('apply_patch', { patch: mismatch })).rejects.toThrow(/no match/)
+    expect(await call('read', { path: 'patch/a.txt' })).toBe('1| one\n2| TWO\n3| THREE!')
   })
 
-  test('list returns the workspace entry (recursively)', async () => {
-    const flat = (await call('list', { path: '.' })) as {
-      path: string
-      entries: Array<{ name: string; type: string; depth: number }>
-    }
-    expect(flat.path).toBe(workspace)
-    expect(flat.entries.map((entry) => entry.name)).toContain('raw')
+  test('list and glob walk the workspace', async () => {
+    const listing = await call('list', { path: 'patch' })
+    expect(listing).toContain('file patch/a.txt (15)')
+    expect(listing).toContain('file patch/b.txt (11)')
 
-    const deep = (await call('list', { path: workspace, recursive: true })) as {
-      entries: Array<{ path: string; depth: number }>
-    }
-    const note = deep.entries.find((entry) => entry.path === NOTE_ABSOLUTE())
-    expect(note?.depth).toBe(2)
+    const top = await call('list', { path: '.' })
+    expect(top).toContain('dir notes')
+    expect(top).toContain('dir patch')
+
+    const deep = await call('list', { path: '.', recursive: true, maxDepth: 2 })
+    expect(deep).toContain('file notes/a.txt (12)')
+
+    const matches = await call('glob', { pattern: '**/*.txt', path: '.' })
+    expect(matches.split('\n')).toContain('patch/a.txt')
+    expect(matches.split('\n')).toContain('notes/a.txt')
+    expect(matches.split('\n')).not.toContain('notes/deep.txt')
   })
 
-  test('shell runs a command and returns the host result', async () => {
-    const result = (await call('shell', {
+  test('grep returns path:line hits and dash context lines', async () => {
+    await call('write', {
+      path: 'grep.txt',
+      content: 'alpha\nneedle here\nomega\nneedle again\n',
+    })
+
+    expect(await call('grep', { pattern: 'needle' })).toBe(
+      'grep.txt:2: needle here\ngrep.txt:4: needle again',
+    )
+
+    const withContext = await call('grep', { pattern: 'needle here', context: 1 })
+    expect(withContext).toContain('grep.txt-1- alpha')
+    expect(withContext).toContain('grep.txt:2: needle here')
+    expect(withContext).toContain('grep.txt-3- omega')
+
+    await expect(call('grep', { pattern: '(' })).rejects.toThrow(/valid regular expression/)
+  })
+
+  test('tree renders directories and files', async () => {
+    const tree = await call('tree', { path: '.', depth: 2 })
+    expect(tree.split('\n')[0]).toBe('.')
+    expect(tree).toMatch(/[├└]── patch\//)
+    expect(tree).toMatch(/[├└]── grep\.txt/)
+  })
+
+  test('stat reports type, size and mtime', async () => {
+    const stat = await call('stat', { path: 'patch/a.txt' })
+    expect(stat).toMatch(/^file 15 \d{4}-\d{2}-\d{2}T[\d:.]+Z patch\/a\.txt$/)
+
+    const directory = await call('stat', { path: 'patch' })
+    expect(directory).toMatch(/^dir 0 /)
+    await expect(call('stat', { path: 'nope.txt' })).rejects.toThrow(/cannot stat/)
+  })
+
+  test('mkdir creates parents and move renames', async () => {
+    expect(await call('mkdir', { path: 'empty/nested' })).toBe('created empty/nested')
+    expect(await call('stat', { path: 'empty/nested' })).toMatch(/^dir 0 /)
+    await expect(call('read', { path: 'empty/nested' })).rejects.toThrow(/cannot read/)
+
+    expect(await call('move', { from: 'patch/b.txt', to: 'patch/c.txt' })).toBe(
+      'moved patch/b.txt -> patch/c.txt',
+    )
+    expect(await call('read', { path: 'patch/c.txt' })).toBe('1| alpha\n2| BETA')
+    await expect(call('read', { path: 'patch/b.txt' })).rejects.toThrow(/cannot read/)
+  })
+
+  test('shell separates the exit code, stdout and stderr', async () => {
+    const result = await call('shell', {
       command: 'node',
       args: ['-e', "console.log('shell-ok')"],
-    })) as { code: number; stdout: string; stderr: string; truncated: boolean }
-    expect(result.code).toBe(0)
-    expect(result.stdout.trim()).toBe('shell-ok')
-    expect(result.truncated).toBe(false)
-  })
-
-  test('http reaches a local server through ctx.net', async () => {
-    const result = (await call('http', { url: serverUrl })) as {
-      status: number
-      body: string
-      headers: Record<string, string>
-    }
-    expect(result.status).toBe(201)
-    expect(result.body).toBe('tools-ok GET')
-    expect(result.headers['content-type']).toBe('text/plain')
-  })
-
-  test('relative and absolute paths both resolve', async () => {
-    const relative = (await call('write', { path: 'rel/deep.txt', content: 'rel\n' })) as {
-      path: string
-    }
-    expect(relative.path).toBe(join(workspace, 'rel', 'deep.txt'))
-
-    const absolute = (await call('write', {
-      path: join(workspace, 'abs.txt'),
-      content: 'abs\n',
-    })) as { path: string }
-    expect(absolute.path).toBe(join(workspace, 'abs.txt'))
-
-    const back = (await call('read', { path: 'abs.txt' })) as { content: string }
-    expect(back.content).toBe('abs\n')
-  })
-
-  test('a rejected approval stops write before it touches disk', async () => {
-    const reject: ApprovalService = { request: async () => 'rejected' }
-    const denied = await runtime.beginRun({
-      runId: `run_${randomUUID()}`,
-      approval: reject,
     })
-    try {
-      const target = join(workspace, 'denied.txt')
-      await expect(
-        denied.services.tools.call('write', { path: target, content: 'nope' } as Json),
-      ).rejects.toThrow(/approval rejected/)
-      await expect(access(target)).rejects.toThrow()
-    } finally {
-      await denied.dispose()
+    expect(result).toBe('exit 0\n--- stdout ---\nshell-ok')
+
+    const failure = await call('shell', {
+      command: 'node',
+      args: ['-e', 'process.exit(3)'],
+    })
+    expect(failure).toBe('exit 3')
+
+    const both = await call('shell', {
+      command: 'node',
+      args: ['-e', "console.error('bad'); console.log('good')"],
+    })
+    expect(both).toContain('--- stdout ---\ngood')
+    expect(both).toContain('--- stderr ---\nbad')
+  })
+
+  test('system.info names the workspace', async () => {
+    const info = await call('system.info')
+    expect(info).toContain(`workspace ${workspace}`)
+    expect(info).toMatch(/platform \S+/)
+    expect(info).toMatch(/node v\d+\./)
+  })
+
+  test('todo.write and todo.read roundtrip through .z1/todos.json', async () => {
+    expect(
+      await call('todo.write', {
+        items: [{ text: 'first task' }, { text: 'second task', status: 'in_progress' }],
+      }),
+    ).toBe('wrote .z1/todos.json (2 items)')
+
+    const stored = JSON.parse(await readFile(inWorkspace('.z1', 'todos.json'), 'utf8')) as {
+      items: Array<{ text: string; status: string }>
     }
+    expect(stored.items).toEqual([
+      { text: 'first task', status: 'pending' },
+      { text: 'second task', status: 'in_progress' },
+    ])
+
+    const read = JSON.parse(await call('todo.read')) as typeof stored
+    expect(read).toEqual(stored)
+    expect(await call('todo.read')).toBe(`${JSON.stringify(stored, null, 2)}`)
+
+    await expect(
+      call('todo.write', { items: [{ text: 'x', status: 'blocked' }] }),
+    ).rejects.toThrow(/status must be one of/)
+  })
+
+  test('relative and absolute paths both resolve against the workspace', async () => {
+    expect(await call('write', { path: 'rel/deep.txt', content: 'rel\n' })).toBe(
+      'wrote rel/deep.txt (4 bytes)',
+    )
+    expect(await readFile(inWorkspace('rel', 'deep.txt'), 'utf8')).toBe('rel\n')
+
+    expect(
+      await call('write', { path: inWorkspace('abs.txt'), content: 'abs\n' }),
+    ).toBe('wrote abs.txt (4 bytes)')
+    expect(await readFile(inWorkspace('abs.txt'), 'utf8')).toBe('abs\n')
+    expect(await call('read', { path: inWorkspace('abs.txt') })).toBe('1| abs')
+
+    // Absolute paths outside the workspace stay absolute.
+    const outside = join(root, 'outside.txt')
+    expect(await call('write', { path: outside, content: 'out\n' })).toBe(
+      `wrote ${outside} (4 bytes)`,
+    )
+    expect(await call('read', { path: outside })).toBe('1| out')
+  })
+
+  test('git status, diff and log are read-only views of the workspace', async () => {
+    await exec('git', ['init'], { cwd: workspace })
+    await exec('git', ['config', 'user.email', 'z1-tests@example.com'], { cwd: workspace })
+    await exec('git', ['config', 'user.name', 'z1 tests'], { cwd: workspace })
+    await exec('git', ['add', '-A'], { cwd: workspace })
+    await exec('git', ['commit', '-m', 'initial tools commit'], { cwd: workspace })
+
+    expect(await call('git.status')).toBe('')
+
+    await writeFile(inWorkspace('notes', 'a.txt'), 'hello\nchanged\n')
+    const status = await call('git.status')
+    expect(status).toContain(' M notes/a.txt')
+
+    const diff = await call('git.diff')
+    expect(diff).toContain('-world')
+    expect(diff).toContain('+changed')
+
+    const pathDiff = await call('git.diff', { path: 'notes/a.txt' })
+    expect(pathDiff).toContain('notes/a.txt')
+
+    const log = await call('git.log')
+    expect(log).toMatch(/^[0-9a-f]+ \d{4}-\d{2}-\d{2} initial tools commit$/m)
+
+    const one = await call('git.log', { limit: 1 })
+    expect(one.split('\n')).toHaveLength(1)
+
+    await exec('git', ['add', 'notes/a.txt'], { cwd: workspace })
+    const staged = await call('git.diff', { staged: true })
+    expect(staged).toContain('+changed')
+  })
+
+  test('mutating tools never request approval', async () => {
+    // `noApprovals` throws on any request, so reaching this assertion at all
+    // proves none of the tools above called `ctx.approval`.
+    expect(await call('write', { path: 'no-approval.txt', content: 'ok\n' })).toBe(
+      'wrote no-approval.txt (3 bytes)',
+    )
+    expect(await call('read', { path: 'no-approval.txt' })).toBe('1| ok')
   })
 })

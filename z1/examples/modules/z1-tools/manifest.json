@@ -3,7 +3,7 @@
   "id": "com.z1.tools",
   "version": "0.1.0",
   "title": "z1 tools",
-  "description": "Filesystem, shell and HTTP tools for z1 workers",
+  "description": "Filesystem, shell, git and todo tools for z1 workers",
   "author": "z1",
   "license": "MIT",
   "engines": { "z1": ">=0.1.0" },
@@ -12,8 +12,7 @@
   "services": [{ "id": "tools", "kind": "tools", "mode": "worker" }],
   "capabilities": {
     "fs": { "read": ["/**"], "write": ["/**"] },
-    "process": { "spawn": ["*"] },
-    "net": { "hosts": ["*"] }
+    "process": { "spawn": ["*"] }
   },
-  "limits": { "timeoutMs": 120000 }
+  "limits": { "timeoutMs": 300000 }
 }

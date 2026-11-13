@@ -5,6 +5,8 @@ apps/desktop/.env.macos
 apps/desktop/*.p12
 node_modules/
 lib/
+# Example modules keep their source in lib/; only build output is ignored.
+!z1/examples/modules/*/lib/
 *.tsbuildinfo
 pnpm-debug.log
 .pnpm-store/
