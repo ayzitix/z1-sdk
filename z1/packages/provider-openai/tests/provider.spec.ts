@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import type { ChatDelta, ChatMessage, ChatRequest, ToolSchema } from '@z1/node'
 import { createOpenAiLlmService } from '../src/index.ts'
 
-type Scenario = 'stream' | 'tools' | 'json' | 'fail'
+type Scenario = 'stream' | 'tools' | 'json' | 'fail' | 'error-chunk' | 'bad-args' | 'empty-args' | 'no-id'
 
 interface Failure {
   status: number
@@ -105,6 +105,56 @@ function respond(res: ServerResponse): void {
         ],
         { prompt_tokens: 11, completion_tokens: 7 },
       )
+      return
+    case 'error-chunk':
+      // A 200 SSE stream may still announce an upstream failure mid-stream.
+      sse(res, [
+        { error: { message: 'upstream stream broke', type: 'server_error', code: 'overloaded' } },
+      ])
+      return
+    case 'bad-args':
+      sse(res, [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: 'call_bad', function: { name: 'lookup', arguments: '{"q": "unterminated' } },
+                ],
+                finish_reason: 'tool_calls',
+              },
+            },
+          ],
+        },
+      ])
+      return
+    case 'empty-args':
+      sse(res, [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: 'call_empty', function: { name: 'lookup' } }],
+                finish_reason: 'tool_calls',
+              },
+            },
+          ],
+        },
+      ])
+      return
+    case 'no-id':
+      sse(res, [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, function: { name: 'lookup', arguments: '{}' } }],
+                finish_reason: 'tool_calls',
+              },
+            },
+          ],
+        },
+      ])
       return
     case 'stream':
       sse(
@@ -233,6 +283,45 @@ describe('OpenAiLlmService', () => {
     expect(result.message.toolCalls).toEqual(result.toolCalls)
     expect(result.stopReason).toBe('tool_calls')
     expect(result.usage).toEqual({ inputTokens: 11, outputTokens: 7 })
+  })
+
+  test('rejects when a streamed chunk carries an error object', async () => {
+    scenario = 'error-chunk'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    await expect(service.chat(request())).rejects.toThrow(/upstream stream broke/)
+    await expect(service.chat(request())).rejects.toThrow(/server_error/)
+  })
+
+  test('throws naming the tool when streamed arguments are malformed JSON', async () => {
+    scenario = 'bad-args'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    await expect(service.chat(request())).rejects.toThrow(/tool call "lookup"/)
+    await expect(service.chat(request())).rejects.toThrow(/malformed JSON/)
+  })
+
+  test('keeps empty tool arguments as an empty object', async () => {
+    scenario = 'empty-args'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    const result = await service.chat(request())
+
+    expect(result.toolCalls).toEqual([{ id: 'call_empty', name: 'lookup', arguments: {} }])
+  })
+
+  test('synthetic tool-call ids are unique across chat calls', async () => {
+    scenario = 'no-id'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    const first = await service.chat(request())
+    const second = await service.chat(request())
+
+    const firstId = first.toolCalls[0]?.id ?? ''
+    const secondId = second.toolCalls[0]?.id ?? ''
+    expect(firstId).toMatch(/^call_\d+_0$/)
+    expect(secondId).toMatch(/^call_\d+_0$/)
+    expect(firstId).not.toBe(secondId)
   })
 
   test('reads a non-streaming JSON response', async () => {

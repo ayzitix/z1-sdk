@@ -5,6 +5,7 @@ import {
   defineNode,
   NodeRegistry,
   type AutonomyPolicy,
+  type Json,
   type NodeDefinition,
   type PortSpec,
 } from '@z1/node'
@@ -48,6 +49,18 @@ const outputNode = defineNode<unknown>({
   inputs: [flowPort('in'), dataPort('value')],
   outputs: [],
   execute: async () => ({}),
+})
+
+/** Root node that republishes the run seed, so a resume can observe `input`. */
+const echoInputNode = defineNode<unknown>({
+  id: 'test.echoInput',
+  version: '1.0.0',
+  title: 'echo input',
+  category: 'test',
+  config: configOf(z.object({})),
+  inputs: [],
+  outputs: [dataPort('value')],
+  execute: async (ctx) => ({ value: ctx.input }),
 })
 
 const askNode = defineNode<unknown>({
@@ -95,6 +108,15 @@ function countGraph(id = 'resume-count'): GraphDocument {
   }
 }
 
+function echoGraph(id = 'resume-echo'): GraphDocument {
+  return {
+    schemaVersion: 1,
+    id,
+    nodes: [graphNode('echo', 'test.echoInput'), graphNode('out1', 'z1.core.output')],
+    edges: [dataEdge('e1', 'echo', 'value', 'out1', 'value')],
+  }
+}
+
 function askGraph(): GraphDocument {
   return {
     schemaVersion: 1,
@@ -113,6 +135,7 @@ function askGraph(): GraphDocument {
 interface RunFlags {
   resume?: boolean
   suspendOnApproval?: boolean
+  input?: Json
 }
 
 function runWith(
@@ -124,10 +147,11 @@ function runWith(
 ) {
   return runGraph({
     graph,
-    registry: makeRegistry(countNode, askNode, outputNode),
+    registry: makeRegistry(countNode, askNode, echoInputNode, outputNode),
     services,
     journal,
     runId,
+    ...(flags.input !== undefined ? { input: flags.input } : {}),
     ...(flags.resume !== undefined ? { resume: flags.resume } : {}),
     ...(flags.suspendOnApproval !== undefined
       ? { suspendOnApproval: flags.suspendOnApproval }
@@ -288,6 +312,82 @@ function forkBefore(
 
 
 describe('resume', () => {
+  test('run.started journals the run input and its digest', async () => {
+    const journal = new MemoryJournal()
+    const runId = 'run_resume_input_journal'
+    const input = { prompt: 'one', nested: { b: 2, a: 1 } }
+    await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), { input })
+
+    const started = journal.read(runId).find((event) => event.type === 'run.started')
+
+    expect(started?.type === 'run.started' ? started.input : undefined).toEqual(input)
+    expect(started?.type === 'run.started' ? started.inputDigest : undefined).toMatch(
+      /^[0-9a-f]{64}$/,
+    )
+  })
+
+  test('fails with RESUME_MISMATCH when the resumed input differs', async () => {
+    const journal = new MemoryJournal()
+    const runId = 'run_resume_input_mismatch'
+    const first = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), {
+      input: { prompt: 'one' },
+    })
+    expect(first.status).toBe('completed')
+
+    const result = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), {
+      resume: true,
+      input: { prompt: 'two' },
+    })
+    const events = journal.read(runId)
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toBe('RESUME_MISMATCH: run input differs from the journaled input')
+    expect(events.filter((event) => event.type === 'run.resumed')).toHaveLength(0)
+    expect(events.filter((event) => event.type === 'run.failed')).toHaveLength(1)
+  })
+
+  test('resume without input re-executes with the journaled input', async () => {
+    const journal = new MemoryJournal()
+    const sourceId = 'run_resume_input_source'
+    const first = await runWith(journal, echoGraph(), sourceId, createMockRuntimeServices(), {
+      input: { prompt: 'stored' },
+    })
+    expect(first.outputs).toEqual({ output: { prompt: 'stored' } })
+
+    const forkedId = 'run_resume_input_forked'
+    const forked = forkBefore(journal, sourceId, forkedId, 'echo')
+    const resumed = await runWith(forked, echoGraph(), forkedId, createMockRuntimeServices(), {
+      resume: true,
+    })
+    const events = forked.read(forkedId)
+
+    expect(resumed.status).toBe('completed')
+    // Without the stored seed the re-executed node would see `null`.
+    expect(resumed.outputs).toEqual({ output: { prompt: 'stored' } })
+    expect(
+      events.filter((event) => event.type === 'node.started' && event.path === 'echo'),
+    ).toHaveLength(1)
+  })
+
+  test('resume with the same input replays as before', async () => {
+    const journal = new MemoryJournal()
+    const runId = 'run_resume_input_same'
+    const input = { prompt: 'same' }
+    const first = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), { input })
+    const second = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), {
+      resume: true,
+      input: { prompt: 'same' },
+    })
+    const events = journal.read(runId)
+
+    expect(second.status).toBe('completed')
+    expect(second.outputs).toEqual(first.outputs)
+    expect(
+      events.filter((event) => event.type === 'node.started' && event.path === 'echo'),
+    ).toHaveLength(1)
+    expect(events.filter((event) => event.type === 'run.failed')).toHaveLength(0)
+  })
+
   test('replays completed nodes instead of executing them', async () => {
     const journal = new MemoryJournal()
     const runId = 'run_resume_replay'

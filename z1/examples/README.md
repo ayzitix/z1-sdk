@@ -12,7 +12,15 @@ pnpm z1 run z1/examples/agent.graph.json --input '"[[tool:echo]] hello"' --json
 ```
 
 Add `--trace` to stream every run event as a JSON line on stderr, or
-`--approve auto|ask|deny` to control the mock approval service.
+`--approve auto|ask|deny` to control node autonomy. `--message <text>` passes
+the run input as a UTF-8 string used as-is (never JSON-parsed, newlines kept);
+it is mutually exclusive with `--input`/`--input-file`, and `--input` still
+takes JSON.
+
+`--module-approve ask|auto|deny` (default `ask`) is a separate policy for
+`ctx.approval.request(...)` made by module code. It is independent of
+`--approve`, so `--approve auto` alone does not grant module approvals; a
+non-TTY `ask` rejects with a message instead of blocking.
 
 ## Live provider
 

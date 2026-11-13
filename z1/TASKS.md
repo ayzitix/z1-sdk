@@ -87,3 +87,16 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] T38 Per-node run inspector (outputs, errors, duration, prompt hash),
   run timeline and branch tree with fork-from-path.
 - [ ] T39 Review + commit.
+
+## Correctness fixes (from the bug audit)
+
+- [x] Prompt is rendered once (braces in memory survive); empty sections skipped.
+- [x] Memory is framed as untrusted history in `<memory>`.
+- [x] `run.started` records input + digest; resume with a different input fails
+  with `RESUME_MISMATCH` instead of replaying stale output.
+- [x] Parallel tool calls are all executed with matching `tool_call_id`s.
+- [x] `maxSteps` exhaustion fails with `step limit reached`, never returns tool JSON.
+- [x] `--message <text>` for plain input; `--input` stays JSON.
+- [x] Module approvals default to `ask`; `--approve auto` does not cover them.
+- [x] Provider: stream errors throw, malformed tool args throw, synthetic ids are unique.
+- [x] Server: O(1) tee journal, memory attached, approvals keyed by id.

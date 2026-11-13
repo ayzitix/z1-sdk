@@ -195,61 +195,271 @@
               }
             },
             {
-              "id": "callName",
-              "type": "z1.core.get",
+              "id": "toolMap",
+              "type": "z1.flow.map",
               "version": "1.0.0",
               "config": {
-                "path": "toolCalls.0.name"
+                "body": {
+                  "schemaVersion": 1,
+                  "id": "agent.loop.tools",
+                  "title": "Tool calls",
+                  "nodes": [
+                    {
+                      "id": "mapInput",
+                      "type": "z1.core.input",
+                      "version": "1.0.0",
+                      "config": {},
+                      "position": {
+                        "x": 0,
+                        "y": 0
+                      }
+                    },
+                    {
+                      "id": "itemName",
+                      "type": "z1.core.get",
+                      "version": "1.0.0",
+                      "config": {
+                        "path": "item.name"
+                      },
+                      "position": {
+                        "x": 220,
+                        "y": -120
+                      }
+                    },
+                    {
+                      "id": "itemArgs",
+                      "type": "z1.core.get",
+                      "version": "1.0.0",
+                      "config": {
+                        "path": "item.arguments"
+                      },
+                      "position": {
+                        "x": 220,
+                        "y": 0
+                      }
+                    },
+                    {
+                      "id": "itemId",
+                      "type": "z1.core.get",
+                      "version": "1.0.0",
+                      "config": {
+                        "path": "item.id"
+                      },
+                      "position": {
+                        "x": 220,
+                        "y": 120
+                      }
+                    },
+                    {
+                      "id": "mapCall",
+                      "type": "z1.tool.call",
+                      "version": "1.0.0",
+                      "config": {},
+                      "position": {
+                        "x": 440,
+                        "y": 0
+                      }
+                    },
+                    {
+                      "id": "mapMessage",
+                      "type": "z1.core.message",
+                      "version": "1.0.0",
+                      "config": {
+                        "role": "tool"
+                      },
+                      "position": {
+                        "x": 660,
+                        "y": 0
+                      }
+                    },
+                    {
+                      "id": "mapOut",
+                      "type": "z1.core.output",
+                      "version": "1.0.0",
+                      "config": {
+                        "port": "value"
+                      },
+                      "position": {
+                        "x": 880,
+                        "y": 0
+                      }
+                    }
+                  ],
+                  "edges": [
+                    {
+                      "id": "m1",
+                      "kind": "data",
+                      "from": {
+                        "node": "mapInput",
+                        "port": "value"
+                      },
+                      "to": {
+                        "node": "itemName",
+                        "port": "value"
+                      }
+                    },
+                    {
+                      "id": "m2",
+                      "kind": "data",
+                      "from": {
+                        "node": "mapInput",
+                        "port": "value"
+                      },
+                      "to": {
+                        "node": "itemArgs",
+                        "port": "value"
+                      }
+                    },
+                    {
+                      "id": "m3",
+                      "kind": "data",
+                      "from": {
+                        "node": "mapInput",
+                        "port": "value"
+                      },
+                      "to": {
+                        "node": "itemId",
+                        "port": "value"
+                      }
+                    },
+                    {
+                      "id": "m4",
+                      "kind": "data",
+                      "from": {
+                        "node": "itemName",
+                        "port": "value"
+                      },
+                      "to": {
+                        "node": "mapCall",
+                        "port": "name"
+                      }
+                    },
+                    {
+                      "id": "m5",
+                      "kind": "data",
+                      "from": {
+                        "node": "itemArgs",
+                        "port": "value"
+                      },
+                      "to": {
+                        "node": "mapCall",
+                        "port": "args"
+                      }
+                    },
+                    {
+                      "id": "m6",
+                      "kind": "data",
+                      "from": {
+                        "node": "mapCall",
+                        "port": "result"
+                      },
+                      "to": {
+                        "node": "mapMessage",
+                        "port": "content"
+                      }
+                    },
+                    {
+                      "id": "m7",
+                      "kind": "data",
+                      "from": {
+                        "node": "itemId",
+                        "port": "value"
+                      },
+                      "to": {
+                        "node": "mapMessage",
+                        "port": "toolCallId"
+                      }
+                    },
+                    {
+                      "id": "m8",
+                      "kind": "data",
+                      "from": {
+                        "node": "mapMessage",
+                        "port": "message"
+                      },
+                      "to": {
+                        "node": "mapOut",
+                        "port": "value"
+                      }
+                    },
+                    {
+                      "id": "mf1",
+                      "kind": "flow",
+                      "from": {
+                        "node": "mapInput",
+                        "port": "out"
+                      },
+                      "to": {
+                        "node": "itemName",
+                        "port": "in"
+                      }
+                    },
+                    {
+                      "id": "mf2",
+                      "kind": "flow",
+                      "from": {
+                        "node": "itemName",
+                        "port": "out"
+                      },
+                      "to": {
+                        "node": "itemArgs",
+                        "port": "in"
+                      }
+                    },
+                    {
+                      "id": "mf3",
+                      "kind": "flow",
+                      "from": {
+                        "node": "itemArgs",
+                        "port": "out"
+                      },
+                      "to": {
+                        "node": "itemId",
+                        "port": "in"
+                      }
+                    },
+                    {
+                      "id": "mf4",
+                      "kind": "flow",
+                      "from": {
+                        "node": "itemId",
+                        "port": "out"
+                      },
+                      "to": {
+                        "node": "mapCall",
+                        "port": "in"
+                      }
+                    },
+                    {
+                      "id": "mf5",
+                      "kind": "flow",
+                      "from": {
+                        "node": "mapCall",
+                        "port": "out"
+                      },
+                      "to": {
+                        "node": "mapMessage",
+                        "port": "in"
+                      }
+                    },
+                    {
+                      "id": "mf6",
+                      "kind": "flow",
+                      "from": {
+                        "node": "mapMessage",
+                        "port": "out"
+                      },
+                      "to": {
+                        "node": "mapOut",
+                        "port": "in"
+                      }
+                    }
+                  ]
+                }
               },
               "position": {
-                "x": 1100,
-                "y": -120
-              }
-            },
-            {
-              "id": "callArgs",
-              "type": "z1.core.get",
-              "version": "1.0.0",
-              "config": {
-                "path": "toolCalls.0.arguments"
-              },
-              "position": {
-                "x": 1100,
-                "y": 0
-              }
-            },
-            {
-              "id": "callId",
-              "type": "z1.core.get",
-              "version": "1.0.0",
-              "config": {
-                "path": "toolCalls.0.id"
-              },
-              "position": {
-                "x": 1100,
+                "x": 880,
                 "y": 120
-              }
-            },
-            {
-              "id": "tool",
-              "type": "z1.tool.call",
-              "version": "1.0.0",
-              "config": {},
-              "position": {
-                "x": 1320,
-                "y": 0
-              }
-            },
-            {
-              "id": "toolMsg",
-              "type": "z1.core.message",
-              "version": "1.0.0",
-              "config": {
-                "role": "tool"
-              },
-              "position": {
-                "x": 1540,
-                "y": 0
               }
             },
             {
@@ -258,7 +468,7 @@
               "version": "1.0.0",
               "config": {},
               "position": {
-                "x": 1760,
+                "x": 1100,
                 "y": -60
               }
             },
@@ -268,7 +478,7 @@
               "version": "1.0.0",
               "config": {},
               "position": {
-                "x": 1900,
+                "x": 1320,
                 "y": 20
               }
             },
@@ -280,7 +490,7 @@
                 "value": false
               },
               "position": {
-                "x": 1760,
+                "x": 1540,
                 "y": -180
               }
             },
@@ -324,7 +534,7 @@
               "version": "1.0.0",
               "config": {},
               "position": {
-                "x": 2060,
+                "x": 1760,
                 "y": 0
               }
             },
@@ -334,7 +544,7 @@
               "version": "1.0.0",
               "config": {},
               "position": {
-                "x": 2060,
+                "x": 1760,
                 "y": -180
               }
             },
@@ -346,7 +556,7 @@
                 "port": "value"
               },
               "position": {
-                "x": 2280,
+                "x": 1980,
                 "y": 0
               }
             },
@@ -358,7 +568,7 @@
                 "port": "done"
               },
               "position": {
-                "x": 2280,
+                "x": 1980,
                 "y": -180
               }
             }
@@ -416,90 +626,6 @@
               "id": "d5",
               "kind": "data",
               "from": {
-                "node": "assistantMsg",
-                "port": "message"
-              },
-              "to": {
-                "node": "callName",
-                "port": "value"
-              }
-            },
-            {
-              "id": "d6",
-              "kind": "data",
-              "from": {
-                "node": "assistantMsg",
-                "port": "message"
-              },
-              "to": {
-                "node": "callArgs",
-                "port": "value"
-              }
-            },
-            {
-              "id": "d7",
-              "kind": "data",
-              "from": {
-                "node": "assistantMsg",
-                "port": "message"
-              },
-              "to": {
-                "node": "callId",
-                "port": "value"
-              }
-            },
-            {
-              "id": "d8",
-              "kind": "data",
-              "from": {
-                "node": "callName",
-                "port": "value"
-              },
-              "to": {
-                "node": "tool",
-                "port": "name"
-              }
-            },
-            {
-              "id": "d9",
-              "kind": "data",
-              "from": {
-                "node": "callArgs",
-                "port": "value"
-              },
-              "to": {
-                "node": "tool",
-                "port": "args"
-              }
-            },
-            {
-              "id": "d10",
-              "kind": "data",
-              "from": {
-                "node": "tool",
-                "port": "result"
-              },
-              "to": {
-                "node": "toolMsg",
-                "port": "content"
-              }
-            },
-            {
-              "id": "d11",
-              "kind": "data",
-              "from": {
-                "node": "callId",
-                "port": "value"
-              },
-              "to": {
-                "node": "toolMsg",
-                "port": "toolCallId"
-              }
-            },
-            {
-              "id": "d12",
-              "kind": "data",
-              "from": {
                 "node": "chat",
                 "port": "text"
               },
@@ -509,7 +635,7 @@
               }
             },
             {
-              "id": "d13",
+              "id": "d6",
               "kind": "data",
               "from": {
                 "node": "chat",
@@ -521,7 +647,19 @@
               }
             },
             {
-              "id": "d14",
+              "id": "d7",
+              "kind": "data",
+              "from": {
+                "node": "chat",
+                "port": "toolCalls"
+              },
+              "to": {
+                "node": "toolMap",
+                "port": "items"
+              }
+            },
+            {
+              "id": "d8",
               "kind": "data",
               "from": {
                 "node": "messages",
@@ -533,7 +671,7 @@
               }
             },
             {
-              "id": "d15",
+              "id": "d9",
               "kind": "data",
               "from": {
                 "node": "assistantMsg",
@@ -545,7 +683,7 @@
               }
             },
             {
-              "id": "d16",
+              "id": "d10",
               "kind": "data",
               "from": {
                 "node": "thenConcat",
@@ -557,11 +695,11 @@
               }
             },
             {
-              "id": "d17",
+              "id": "d11",
               "kind": "data",
               "from": {
-                "node": "toolMsg",
-                "port": "message"
+                "node": "toolMap",
+                "port": "results"
               },
               "to": {
                 "node": "thenMsgs",
@@ -569,7 +707,7 @@
               }
             },
             {
-              "id": "d18",
+              "id": "d12",
               "kind": "data",
               "from": {
                 "node": "thenMsgs",
@@ -581,7 +719,7 @@
               }
             },
             {
-              "id": "d19",
+              "id": "d13",
               "kind": "data",
               "from": {
                 "node": "body",
@@ -593,7 +731,7 @@
               }
             },
             {
-              "id": "d20",
+              "id": "d14",
               "kind": "data",
               "from": {
                 "node": "elseMessages",
@@ -605,7 +743,7 @@
               }
             },
             {
-              "id": "d21",
+              "id": "d15",
               "kind": "data",
               "from": {
                 "node": "chat",
@@ -617,7 +755,7 @@
               }
             },
             {
-              "id": "d22",
+              "id": "d16",
               "kind": "data",
               "from": {
                 "node": "elseMsgs",
@@ -629,7 +767,7 @@
               }
             },
             {
-              "id": "d23",
+              "id": "d17",
               "kind": "data",
               "from": {
                 "node": "thenDone",
@@ -641,7 +779,7 @@
               }
             },
             {
-              "id": "d24",
+              "id": "d18",
               "kind": "data",
               "from": {
                 "node": "elseDone",
@@ -653,7 +791,7 @@
               }
             },
             {
-              "id": "d25",
+              "id": "d19",
               "kind": "data",
               "from": {
                 "node": "messagesMerge",
@@ -665,7 +803,7 @@
               }
             },
             {
-              "id": "d26",
+              "id": "d20",
               "kind": "data",
               "from": {
                 "node": "doneMerge",
@@ -677,7 +815,7 @@
               }
             },
             {
-              "id": "d27",
+              "id": "d21",
               "kind": "data",
               "from": {
                 "node": "body",
@@ -689,7 +827,7 @@
               }
             },
             {
-              "id": "d28",
+              "id": "d22",
               "kind": "data",
               "from": {
                 "node": "systemText",
@@ -725,7 +863,7 @@
               }
             },
             {
-              "id": "f22",
+              "id": "f3",
               "kind": "flow",
               "from": {
                 "node": "systemText",
@@ -737,7 +875,7 @@
               }
             },
             {
-              "id": "f3",
+              "id": "f4",
               "kind": "flow",
               "from": {
                 "node": "chat",
@@ -749,7 +887,7 @@
               }
             },
             {
-              "id": "f4",
+              "id": "f5",
               "kind": "flow",
               "from": {
                 "node": "branch",
@@ -761,26 +899,14 @@
               }
             },
             {
-              "id": "f5",
+              "id": "f6",
               "kind": "flow",
               "from": {
                 "node": "assistantMsg",
                 "port": "out"
               },
               "to": {
-                "node": "callName",
-                "port": "in"
-              }
-            },
-            {
-              "id": "f6",
-              "kind": "flow",
-              "from": {
-                "node": "callName",
-                "port": "out"
-              },
-              "to": {
-                "node": "callArgs",
+                "node": "toolMap",
                 "port": "in"
               }
             },
@@ -788,43 +914,7 @@
               "id": "f7",
               "kind": "flow",
               "from": {
-                "node": "callArgs",
-                "port": "out"
-              },
-              "to": {
-                "node": "callId",
-                "port": "in"
-              }
-            },
-            {
-              "id": "f8",
-              "kind": "flow",
-              "from": {
-                "node": "callId",
-                "port": "out"
-              },
-              "to": {
-                "node": "tool",
-                "port": "in"
-              }
-            },
-            {
-              "id": "f9",
-              "kind": "flow",
-              "from": {
-                "node": "tool",
-                "port": "out"
-              },
-              "to": {
-                "node": "toolMsg",
-                "port": "in"
-              }
-            },
-            {
-              "id": "f10",
-              "kind": "flow",
-              "from": {
-                "node": "toolMsg",
+                "node": "toolMap",
                 "port": "out"
               },
               "to": {
@@ -833,7 +923,7 @@
               }
             },
             {
-              "id": "f11",
+              "id": "f8",
               "kind": "flow",
               "from": {
                 "node": "thenConcat",
@@ -845,7 +935,7 @@
               }
             },
             {
-              "id": "f12",
+              "id": "f9",
               "kind": "flow",
               "from": {
                 "node": "thenMsgs",
@@ -857,7 +947,7 @@
               }
             },
             {
-              "id": "f13",
+              "id": "f10",
               "kind": "flow",
               "from": {
                 "node": "branch",
@@ -869,7 +959,7 @@
               }
             },
             {
-              "id": "f14",
+              "id": "f11",
               "kind": "flow",
               "from": {
                 "node": "elseMessages",
@@ -881,7 +971,7 @@
               }
             },
             {
-              "id": "f15",
+              "id": "f12",
               "kind": "flow",
               "from": {
                 "node": "elseMsgs",
@@ -893,7 +983,7 @@
               }
             },
             {
-              "id": "f16",
+              "id": "f13",
               "kind": "flow",
               "from": {
                 "node": "thenMsgs",
@@ -905,7 +995,7 @@
               }
             },
             {
-              "id": "f17",
+              "id": "f14",
               "kind": "flow",
               "from": {
                 "node": "elseMsgs",
@@ -917,7 +1007,7 @@
               }
             },
             {
-              "id": "f18",
+              "id": "f15",
               "kind": "flow",
               "from": {
                 "node": "thenDone",
@@ -929,7 +1019,7 @@
               }
             },
             {
-              "id": "f19",
+              "id": "f16",
               "kind": "flow",
               "from": {
                 "node": "elseDone",
@@ -941,7 +1031,7 @@
               }
             },
             {
-              "id": "f20",
+              "id": "f17",
               "kind": "flow",
               "from": {
                 "node": "messagesMerge",
@@ -953,7 +1043,7 @@
               }
             },
             {
-              "id": "f21",
+              "id": "f18",
               "kind": "flow",
               "from": {
                 "node": "doneMerge",
@@ -974,12 +1064,22 @@
       }
     },
     {
+      "id": "doneCheck",
+      "type": "z1.flow.if",
+      "version": "1.0.0",
+      "config": {},
+      "position": {
+        "x": 1760,
+        "y": 0
+      }
+    },
+    {
       "id": "last",
       "type": "z1.core.last",
       "version": "1.0.0",
       "config": {},
       "position": {
-        "x": 1760,
+        "x": 1980,
         "y": 0
       }
     },
@@ -991,7 +1091,7 @@
         "path": "content"
       },
       "position": {
-        "x": 1980,
+        "x": 2200,
         "y": 0
       }
     },
@@ -1003,8 +1103,20 @@
         "port": "output"
       },
       "position": {
-        "x": 2200,
+        "x": 2420,
         "y": 0
+      }
+    },
+    {
+      "id": "fail",
+      "type": "z1.core.fail",
+      "version": "1.0.0",
+      "config": {
+        "message": "step limit reached after 12 steps"
+      },
+      "position": {
+        "x": 1980,
+        "y": -180
       }
     },
     {
@@ -1557,6 +1669,18 @@
       "to": {
         "node": "output",
         "port": "value"
+      }
+    },
+    {
+      "id": "d13",
+      "kind": "data",
+      "from": {
+        "node": "loop",
+        "port": "completed"
+      },
+      "to": {
+        "node": "doneCheck",
+        "port": "condition"
       }
     },
     {
@@ -2323,7 +2447,7 @@
         "port": "out"
       },
       "to": {
-        "node": "last",
+        "node": "doneCheck",
         "port": "in"
       }
     },
@@ -2331,6 +2455,18 @@
       "id": "f9",
       "kind": "flow",
       "from": {
+        "node": "doneCheck",
+        "port": "then"
+      },
+      "to": {
+        "node": "last",
+        "port": "in"
+      }
+    },
+    {
+      "id": "f10",
+      "kind": "flow",
+      "from": {
         "node": "last",
         "port": "out"
       },
@@ -2340,7 +2476,7 @@
       }
     },
     {
-      "id": "f10",
+      "id": "f11",
       "kind": "flow",
       "from": {
         "node": "content",
@@ -2348,6 +2484,18 @@
       },
       "to": {
         "node": "output",
+        "port": "in"
+      }
+    },
+    {
+      "id": "f12",
+      "kind": "flow",
+      "from": {
+        "node": "doneCheck",
+        "port": "else"
+      },
+      "to": {
+        "node": "fail",
         "port": "in"
       }
     }

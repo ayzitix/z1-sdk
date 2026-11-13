@@ -37,6 +37,11 @@ const branch = defineNode({
  * `done` flag are read from the body's `core.output` ports named `value` and
  * `done`. `done` is optional — a body without a `done` port runs exactly
  * `maxIterations` times. `seed` is optional and defaults to `null`.
+ *
+ * `completed` reports why the loop stopped: `true` when the body said `done`,
+ * `false` when the iteration cap was reached first. A caller that must not
+ * accept a truncated result branches on it instead of guessing from
+ * `iterations`.
  */
 const loop = defineNode({
   id: 'z1.flow.loop',
@@ -55,13 +60,20 @@ const loop = defineNode({
     maxIterations: 3,
   },
   inputs: [flowPort('in'), dataPort('seed', jsonValue, false)],
-  outputs: [flowPort('out'), dataPort('result', jsonValue), dataPort('iterations', z.number())],
+  outputs: [
+    flowPort('out'),
+    dataPort('result', jsonValue),
+    dataPort('iterations', z.number()),
+    dataPort('completed', z.boolean()),
+  ],
   execute: async (ctx) => {
     const body = parseGraph(ctx.config.body)
     const values = inputValues(ctx.input)
     // An absent seed is a deliberate `null`, not "skip the first iteration".
     let current = Object.hasOwn(values, 'seed') ? (values['seed'] ?? null) : null
     let iterations = 0
+    // Distinguishes "the body finished" from "the cap cut the loop short".
+    let completed = false
 
     while (iterations < ctx.config.maxIterations) {
       const { outputs } = await ctx.runSubgraph({
@@ -74,10 +86,13 @@ const loop = defineNode({
       iterations += 1
       current = bodyValue(outputs)
       // A body without a `done` output never stops early: it runs to the cap.
-      if (outputs['done'] === true) break
+      if (outputs['done'] === true) {
+        completed = true
+        break
+      }
     }
 
-    return { out: true, result: current, iterations }
+    return { out: true, result: current, iterations, completed }
   },
 })
 

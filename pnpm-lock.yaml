@@ -19168,6 +19168,9 @@ importers:
       '@z1/journal':
         specifier: workspace:*
         version: link:../journal
+      '@z1/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@z1/module':
         specifier: workspace:*
         version: link:../module

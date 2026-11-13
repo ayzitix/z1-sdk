@@ -24,6 +24,7 @@ import {
   type ValidationIssue,
 } from '@z1/graph'
 import { SqliteJournal, type RunRecord, type RunStatus } from '@z1/journal'
+import { BranchMemory } from '@z1/memory'
 import { ModuleStore } from '@z1/module'
 import type { ApprovalDecision, Json, NodeRegistry } from '@z1/node'
 import { createBuiltinRegistry } from '@z1/nodes'
@@ -94,6 +95,8 @@ interface RunState {
 interface PendingApproval {
   readonly approvalId: string
   readonly runId: string
+  readonly nodeId: string
+  readonly path: string
   readonly connectionId: string
   readonly decide: (decision: ApprovalDecision) => void
 }
@@ -140,10 +143,6 @@ function optionalSeq(value: unknown, field: string): number | undefined {
     throw invalidParams(`param "${field}" must be a non-negative integer`, { param: field })
   }
   return value
-}
-
-function approvalKey(runId: string, nodeId: string): string {
-  return `${runId}\u0000${nodeId}`
 }
 
 /** Parse issues carry zod codes, which the graph validator's union does not cover. */
@@ -211,11 +210,11 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
   // on a missing directory.
   await graphs.init()
   const journal = new SqliteJournal(options.dbPath)
+  // One instance: summaries are keyed by run id and the journal is the tree.
+  const memory = new BranchMemory(journal)
   const runs = new Map<string, RunState>()
   const approvals = new Map<string, PendingApproval>()
   const connections = new Set<Connection>()
-  /** runId+nodeId -> execution path of the node that asked; see `createApprovalService`. */
-  const approvalPaths = new Map<string, string>()
 
   // One mock and at most one live router per server: provider clients cache an
   // HTTP agent, so rebuilding them per run would leak sockets.
@@ -233,11 +232,6 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
   }
 
   const tee = new TeeJournal(journal, (runId, seq, event) => {
-    if (event.type === 'approval.requested') {
-      // The runtime calls the approval service with `nodeId` only; the path is
-      // already journaled on the event delivered just before the request.
-      approvalPaths.set(approvalKey(runId, event.nodeId), event.path)
-    }
     publish(runId, seq, event)
   })
 
@@ -277,11 +271,28 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     throw appFault(APP_ERRORS.graphInvalid, `invalid graph: ${codes}`, { issues })
   }
 
+  /**
+   * The runtime calls the approval service with `nodeId` only, while the path
+   * is journaled on the `approval.requested` event delivered just before it.
+   * Reading it back (rather than caching by runId+nodeId) keeps a loop body
+   * that re-enters one node type from losing the previous iteration's path.
+   */
+  function lastApprovalPath(runId: string, nodeId: string): string {
+    const events = journal.read(runId)
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event !== undefined && event.type === 'approval.requested' && event.nodeId === nodeId) {
+        return event.path
+      }
+    }
+    return nodeId
+  }
+
   function createApprovalService(runId: string, connection: Connection): ApprovalService {
     return {
       request: async (request, context) => {
         const approvalId = `apr_${randomUUID()}`
-        const path = approvalPaths.get(approvalKey(runId, context.nodeId)) ?? context.nodeId
+        const path = lastApprovalPath(runId, context.nodeId)
         const decision = await new Promise<ApprovalDecision>((resolve, reject) => {
           let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -307,7 +318,14 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
           }, config.approvalTimeoutMs)
           timer.unref?.()
 
-          approvals.set(approvalId, { approvalId, runId, connectionId: connection.id, decide })
+          approvals.set(approvalId, {
+            approvalId,
+            runId,
+            nodeId: context.nodeId,
+            path,
+            connectionId: connection.id,
+            decide,
+          })
           connection.approvals.add(approvalId)
 
           // A client may answer either by replying to this request (the
@@ -350,6 +368,7 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
         },
       },
       approval: createApprovalService(runId, connection),
+      memory,
     }
   }
 

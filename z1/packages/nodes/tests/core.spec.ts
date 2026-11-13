@@ -231,6 +231,33 @@ describe('z1.core nodes', () => {
     expect(await runLast([1, 'two'])).toBe('two')
   })
 
+  test('fail throws the configured message and publishes nothing', async () => {
+    const graph = makeGraph(
+      'fail-gated',
+      [
+        graphNode('start', 'z1.core.input'),
+        graphNode('cond', 'z1.core.const', { value: true }),
+        graphNode('branch', 'z1.flow.if'),
+        graphNode('fail', 'z1.core.fail', { message: 'stop right there' }),
+        graphNode('unused', 'z1.core.const', { value: 'unused' }),
+        graphNode('out', 'z1.core.output'),
+      ],
+      [
+        flowEdge('f1', 'start', 'out', 'branch', 'in'),
+        dataEdge('d1', 'cond', 'value', 'branch', 'condition'),
+        dataEdge('d2', 'unused', 'value', 'out', 'value'),
+        flowEdge('f2', 'branch', 'then', 'fail', 'in'),
+        flowEdge('f3', 'branch', 'else', 'out', 'in'),
+      ],
+    )
+
+    const { result } = await runBuiltins({ graph, input: null })
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('stop right there')
+    expect(result.outputs).toEqual({})
+  })
+
   test('merge prefers a and falls back to b', async () => {
     async function runMerge(inputs: Record<string, unknown>) {
       const nodes = [graphNode('merge', 'z1.core.merge'), graphNode('out', 'z1.core.output')]

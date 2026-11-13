@@ -46,7 +46,19 @@ function emptyResumeState(): ResumeState {
   return { completed: new Map(), decisions: new Map(), pending: new Map() }
 }
 
-type ResumeLoad = { readonly state: ResumeState } | { readonly error: string }
+type ResumeLoad =
+  | {
+      readonly state: ResumeState
+      /** The run seed recorded in `run.started`; `null` when the run had none. */
+      readonly input: Json
+      readonly inputDigest: string
+    }
+  | { readonly error: string }
+
+/** Digest of the run seed: a resume must present exactly the same input. */
+function digestInput(input: Json): string {
+  return createHash('sha256').update(canonicalJson(input)).digest('hex')
+}
 
 /**
  * Rebuild the resume view for `runId`. A resume is only safe against the same
@@ -96,7 +108,7 @@ function loadResumeState(
         break
     }
   }
-  return { state }
+  return { state, input: started.input ?? null, inputDigest: started.inputDigest }
 }
 
 interface ResolvedInputs {
@@ -644,11 +656,14 @@ async function executeRun(options: RunOptions, context: RunContext): Promise<Run
     // continuation of that run, not a second start.
     await deliverRun({ type: 'run.resumed', runId, at: Date.now() })
   } else {
+    const seed: Json = options.input ?? null
     await deliverRun({
       type: 'run.started',
       runId,
       graphId: graph.id,
       graphDigest: graphDigest(graph),
+      input: seed,
+      inputDigest: digestInput(seed),
       at: Date.now(),
     })
   }
@@ -934,6 +949,7 @@ async function executeRun(options: RunOptions, context: RunContext): Promise<Run
 export async function runGraph(options: RunOptions): Promise<RunResult> {
   const runId = options.runId ?? `run_${randomUUID()}`
   const journal = options.journal ?? new MemoryJournal()
+  let effective = options
   let resume = emptyResumeState()
   if (options.resume === true) {
     const loaded = loadResumeState(journal, runId, options.graph)
@@ -941,6 +957,24 @@ export async function runGraph(options: RunOptions): Promise<RunResult> {
       return { runId, status: 'failed', outputs: {}, error: loaded.error }
     }
     resume = loaded.state
+    if (options.input !== undefined) {
+      // A resumed run must be the same run: a different seed would replay
+      // stored outputs that were produced from other inputs, so refuse rather
+      // than silently mixing two runs in one journal.
+      if (digestInput(options.input) !== loaded.inputDigest) {
+        const error = new RunFailure(
+          'RESUME_MISMATCH',
+          'run input differs from the journaled input',
+        ).message
+        const event: RunEvent = { type: 'run.failed', runId, at: Date.now(), error }
+        await journal.append(event)
+        options.services.onEvent?.(event)
+        return { runId, status: 'failed', outputs: {}, error }
+      }
+    } else {
+      // No input supplied: re-executed nodes see the seed the run started with.
+      effective = { ...options, input: loaded.input }
+    }
   }
   const context: RunContext = {
     runId,
@@ -949,5 +983,5 @@ export async function runGraph(options: RunOptions): Promise<RunResult> {
     cache: new Map(),
     resume,
   }
-  return executeRun(options, context)
+  return executeRun(effective, context)
 }

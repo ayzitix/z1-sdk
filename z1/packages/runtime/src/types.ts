@@ -52,6 +52,10 @@ export type RunEvent =
       graphId: string
       /** Semantic digest of the graph, checked again by `resume`. */
       graphDigest: string
+      /** The run seed (`options.input`, or `null` when absent). */
+      input: Json
+      /** sha256 of the canonical JSON of `input`, checked again by `resume`. */
+      inputDigest: string
       at: number
     }
   | { type: 'run.resumed'; runId: string; at: number }

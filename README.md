@@ -22,7 +22,7 @@ modify the engine.
 branch forks, sandboxed executable modules with an approval panel, the agent
 loop as a real graph, branch-tree memory, a headless server, real
 OpenAI-compatible models and a browser canvas are implemented and tested
-(457 tests). Not implemented yet: editor integration and OS-level sandboxing
+(483 tests). Not implemented yet: editor integration and OS-level sandboxing
 for untrusted modules.
 
 ## Quick start
@@ -47,7 +47,7 @@ pnpm z1 fork <runId> --at chat
 pnpm z1 run <graph> --resume <forkedRunId>
 
 # the agent loop as a graph (tool call, loop, memory)
-pnpm z1 run z1/examples/agent.loop.graph.json --input '"[[tool:echo]] hi"'
+pnpm z1 run z1/examples/agent.loop.graph.json --message '[[tool:echo]] hi'
 
 # executable modules: propose, review, approve, then run
 pnpm z1 module propose z1/examples/modules/echo

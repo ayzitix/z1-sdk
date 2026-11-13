@@ -158,6 +158,119 @@ describe('z1 cli', () => {
     expect(err).toContain('mutually exclusive')
   })
 
+  describe('--message', () => {
+    let directory = ''
+    let passthrough = ''
+
+    beforeAll(async () => {
+      directory = await mkdtemp(join(tmpdir(), 'z1-message-'))
+      passthrough = join(directory, 'passthrough.graph.json')
+      await writeFile(
+        passthrough,
+        JSON.stringify({
+          schemaVersion: 1,
+          id: 'passthrough',
+          nodes: [
+            {
+              id: 'in1',
+              type: 'z1.core.input',
+              version: '1.0.0',
+              config: {},
+              position: { x: 0, y: 0 },
+            },
+            {
+              id: 'out1',
+              type: 'z1.core.output',
+              version: '1.0.0',
+              config: {},
+              position: { x: 200, y: 0 },
+            },
+          ],
+          edges: [
+            {
+              id: 'd1',
+              kind: 'data',
+              from: { node: 'in1', port: 'value' },
+              to: { node: 'out1', port: 'value' },
+            },
+            {
+              id: 'f1',
+              kind: 'flow',
+              from: { node: 'in1', port: 'out' },
+              to: { node: 'out1', port: 'in' },
+            },
+          ],
+        }),
+        'utf8',
+      )
+    })
+
+    afterAll(async () => {
+      await rm(directory, { recursive: true, force: true })
+    })
+
+    test('passes the text through as a string, not JSON', async () => {
+      const { code, out, err } = await run([
+        'run',
+        passthrough,
+        '--message',
+        'hello there',
+        '--json',
+      ])
+
+      expect(err).toBe('')
+      expect(code).toBe(0)
+      expect(JSON.parse(out.trimEnd())).toMatchObject({
+        status: 'completed',
+        outputs: { output: 'hello there' },
+      })
+    })
+
+    test('does not parse JSON-looking text', async () => {
+      const { code, out } = await run([
+        'run',
+        passthrough,
+        '--message',
+        '{"name":"a"}',
+        '--json',
+      ])
+
+      expect(code).toBe(0)
+      expect(JSON.parse(out.trimEnd())).toMatchObject({
+        outputs: { output: '{"name":"a"}' },
+      })
+    })
+
+    test('keeps multi-line text intact', async () => {
+      const { code, out } = await run([
+        'run',
+        passthrough,
+        '--message',
+        'line one\nline two',
+        '--json',
+      ])
+
+      expect(code).toBe(0)
+      expect(JSON.parse(out.trimEnd())).toMatchObject({
+        outputs: { output: 'line one\nline two' },
+      })
+    })
+
+    test('--message with --input is a usage error', async () => {
+      const { code, err } = await run([
+        'run',
+        passthrough,
+        '--message',
+        'hello',
+        '--input',
+        '{"name":"a"}',
+      ])
+
+      expect(code).toBe(2)
+      expect(err).toContain('mutually exclusive')
+    })
+  })
+
   test('an unknown --approve value is a usage error', async () => {
     const { code, err } = await run(['run', HELLO, '--approve', 'maybe'])
 
@@ -289,7 +402,7 @@ describe('z1 cli', () => {
       ])
 
       expect(code).toBe(1)
-      expect(err).toContain('RESUME_MISMATCH')
+      expect(err).toMatch(/^RESUME_MISMATCH: /m)
     })
   })
 

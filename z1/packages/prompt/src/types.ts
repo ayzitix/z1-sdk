@@ -13,6 +13,12 @@ export interface PromptSection {
   priority: number
   /** A required section survives every budget cut. */
   required?: boolean
+  /**
+   * Pre-rendered text. When set, `stackSections` uses it verbatim instead of
+   * rendering `body`, so a value that already contains `{{…}}` is never
+   * templated a second time.
+   */
+  text?: string
   body: string
 }
 

@@ -99,6 +99,11 @@ export class OpenAiLlmService implements LlmService {
   private readonly fetchImpl: typeof fetch
   private readonly retry: ResolvedRetryOptions
   private readonly signal: AbortSignal | undefined
+  /**
+   * Monotonic across every call this service makes, so a synthetic id can
+   * never collide with one handed out for an earlier request (or turn).
+   */
+  private syntheticCalls = 0
 
   constructor(options: OpenAiProviderOptions) {
     this.endpoint = options.baseURL.replace(/\/+$/, '')
@@ -132,22 +137,34 @@ export class OpenAiLlmService implements LlmService {
       throw new Error('openai-compatible request returned an empty body')
     }
 
-    const accumulator = new ChatAccumulator(onDelta)
+    const accumulator = new ChatAccumulator(onDelta, () => this.nextSyntheticCall())
     let finishReason: string | undefined
     let usage: ChatUsage | undefined
 
     for await (const payload of readSseData(response.body)) {
       if (payload === '[DONE]') break
-      const chunk = parseObject(payload) as WireResponse | undefined
+      const chunk = parseObject(payload)
       if (chunk === undefined) continue
-      const choice = chunk.choices?.[0]
+      if (chunk['error'] !== undefined) throw this.streamError(chunk['error'])
+      const data = chunk as WireResponse
+      const choice = data.choices?.[0]
       if (choice?.delta !== undefined) accumulator.apply(choice.delta)
       if (typeof choice?.finish_reason === 'string') finishReason = choice.finish_reason
-      const chunkUsage = toUsage(chunk.usage)
+      const chunkUsage = toUsage(data.usage)
       if (chunkUsage !== undefined) usage = chunkUsage
     }
 
     return accumulator.finish(finishReason, usage)
+  }
+
+  /** A privacy-safe message for an upstream `{ error: ... }` object. */
+  private streamError(error: unknown): Error {
+    return new Error(`openai-compatible stream error: ${redact(describeError(error), this.apiKey)}`)
+  }
+
+  private nextSyntheticCall(): number {
+    this.syntheticCalls += 1
+    return this.syntheticCalls
   }
 
   /**
@@ -181,9 +198,10 @@ export class OpenAiLlmService implements LlmService {
   /** Non-streaming callers get one complete message; no deltas are emitted. */
   private async readComplete(response: Response): Promise<ChatResult> {
     const raw: unknown = await response.json()
+    if (isRecord(raw) && raw['error'] !== undefined) throw this.streamError(raw['error'])
     const data = isRecord(raw) ? (raw as WireResponse) : {}
     const choice = data.choices?.[0]
-    const accumulator = new ChatAccumulator(undefined)
+    const accumulator = new ChatAccumulator(undefined, () => this.nextSyntheticCall())
     if (choice?.message !== undefined) accumulator.apply(choice.message)
     return accumulator.finish(choice?.finish_reason ?? undefined, toUsage(data.usage))
   }
@@ -206,9 +224,11 @@ class ChatAccumulator {
   private text = ''
   private readonly calls = new Map<number, ToolCallAccumulator>()
   private readonly onDelta: ((delta: ChatDelta) => void) | undefined
+  private readonly nextCallSeq: () => number
 
-  constructor(onDelta: ((delta: ChatDelta) => void) | undefined) {
+  constructor(onDelta: ((delta: ChatDelta) => void) | undefined, nextCallSeq: () => number) {
     this.onDelta = onDelta
+    this.nextCallSeq = nextCallSeq
   }
 
   /** Consumes a streaming delta, or a complete message from a JSON response. */
@@ -272,9 +292,11 @@ class ChatAccumulator {
     return [...this.calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([index, entry]) => ({
-        id: entry.id.length > 0 ? entry.id : `call_${index}`,
+        // The provider is not required to send an id, and a bare index would
+        // repeat on the next call. The service counter makes it unique.
+        id: entry.id.length > 0 ? entry.id : `call_${this.nextCallSeq()}_${index}`,
         name: entry.name,
-        arguments: parseArguments(entry.arguments),
+        arguments: parseArguments(entry.arguments, entry.name, index),
       }))
   }
 
@@ -354,15 +376,21 @@ function mapStopReason(reason: string | undefined): ChatResult['stopReason'] {
   }
 }
 
-/** Empty arguments mean "no arguments"; a truncated stream must not fail the run. */
-function parseArguments(raw: string): Json {
+/** Empty arguments mean "no arguments"; malformed ones must never run a tool. */
+function parseArguments(raw: string, toolName: string, index: number): Json {
   const trimmed = raw.trim()
   if (trimmed.length === 0) return {}
   try {
     const value: unknown = JSON.parse(trimmed)
     return isJson(value) ? value : {}
   } catch {
-    return {}
+    const label = toolName.length > 0 ? `"${toolName}"` : `#${index}`
+    throw new Error(
+      `tool call ${label} returned malformed JSON arguments: ${truncate(
+        trimmed,
+        ARGUMENTS_SNIPPET,
+      )}`,
+    )
   }
 }
 
@@ -386,13 +414,39 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function parseObject(payload: string): unknown {
+function parseObject(payload: string): Record<string, unknown> | undefined {
   try {
     const value: unknown = JSON.parse(payload)
     return isRecord(value) ? value : undefined
   } catch {
     return undefined
   }
+}
+
+/** JSON arguments longer than this are cut in the error; the tool still fails. */
+const ARGUMENTS_SNIPPET = 200
+
+function truncate(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit)}…`
+}
+
+/**
+ * Renders an upstream `{ error: ... }` payload without assuming its shape:
+ * providers disagree on whether it carries a message, a type, or a status.
+ */
+function describeError(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (!isRecord(error)) return String(error)
+  const parts: string[] = []
+  const message = error['message']
+  if (typeof message === 'string' && message.length > 0) parts.push(message)
+  const type = error['type']
+  if (typeof type === 'string' && type.length > 0) parts.push(`type=${type}`)
+  const code = error['code']
+  if (typeof code === 'string' || typeof code === 'number') parts.push(`code=${String(code)}`)
+  const status = error['status']
+  if (typeof status === 'number') parts.push(`status=${status}`)
+  return parts.length > 0 ? parts.join(' ') : 'upstream reported an error'
 }
 
 function isAborted(signal: AbortSignal | undefined): boolean {

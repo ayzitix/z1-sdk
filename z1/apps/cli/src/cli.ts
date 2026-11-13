@@ -25,6 +25,7 @@ import { startServer, type Z1Server } from '@z1/server'
 import {
   createMockRuntimeServices,
   runGraph,
+  type ApprovalService,
   type LlmService,
   type MockApprovalBehavior,
   type RunEvent,
@@ -48,8 +49,9 @@ const USAGE = [
   'commands:',
   '  list',
   '  validate <graph.json>',
-  '  run <graph.json> [--input <json>] [--input-file <path>] [--json] [--trace]',
-  '      [--approve auto|ask|deny] [--db <path>] [--suspend] [--resume <runId>] [--live]',
+  '  run <graph.json> [--input <json> | --message <text>] [--input-file <path>] [--json] [--trace]',
+  '      [--approve auto|ask|deny] [--module-approve auto|ask|deny] [--db <path>]',
+  '      [--suspend] [--resume <runId>] [--live]',
   '      [--modules-dir <path>] [--no-modules] [--no-memory]',
   '  tree [--db <path>] [--json]',
   '  memory context <runId> [--db <path>] [--json]',
@@ -66,6 +68,10 @@ const USAGE = [
 ].join('\n')
 
 type ApproveMode = 'auto' | 'ask' | 'deny'
+
+function isApproveMode(value: string): value is ApproveMode {
+  return value === 'auto' || value === 'ask' || value === 'deny'
+}
 
 /** A problem with how the command was invoked, not with the graph. */
 class UsageError extends Error {
@@ -191,6 +197,23 @@ function approvalBehavior(mode: ApproveMode, io: CliIO): MockApprovalBehavior {
         }
         return /^y(es)?$/i.test(answer.trim()) ? 'allowed-once' : 'rejected'
       }
+  }
+}
+
+/**
+ * Module code asks for approval through its own policy. `--approve` describes
+ * node autonomy, so a graph-wide `auto` must not silently grant module code the
+ * right to act; `--module-approve` defaults to asking.
+ */
+function moduleApprovalService(mode: ApproveMode, io: CliIO): ApprovalService {
+  const behavior = approvalBehavior(mode, io)
+  return {
+    async request(request) {
+      if (typeof behavior === 'function') {
+        return await behavior(request, { runId: 'module', nodeId: 'module' })
+      }
+      return behavior
+    },
   }
 }
 
@@ -688,22 +711,29 @@ function moduleAuditCommand(args: readonly string[], io: CliIO): number {
 }
 
 /** The subset of runtime services a module worker is allowed to call. */
-function moduleWorkerServices(services: RuntimeServices): WorkerHostServices {
+function moduleWorkerServices(
+  services: RuntimeServices,
+  approval: ApprovalService,
+): WorkerHostServices {
   return {
     llm: services.llm,
     tools: services.tools,
     fs: services.fs,
-    approval: services.approval,
+    // Deliberately not `services.approval`: module approvals are their own
+    // policy, and `--approve auto` must not make module requests automatic.
+    approval,
   }
 }
 
 async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   let values: {
     input?: string
+    message?: string
     'input-file'?: string
     json?: boolean
     trace?: boolean
     approve?: string
+    'module-approve'?: string
     db?: string
     suspend?: boolean
     resume?: string
@@ -718,10 +748,12 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
       args: [...args],
       options: {
         input: { type: 'string' },
+        message: { type: 'string' },
         'input-file': { type: 'string' },
         json: { type: 'boolean' },
         trace: { type: 'boolean' },
         approve: { type: 'string' },
+        'module-approve': { type: 'string' },
         db: { type: 'string' },
         suspend: { type: 'boolean' },
         resume: { type: 'string' },
@@ -744,8 +776,24 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   if (path === undefined || positionals.length > 1) return usage(io)
 
   const approve = values.approve ?? 'auto'
-  if (approve !== 'auto' && approve !== 'ask' && approve !== 'deny') {
+  if (!isApproveMode(approve)) {
     io.stderr(`invalid --approve "${approve}"; expected auto, ask or deny\n`)
+    return usage(io)
+  }
+
+  const moduleApprove = values['module-approve'] ?? 'ask'
+  if (!isApproveMode(moduleApprove)) {
+    io.stderr(
+      `invalid --module-approve "${moduleApprove}"; expected auto, ask or deny\n`,
+    )
+    return usage(io)
+  }
+
+  if (
+    values.message !== undefined &&
+    (values.input !== undefined || values['input-file'] !== undefined)
+  ) {
+    io.stderr('--message and --input/--input-file are mutually exclusive\n')
     return usage(io)
   }
 
@@ -757,6 +805,10 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   let input: Json = null
   let graph: GraphDocument
   try {
+    if (values.message !== undefined) {
+      // Plain text, never parsed: `--message '{"a":1}'` is the string itself.
+      input = values.message
+    }
     if (values.input !== undefined) input = parseJsonText(values.input, '--input')
     if (values['input-file'] !== undefined) {
       input = parseJsonText(
@@ -798,7 +850,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     if (store.list().some((module) => module.active)) {
       const runtime = new ModuleRuntime({
         store,
-        services: moduleWorkerServices(services),
+        services: moduleWorkerServices(services, moduleApprovalService(moduleApprove, io)),
         baseRegistry: registry,
         onCapabilityDenied: (info) => {
           store.recordDenied(info.moduleId, info.version, `${info.kind}: ${info.detail}`)
@@ -915,7 +967,13 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
       }
 
       if (result.status === 'failed' && result.error !== undefined) {
-        io.stderr(`error: ${result.error}\n`)
+        // A resume refusal is already a self-describing `RESUME_MISMATCH: …`
+        // line; printing it unadorned keeps it copy-pasteable for the user.
+        io.stderr(
+          result.error.startsWith('RESUME_MISMATCH')
+            ? `${result.error}\n`
+            : `error: ${result.error}\n`,
+        )
       }
       return exitCodeFor(result.status)
     } catch (error) {

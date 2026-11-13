@@ -101,10 +101,53 @@ function toolsJson(tools: readonly ToolSchema[]): Json {
 }
 
 /**
+ * The map body: one tool call per assistant `toolCalls` entry. `core.input`
+ * holds the map contract's `{ item, index }`, and the body publishes the tool
+ * message so the caller can concat the whole array of results.
+ */
+function buildToolMapBody(): GraphDocument {
+  return {
+    schemaVersion: 1,
+    id: 'agent.loop.tools',
+    title: 'Tool calls',
+    nodes: [
+      node('mapInput', 'z1.core.input', 0, 0),
+      node('itemName', 'z1.core.get', 220, -120, { path: 'item.name' }),
+      node('itemArgs', 'z1.core.get', 220, 0, { path: 'item.arguments' }),
+      node('itemId', 'z1.core.get', 220, 120, { path: 'item.id' }),
+      node('mapCall', 'z1.tool.call', 440, 0),
+      node('mapMessage', 'z1.core.message', 660, 0, { role: 'tool' }),
+      node('mapOut', 'z1.core.output', 880, 0, { port: 'value' }),
+    ],
+    edges: [
+      data('m1', 'mapInput', 'value', 'itemName', 'value'),
+      data('m2', 'mapInput', 'value', 'itemArgs', 'value'),
+      data('m3', 'mapInput', 'value', 'itemId', 'value'),
+      data('m4', 'itemName', 'value', 'mapCall', 'name'),
+      data('m5', 'itemArgs', 'value', 'mapCall', 'args'),
+      data('m6', 'mapCall', 'result', 'mapMessage', 'content'),
+      data('m7', 'itemId', 'value', 'mapMessage', 'toolCallId'),
+      data('m8', 'mapMessage', 'message', 'mapOut', 'value'),
+      flow('mf1', 'mapInput', 'out', 'itemName', 'in'),
+      flow('mf2', 'itemName', 'out', 'itemArgs', 'in'),
+      flow('mf3', 'itemArgs', 'out', 'itemId', 'in'),
+      flow('mf4', 'itemId', 'out', 'mapCall', 'in'),
+      flow('mf5', 'mapCall', 'out', 'mapMessage', 'in'),
+      flow('mf6', 'mapMessage', 'out', 'mapOut', 'in'),
+    ],
+  }
+}
+
+/**
  * The loop body: one model turn, then either a tool round trip or the final
  * answer. Every assembly node is gated on its branch's flow token, and the two
  * branch-local results reach `core.merge` only through the taken side, so a
  * merge can never fire on the untaken branch.
+ *
+ * The tool branch maps over every entry of `chat.toolCalls`, so one assistant
+ * message with N calls becomes N tool messages. The assistant message (with all
+ * its `toolCalls`) is appended first, then the mapped messages are spread after
+ * it, so the transcript keeps one `tool_call_id` per tool message, in order.
  */
 function buildLoopBody(options: AgentGraphOptions): GraphDocument {
   // The system prompt is never baked into config: it arrives in the seed as a
@@ -127,26 +170,21 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       }),
       node('chat', 'z1.llm.chat', 440, 0, chatConfig),
       node('branch', 'z1.flow.if', 660, 0),
-      // The chat `message` carries `toolCalls`, so a single source feeds all three.
-      // The assistant message carries `toolCalls`, so it is also the source for
-      // the `toolCalls.0.*` reads.
+      // The chat `message` carries every `toolCalls` entry, so the assistant
+      // message is also what the map iterates over.
       node('assistantMsg', 'z1.core.message', 880, -120, { role: 'assistant' }),
-      node('callName', 'z1.core.get', 1100, -120, { path: 'toolCalls.0.name' }),
-      node('callArgs', 'z1.core.get', 1100, 0, { path: 'toolCalls.0.arguments' }),
-      node('callId', 'z1.core.get', 1100, 120, { path: 'toolCalls.0.id' }),
-      node('tool', 'z1.tool.call', 1320, 0),
-      node('toolMsg', 'z1.core.message', 1540, 0, { role: 'tool' }),
-      node('thenConcat', 'z1.core.concat', 1760, -60),
-      node('thenMsgs', 'z1.core.concat', 1900, 20),
-      node('thenDone', 'z1.core.value', 1760, -180, { value: false }),
+      node('toolMap', 'z1.flow.map', 880, 120, { body: graphJson(buildToolMapBody()) }),
+      node('thenConcat', 'z1.core.concat', 1100, -60),
+      node('thenMsgs', 'z1.core.concat', 1320, 20),
+      node('thenDone', 'z1.core.value', 1540, -180, { value: false }),
       // A second, flow-gated read of the loop input: only the else branch runs it.
       node('elseMessages', 'z1.core.get', 880, 340, { path: 'value' }),
       node('elseMsgs', 'z1.core.concat', 1100, 340),
       node('elseDone', 'z1.core.value', 1320, 340, { value: true }),
-      node('messagesMerge', 'z1.core.merge', 2060, 0),
-      node('doneMerge', 'z1.core.merge', 2060, -180),
-      node('outValue', 'z1.core.output', 2280, 0, { port: 'value' }),
-      node('outDone', 'z1.core.output', 2280, -180, { port: 'done' }),
+      node('messagesMerge', 'z1.core.merge', 1760, 0),
+      node('doneMerge', 'z1.core.merge', 1760, -180),
+      node('outValue', 'z1.core.output', 1980, 0, { port: 'value' }),
+      node('outDone', 'z1.core.output', 1980, -180, { port: 'done' }),
     ],
     edges: [
       // Data
@@ -154,54 +192,44 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       data('d2', 'messages', 'value', 'chat', 'messages'),
       data('d3', 'tools', 'value', 'chat', 'tools'),
       data('d4', 'chat', 'hasToolCalls', 'branch', 'condition'),
-      data('d5', 'assistantMsg', 'message', 'callName', 'value'),
-      data('d6', 'assistantMsg', 'message', 'callArgs', 'value'),
-      data('d7', 'assistantMsg', 'message', 'callId', 'value'),
-      data('d8', 'callName', 'value', 'tool', 'name'),
-      data('d9', 'callArgs', 'value', 'tool', 'args'),
-      data('d10', 'tool', 'result', 'toolMsg', 'content'),
-      data('d11', 'callId', 'value', 'toolMsg', 'toolCallId'),
-      data('d12', 'chat', 'text', 'assistantMsg', 'content'),
-      data('d13', 'chat', 'toolCalls', 'assistantMsg', 'toolCalls'),
-      data('d14', 'messages', 'value', 'thenConcat', 'a'),
-      data('d15', 'assistantMsg', 'message', 'thenConcat', 'b'),
-      data('d16', 'thenConcat', 'value', 'thenMsgs', 'a'),
-      data('d17', 'toolMsg', 'message', 'thenMsgs', 'b'),
-      data('d18', 'thenMsgs', 'value', 'messagesMerge', 'a'),
-      data('d19', 'body', 'value', 'elseMessages', 'value'),
-      data('d20', 'elseMessages', 'value', 'elseMsgs', 'a'),
-      data('d21', 'chat', 'message', 'elseMsgs', 'b'),
-      data('d22', 'elseMsgs', 'value', 'messagesMerge', 'b'),
-      data('d23', 'thenDone', 'value', 'doneMerge', 'a'),
-      data('d24', 'elseDone', 'value', 'doneMerge', 'b'),
-      data('d25', 'messagesMerge', 'value', 'outValue', 'value'),
-      data('d26', 'doneMerge', 'value', 'outDone', 'value'),
-      data('d27', 'body', 'value', 'systemText', 'value'),
-      data('d28', 'systemText', 'value', 'chat', 'system'),
+      data('d5', 'chat', 'text', 'assistantMsg', 'content'),
+      data('d6', 'chat', 'toolCalls', 'assistantMsg', 'toolCalls'),
+      data('d7', 'chat', 'toolCalls', 'toolMap', 'items'),
+      data('d8', 'messages', 'value', 'thenConcat', 'a'),
+      data('d9', 'assistantMsg', 'message', 'thenConcat', 'b'),
+      data('d10', 'thenConcat', 'value', 'thenMsgs', 'a'),
+      data('d11', 'toolMap', 'results', 'thenMsgs', 'b'),
+      data('d12', 'thenMsgs', 'value', 'messagesMerge', 'a'),
+      data('d13', 'body', 'value', 'elseMessages', 'value'),
+      data('d14', 'elseMessages', 'value', 'elseMsgs', 'a'),
+      data('d15', 'chat', 'message', 'elseMsgs', 'b'),
+      data('d16', 'elseMsgs', 'value', 'messagesMerge', 'b'),
+      data('d17', 'thenDone', 'value', 'doneMerge', 'a'),
+      data('d18', 'elseDone', 'value', 'doneMerge', 'b'),
+      data('d19', 'messagesMerge', 'value', 'outValue', 'value'),
+      data('d20', 'doneMerge', 'value', 'outDone', 'value'),
+      data('d21', 'body', 'value', 'systemText', 'value'),
+      data('d22', 'systemText', 'value', 'chat', 'system'),
       // Flow
       flow('f1', 'body', 'out', 'messages', 'in'),
       flow('f2', 'messages', 'out', 'systemText', 'in'),
-      flow('f22', 'systemText', 'out', 'chat', 'in'),
-      flow('f3', 'chat', 'out', 'branch', 'in'),
-      flow('f4', 'branch', 'then', 'assistantMsg', 'in'),
-      flow('f5', 'assistantMsg', 'out', 'callName', 'in'),
-      flow('f6', 'callName', 'out', 'callArgs', 'in'),
-      flow('f7', 'callArgs', 'out', 'callId', 'in'),
-      flow('f8', 'callId', 'out', 'tool', 'in'),
-      flow('f9', 'tool', 'out', 'toolMsg', 'in'),
-      flow('f10', 'toolMsg', 'out', 'thenConcat', 'in'),
-      flow('f11', 'thenConcat', 'out', 'thenMsgs', 'in'),
-      flow('f12', 'thenMsgs', 'out', 'thenDone', 'in'),
-      flow('f13', 'branch', 'else', 'elseMessages', 'in'),
-      flow('f14', 'elseMessages', 'out', 'elseMsgs', 'in'),
-      flow('f15', 'elseMsgs', 'out', 'elseDone', 'in'),
+      flow('f3', 'systemText', 'out', 'chat', 'in'),
+      flow('f4', 'chat', 'out', 'branch', 'in'),
+      flow('f5', 'branch', 'then', 'assistantMsg', 'in'),
+      flow('f6', 'assistantMsg', 'out', 'toolMap', 'in'),
+      flow('f7', 'toolMap', 'out', 'thenConcat', 'in'),
+      flow('f8', 'thenConcat', 'out', 'thenMsgs', 'in'),
+      flow('f9', 'thenMsgs', 'out', 'thenDone', 'in'),
+      flow('f10', 'branch', 'else', 'elseMessages', 'in'),
+      flow('f11', 'elseMessages', 'out', 'elseMsgs', 'in'),
+      flow('f12', 'elseMsgs', 'out', 'elseDone', 'in'),
       // Both branch tokens converge; only the taken one is ever propagated.
-      flow('f16', 'thenMsgs', 'out', 'messagesMerge', 'in'),
-      flow('f17', 'elseMsgs', 'out', 'messagesMerge', 'in'),
-      flow('f18', 'thenDone', 'out', 'doneMerge', 'in'),
-      flow('f19', 'elseDone', 'out', 'doneMerge', 'in'),
-      flow('f20', 'messagesMerge', 'out', 'outValue', 'in'),
-      flow('f21', 'doneMerge', 'out', 'outDone', 'in'),
+      flow('f13', 'thenMsgs', 'out', 'messagesMerge', 'in'),
+      flow('f14', 'elseMsgs', 'out', 'messagesMerge', 'in'),
+      flow('f15', 'thenDone', 'out', 'doneMerge', 'in'),
+      flow('f16', 'elseDone', 'out', 'doneMerge', 'in'),
+      flow('f17', 'messagesMerge', 'out', 'outValue', 'in'),
+      flow('f18', 'doneMerge', 'out', 'outDone', 'in'),
     ],
   }
 }
@@ -296,10 +324,18 @@ function promptChain(options: AgentGraphOptions): PromptChain {
  * The default agent loop as a real graph: compose the system prompt from
  * sections, seed the transcript with that system message plus the user prompt,
  * run `z1.flow.loop` over the model/tool body, then publish the last message's
- * content. No host-side loop is hidden behind a custom node.
+ * content — but only when the loop reported `completed`. Hitting the step cap
+ * means the transcript ends inside a tool round trip, so the graph fails with a
+ * clear error instead of publishing tool JSON as the answer. No host-side loop
+ * is hidden behind a custom node.
  */
 export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
   const maxSteps = options.maxSteps ?? 12
+  // `maxSteps` also feeds the loop's `maxIterations` schema (integer, min 1);
+  // failing here names the option instead of surfacing a graph validation code.
+  if (!Number.isInteger(maxSteps) || maxSteps < 1) {
+    throw new Error('maxSteps must be >= 1')
+  }
   const prompt = promptChain(options)
   return {
     schemaVersion: 1,
@@ -322,9 +358,15 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
         body: graphJson(buildLoopBody(options)),
         maxIterations: maxSteps,
       }),
-      node('last', 'z1.core.last', 1760, 0),
-      node('content', 'z1.core.get', 1980, 0, { path: 'content' }),
-      node('output', 'z1.core.output', 2200, 0, { port: 'output' }),
+      // The loop's own `completed` flag decides whether the transcript ended on
+      // an assistant answer or was cut short by the cap.
+      node('doneCheck', 'z1.flow.if', 1760, 0),
+      node('last', 'z1.core.last', 1980, 0),
+      node('content', 'z1.core.get', 2200, 0, { path: 'content' }),
+      node('output', 'z1.core.output', 2420, 0, { port: 'output' }),
+      node('fail', 'z1.core.fail', 1980, -180, {
+        message: `step limit reached after ${String(maxSteps)} steps`,
+      }),
       ...prompt.nodes,
     ],
     edges: [
@@ -340,6 +382,7 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
       data('d9', 'loop', 'result', 'last', 'items'),
       data('d10', 'last', 'value', 'content', 'value'),
       data('d11', 'content', 'value', 'output', 'value'),
+      data('d13', 'loop', 'completed', 'doneCheck', 'condition'),
       ...prompt.edges,
       flow('f1', 'input', 'out', prompt.first, 'in'),
       flow('f2', prompt.last, 'out', 'userMessage', 'in'),
@@ -348,9 +391,11 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
       flow('f5', 'promptHead', 'out', 'seedUser', 'in'),
       flow('f6', 'seedUser', 'out', 'seed', 'in'),
       flow('f7', 'seed', 'out', 'loop', 'in'),
-      flow('f8', 'loop', 'out', 'last', 'in'),
-      flow('f9', 'last', 'out', 'content', 'in'),
-      flow('f10', 'content', 'out', 'output', 'in'),
+      flow('f8', 'loop', 'out', 'doneCheck', 'in'),
+      flow('f9', 'doneCheck', 'then', 'last', 'in'),
+      flow('f10', 'last', 'out', 'content', 'in'),
+      flow('f11', 'content', 'out', 'output', 'in'),
+      flow('f12', 'doneCheck', 'else', 'fail', 'in'),
     ],
   }
 }

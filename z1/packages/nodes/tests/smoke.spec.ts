@@ -12,6 +12,7 @@ test('registers every SPEC §7 node at 1.0.0', () => {
   expect(ids).toEqual([
     'z1.core.concat',
     'z1.core.const',
+    'z1.core.fail',
     'z1.core.get',
     'z1.core.input',
     'z1.core.last',

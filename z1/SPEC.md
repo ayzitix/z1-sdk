@@ -408,7 +408,7 @@ export async function runGraph(options: RunOptions): Promise<RunResult>
 
 ```ts
 export type RunEvent =
-  | { type: 'run.started'; runId: string; graphId: string; at: number }
+  | { type: 'run.started'; runId: string; graphId: string; graphDigest: string; input: Json; inputDigest: string; at: number }
   | { type: 'node.started'; runId: string; nodeId: string; path: string; attempt: number; at: number }
   | { type: 'node.stream'; runId: string; nodeId: string; path: string; port: string; chunk: Json }
   | { type: 'node.cached'; runId: string; nodeId: string; path: string; at: number }
@@ -438,11 +438,12 @@ All ids are namespaced `z1.<name>`.
 | `z1.core.const` | — | `value` (data Json) | root; config `{ value: Json }` |
 | `z1.core.template` | `vars` (data Json, optional) | `text` (data string) | `{{a.b}}` lookup |
 | `z1.flow.if` | `in` (flow), `condition` (data boolean) | `then` (flow), `else` (flow) | returns exactly one `true` |
-| `z1.flow.loop` | `in` (flow), `seed` (data Json, optional) | `out` (flow), `result` (data Json), `iterations` (data number) | config `{ body: GraphDocument, maxIterations: number }`; body receives `{ value, iteration }`, outputs `value` and optional `done` (no `done` ⇒ run to the cap) |
+| `z1.flow.loop` | `in` (flow), `seed` (data Json, optional) | `out` (flow), `result` (data Json), `iterations` (data number), `completed` (data boolean) | config `{ body: GraphDocument, maxIterations: number }`; body receives `{ value, iteration }`, outputs `value` and optional `done` (no `done` ⇒ run to the cap; `completed` is false on cap) |
 | `z1.flow.map` | `in` (flow), `items` (data Json[]) | `out` (flow), `results` (data Json[]) | config `{ body: GraphDocument, maxItems?: number }`; body receives `{ item, index }`, outputs `value`; sequential in M0; exceeding `maxItems` is an error, not truncation |
+| `z1.core.fail` | `in` (flow) | — | config `{ message }`; throws, turning a gated branch into a failed run |
 | `z1.graph.subgraph` | `in` (flow), `input` (data Json, optional) | `out` (flow), `output` (data Json) | config `{ graph: GraphDocument, outputPort?: string }`; returns that port, else the whole outputs map |
 | `z1.llm.model` | — | `model` (data ModelHandle) | config `ModelHandle` fields; root |
-| `z1.llm.chat` | `in` (flow, optional), `model` (data ModelHandle, optional), `messages` (data ChatMessage[], optional), `prompt` (data string, optional) | `out` (flow), `text` (data string), `message` (data ChatMessage), `toolCalls` (data ToolCall[]), `hasToolCalls` (data boolean), `usage` (data Json) | config `{ model?: ModelHandle; system?: string; maxTokens?: number }`; a connected `model` port wins over config; `prompt` is used only when `messages` is empty; streams text via `ctx.emit('text', …)` |
+| `z1.llm.chat` | `in` (flow, optional), `model` (data ModelHandle, optional), `messages` (data ChatMessage[], optional), `prompt` (data string, optional), `system` (data string, optional) | `out` (flow), `text` (data string), `message` (data ChatMessage), `toolCalls` (data ToolCall[]), `hasToolCalls` (data boolean), `usage` (data Json) | config `{ model?: ModelHandle; system?: string; maxTokens?: number }`; a connected `model` port wins over config; a connected `system` port wins over config (empty/whitespace ⇒ none); `prompt` is used only when `messages` is empty; streams text via `ctx.emit('text', …)` |
 | `z1.tool.call` | `in` (flow, optional), `name` (data string, optional), `args` (data Json) | `out` (flow), `result` (data Json), `isError` (data boolean) | config `{ name?: string }`; config is used only when the `name` port is absent |
 | `z1.core.get` | `in` (flow, optional), `value` (data Json) | `out` (flow), `value` (data Json) | config `{ path }`; array indices; prototype keys blocked; missing → null |
 | `z1.core.concat` | `in` (flow, optional), `a` (data Json[]), `b` (data Json) | `out` (flow), `value` (data Json[]) | array `b` spreads, otherwise appends |
@@ -465,7 +466,7 @@ whose input port is `value`.
 ```
 z1 list
 z1 validate <graph.json>
-z1 run <graph.json> [--input <json>] [--input-file <path>] [--json] [--trace] [--approve auto|ask|deny]
+z1 run <graph.json> [--message <text> | --input <json> | --input-file <path>] [--json] [--trace] [--approve auto|ask|deny] [--module-approve ask|auto|deny] [--db <path>] [--resume <runId>] [--suspend]
 ```
 
 - `run` uses a built-in `MockLlmService` in M0: it returns a deterministic

@@ -1,4 +1,4 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -206,6 +206,112 @@ describe('z1 module', () => {
         (event) => event['type'] === 'node.completed' && event['nodeId'] === 'echo',
       ),
     ).toBe(true)
+  })
+
+  test('module approvals follow --module-approve, never --approve', async () => {
+    const nodeId = 'com.example.approval.ask'
+    const source = join(directory, 'approval-module')
+    await mkdir(source, { recursive: true })
+    await writeFile(
+      join(source, 'manifest.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'com.example.approval',
+        version: '1.0.0',
+        title: 'Approval probe',
+        license: 'MIT',
+        engines: { z1: '>=0.1.0' },
+        entry: 'index.js',
+        nodes: [
+          {
+            id: nodeId,
+            version: '1.0.0',
+            title: 'Approval probe',
+            category: 'example',
+            inputs: [],
+            outputs: [{ kind: 'data', id: 'text', schema: { type: 'string' } }],
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(source, 'index.js'),
+      [
+        'export const nodes = [',
+        '  {',
+        `    id: '${nodeId}',`,
+        "    version: '1.0.0',",
+        "    title: 'Approval probe',",
+        "    category: 'example',",
+        '    inputs: [],',
+        "    outputs: [{ kind: 'data', id: 'text', schema: { type: 'string' } }],",
+        '    async execute(ctx) {',
+        "      const decision = await ctx.approval.request({ action: 'tool.call', target: 'demo' })",
+        "      if (decision !== 'allowed-once') throw new Error(`module approval ${decision}`)",
+        "      return { text: 'approved' }",
+        '    },',
+        '  },',
+        ']',
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+
+    const approvalGraph = join(directory, 'approval.graph.json')
+    await writeFile(
+      approvalGraph,
+      graphDocument(
+        'approval-graph',
+        [
+          {
+            id: 'ask',
+            type: nodeId,
+            version: '1.0.0',
+            config: {},
+            position: { x: 0, y: 0 },
+          },
+        ],
+        [],
+      ),
+      'utf8',
+    )
+
+    expect((await run(moduleArgs(['module', 'propose', source]))).code).toBe(0)
+    expect((await run(moduleArgs(['module', 'approve', 'com.example.approval']))).code).toBe(0)
+
+    const runArgs = [
+      'run',
+      approvalGraph,
+      '--json',
+      '--db',
+      dbPath,
+      '--modules-dir',
+      modulesDir,
+    ]
+
+    // Default `ask` has no terminal in tests: reject instead of blocking.
+    const asked = await run(runArgs)
+    expect(asked.code).toBe(1)
+    expect(asked.err).toContain('not a terminal')
+
+    // Node autonomy is a different policy and must not leak into module code.
+    const approveAutoOnly = await run([...runArgs, '--approve', 'auto'])
+    expect(approveAutoOnly.code).toBe(1)
+    expect(approveAutoOnly.err).toContain('not a terminal')
+
+    const auto = await run([...runArgs, '--module-approve', 'auto'])
+    expect(auto.err).toBe('')
+    expect(auto.code).toBe(0)
+    expect(JSON.parse(auto.out.trimEnd())).toMatchObject({ status: 'completed' })
+
+    const denied = await run([...runArgs, '--module-approve', 'deny'])
+    expect(denied.code).toBe(1)
+    expect(denied.err).toMatch(/module approval rejected/)
+
+    const invalid = await run([...runArgs, '--module-approve', 'maybe'])
+    expect(invalid.code).toBe(2)
+    expect(invalid.err).toContain('invalid --module-approve')
   })
 
   test('audit --json records propose, approve and install', async () => {

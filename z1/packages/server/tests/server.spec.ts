@@ -371,6 +371,136 @@ test('approval.respond decides an approval the client has not replied to', async
   expect(reply.status).toBe('completed')
 })
 
+/** `a-input` and `b-memory` are roots; ids sort input first, so memory sees it. */
+function memoryGraph(): unknown {
+  return {
+    schemaVersion: 1,
+    id: 'memory',
+    nodes: [
+      node('a-input', 'z1.core.input', {}),
+      node('b-memory', 'z1.memory.context', {}),
+      node('c-output', 'z1.core.output', {}),
+    ],
+    edges: [
+      {
+        id: 'e-memory-text',
+        kind: 'data',
+        from: { node: 'b-memory', port: 'text' },
+        to: { node: 'c-output', port: 'value' },
+      },
+      {
+        id: 'f-input-output',
+        kind: 'flow',
+        from: { node: 'a-input', port: 'out' },
+        to: { node: 'c-output', port: 'in' },
+      },
+    ],
+  }
+}
+
+/** A loop body whose `template` asks for approval twice in one run. */
+function loopApprovalGraph(): unknown {
+  return {
+    schemaVersion: 1,
+    id: 'loop-approval',
+    nodes: [
+      node('input', 'z1.core.input', {}),
+      node('loop', 'z1.flow.loop', {
+        body: {
+          schemaVersion: 1,
+          id: 'body',
+          nodes: [
+            node('template', 'z1.core.template', { template: '{{value}}' }, { mode: 'ask' }),
+            node('output', 'z1.core.output', {}),
+          ],
+          edges: [
+            {
+              id: 'e-body-value',
+              kind: 'data',
+              from: { node: 'template', port: 'text' },
+              to: { node: 'output', port: 'value' },
+            },
+          ],
+        },
+        maxIterations: 2,
+      }),
+      node('done', 'z1.core.output', {}),
+    ],
+    edges: [
+      {
+        id: 'f-input-loop',
+        kind: 'flow',
+        from: { node: 'input', port: 'out' },
+        to: { node: 'loop', port: 'in' },
+      },
+      {
+        id: 'f-loop-done',
+        kind: 'flow',
+        from: { node: 'loop', port: 'out' },
+        to: { node: 'done', port: 'in' },
+      },
+      {
+        id: 'e-loop-value',
+        kind: 'data',
+        from: { node: 'loop', port: 'result' },
+        to: { node: 'done', port: 'value' },
+      },
+    ],
+  }
+}
+
+test('a later run with z1.memory.context sees the branch journal', async () => {
+  const { server } = await makeServer()
+  const peer = await connect(server)
+
+  const prior = await peer.request('run.start', {
+    graph: helloGraph(),
+    input: { name: 'prior' },
+  })
+  expect(prior.status).toBe('completed')
+
+  const reply = await peer.request('run.start', { graph: memoryGraph(), input: { name: 'again' } })
+  expect(reply.status).toBe('completed')
+
+  const text = reply.outputs['output']
+  expect(typeof text).toBe('string')
+  expect((text as string).length).toBeGreaterThan(0)
+  expect(text).toContain('Recent steps')
+  expect(text).toContain('a-input')
+})
+
+test('two approvals for a repeated node id are both answerable by approvalId', async () => {
+  const { server } = await makeServer()
+  const peer = await connect(server)
+
+  const requests: ApprovalRequestParams[] = []
+  peer.onRequest('approval/request', (params) => {
+    requests.push(params)
+    // Never resolves: each answer arrives through `approval.respond`.
+    return new Promise<{ decision: 'allowed-once' }>(() => {})
+  })
+
+  const started = peer.request('run.start', { graph: loopApprovalGraph() })
+  for (let expected = 1; expected <= 2; expected += 1) {
+    for (let attempt = 0; attempt < 500 && requests.length < expected; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2))
+    }
+    const request = requests[expected - 1]
+    expect(request).toBeDefined()
+    await peer.request('approval.respond', {
+      approvalId: request?.approvalId ?? '',
+      decision: 'allowed-once',
+    })
+  }
+
+  const reply = await started
+  expect(reply.status).toBe('completed')
+  expect(requests).toHaveLength(2)
+  expect(requests.map((request) => request.nodeId)).toEqual(['template', 'template'])
+  expect(new Set(requests.map((request) => request.approvalId)).size).toBe(2)
+  expect(requests[0]?.path).not.toBe(requests[1]?.path)
+})
+
 test('close is idempotent', async () => {
   const { server } = await makeServer()
   await server.close()

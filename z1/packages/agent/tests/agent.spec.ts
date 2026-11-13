@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'vitest'
 import { validateGraphTree, type GraphDocument } from '@z1/graph'
+import type { ChatRequest, ChatResult } from '@z1/node'
 import { createBuiltinRegistry } from '@z1/nodes'
 import {
   createMockRuntimeServices,
   MemoryJournal,
   runGraph,
+  type MockRuntimeServices,
   type RunResult,
 } from '@z1/runtime'
 import { agentLoopExample, buildAgentGraph, type AgentGraphOptions } from '../src/index.ts'
@@ -52,6 +54,38 @@ function systemMessage(fixture: Fixture, index = 0): string {
   const message = fixture.services.chatCalls[index]?.messages[0]
   expect(message?.role).toBe('system')
   return message?.content ?? ''
+}
+
+/**
+ * A stub model that answers the first request with two tool calls in a single
+ * assistant message and every later request with a final answer. The mock
+ * services cannot express that shape, so the loop's fan-out needs its own model.
+ */
+function twoToolCalls(services: MockRuntimeServices): void {
+  let turns = 0
+  services.llm = {
+    async chat(request: ChatRequest): Promise<ChatResult> {
+      // Record into the mock's own array so `chatCalls`/`lastChatRequest` stay
+      // meaningful for the assertions.
+      services.chatCalls.push(request)
+      turns += 1
+      if (turns === 1) {
+        return {
+          message: { role: 'assistant', content: '' },
+          toolCalls: [
+            { id: 'call_a', name: 'alpha', arguments: { n: 1 } },
+            { id: 'call_b', name: 'beta', arguments: { n: 2 } },
+          ],
+          stopReason: 'tool_calls',
+        }
+      }
+      return {
+        message: { role: 'assistant', content: 'final answer' },
+        toolCalls: [],
+        stopReason: 'stop',
+      }
+    },
+  }
 }
 
 describe('buildAgentGraph', () => {
@@ -139,13 +173,62 @@ describe('buildAgentGraph', () => {
     expect(validateGraphTree(agentLoopExample, createBuiltinRegistry())).toEqual([])
   })
 
-  test('stops at maxSteps even when the model always asks for a tool', async () => {
-    const { result, services } = await run({ model: MODEL, maxSteps: 1 }, '[[tool:echo]] again')
+  test('runs every tool call of one assistant message and answers each', async () => {
+    const { result, services } = await run(
+      {
+        model: MODEL,
+        tools: [
+          { name: 'alpha', parameters: {} },
+          { name: 'beta', parameters: {} },
+        ],
+      },
+      'two calls',
+      twoToolCalls,
+    )
 
     expect(result.status).toBe('completed')
+    expect(result.outputs['output']).toBe('final answer')
+    // Both calls ran, in the assistant message's order.
+    expect(services.toolCalls).toEqual([
+      { name: 'alpha', args: { n: 1 } },
+      { name: 'beta', args: { n: 2 } },
+    ])
+
+    const messages = services.lastChatRequest?.messages ?? []
+    const assistants = messages.filter((message) => message.role === 'assistant')
+    expect(assistants).toHaveLength(1)
+    expect(assistants[0]?.toolCalls?.map((call) => call.id)).toEqual(['call_a', 'call_b'])
+    // One tool message per tool_call_id, in order, after the assistant message.
+    const toolMessages = messages.filter((message) => message.role === 'tool')
+    expect(toolMessages.map((message) => message.toolCallId)).toEqual(['call_a', 'call_b'])
+    const assistantIndex = messages.findIndex((message) => message.role === 'assistant')
+    for (const message of toolMessages) {
+      expect(messages.indexOf(message)).toBeGreaterThan(assistantIndex)
+    }
+  })
+
+  test('rejects a maxSteps below one with a clear error', () => {
+    expect(() => buildAgentGraph({ model: MODEL, maxSteps: 0 })).toThrow('maxSteps must be >= 1')
+  })
+
+  test('fails at maxSteps instead of answering with tool JSON', async () => {
+    const { result, services } = await run({ model: MODEL, maxSteps: 1 }, '[[tool:echo]] again')
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('step limit')
+    expect(result.error).toContain('1 steps')
+    // The run published nothing: the tool result never became the answer.
+    expect(result.outputs['output']).toBeUndefined()
+    expect(JSON.stringify(result.outputs)).not.toContain('"ok"')
     // One body run only: the tool was called once and the loop stopped on the cap.
     expect(services.chatCalls).toHaveLength(1)
     expect(services.toolCalls).toHaveLength(1)
-    expect(typeof result.outputs['output']).toBe('string')
+  })
+
+  test('still completes when the model answers inside the step cap', async () => {
+    const { result } = await run({ model: MODEL, maxSteps: 1 }, 'hello')
+
+    expect(result.status).toBe('completed')
+    expect(result.outputs['output']).toBe('mock: hello')
   })
 })

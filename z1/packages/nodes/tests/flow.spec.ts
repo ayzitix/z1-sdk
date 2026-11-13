@@ -85,19 +85,22 @@ describe('z1.flow.loop', () => {
         graphNode('loop1', 'z1.flow.loop', { body, maxIterations: 10 }),
         graphNode('outResult', 'z1.core.output', { port: 'result' }),
         graphNode('outCount', 'z1.core.output', { port: 'iterations' }),
+        graphNode('outCompleted', 'z1.core.output', { port: 'completed' }),
       ],
       [
         flowEdge('f1', 'start', 'out', 'loop1', 'in'),
         dataEdge('d1', 'seed', 'value', 'loop1', 'seed'),
         dataEdge('d2', 'loop1', 'result', 'outResult', 'value'),
         dataEdge('d3', 'loop1', 'iterations', 'outCount', 'value'),
+        dataEdge('d4', 'loop1', 'completed', 'outCompleted', 'value'),
       ],
     )
 
     const { result, events } = await runBuiltins({ graph, input: null, definitions: [bodyDone] })
 
     expect(result.status).toBe('completed')
-    expect(result.outputs).toEqual({ result: 'x!!!', iterations: 3 })
+    // The body reported `done`, so the loop completed rather than hitting the cap.
+    expect(result.outputs).toEqual({ result: 'x!!!', iterations: 3, completed: true })
     // Each iteration owns a distinct path segment, so the journal can tell them
     // apart on resume.
     const startedPaths = events
@@ -131,18 +134,21 @@ describe('z1.flow.loop', () => {
         graphNode('loop1', 'z1.flow.loop', { body: noDoneBody, maxIterations: 2 }),
         graphNode('outResult', 'z1.core.output', { port: 'result' }),
         graphNode('outCount', 'z1.core.output', { port: 'iterations' }),
+        graphNode('outCompleted', 'z1.core.output', { port: 'completed' }),
       ],
       [
         flowEdge('f1', 'start', 'out', 'loop1', 'in'),
         dataEdge('d2', 'loop1', 'result', 'outResult', 'value'),
         dataEdge('d3', 'loop1', 'iterations', 'outCount', 'value'),
+        dataEdge('d4', 'loop1', 'completed', 'outCompleted', 'value'),
       ],
     )
 
     const { result } = await runBuiltins({ graph, input: null })
 
     expect(result.status).toBe('completed')
-    expect(result.outputs).toEqual({ result: 'null!!', iterations: 2 })
+    // No `done` in the body: the cap stopped the loop, so `completed` is false.
+    expect(result.outputs).toEqual({ result: 'null!!', iterations: 2, completed: false })
   })
 })
 

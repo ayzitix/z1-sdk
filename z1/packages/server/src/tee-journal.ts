@@ -16,6 +16,13 @@ export type EventSink = (runId: string, seq: number, event: RunEvent) => void
 export class TeeJournal implements Journal {
   readonly #inner: SqliteJournal
   readonly #sink: EventSink
+  /**
+   * Last sequence number this decorator has handed to the sink, per run.
+   * Absent until the run's first append, which reads the journal instead: a
+   * fork replays its parent's prefix, so only the journal knows where a new
+   * run actually starts. Every later append is then O(1).
+   */
+  readonly #seqs = new Map<string, number>()
 
   constructor(inner: SqliteJournal, sink: EventSink) {
     this.#inner = inner
@@ -24,12 +31,16 @@ export class TeeJournal implements Journal {
 
   append(event: RunEvent): void {
     this.#inner.append(event)
-    // `read` is the authority on sequence numbers: a fork replays its parent's
-    // prefix, so a local counter would report a different seq than `run.get`.
-    // That makes this O(n) per event; intentional for a local, single-user
-    // server (SPEC M2), and it disappears when the journal exposes seqs.
-    const seq = this.#inner.read(event.runId).length
+    const known = this.#seqs.get(event.runId)
+    const seq = known === undefined ? this.#inner.read(event.runId).length : known + 1
+    this.#seqs.set(event.runId, seq)
     this.#sink(event.runId, seq, event)
+  }
+
+  /** Sequence number the next append of `runId` will receive. */
+  nextSeq(runId: string): number {
+    const known = this.#seqs.get(runId)
+    return (known === undefined ? this.#inner.read(runId).length : known) + 1
   }
 
   read(runId: string): readonly RunEvent[] {

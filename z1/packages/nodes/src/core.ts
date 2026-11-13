@@ -253,6 +253,26 @@ const merge = defineNode({
   },
 })
 
+/**
+ * A deliberate run failure. The only reason to put a failure in a graph is a
+ * flow-gated branch that must not silently publish a value, so the token is
+ * required and there is no output to continue from.
+ */
+const fail = defineNode({
+  id: 'z1.core.fail',
+  version: NODE_VERSION,
+  title: 'Fail',
+  description: 'Throws an error with the configured message, failing the run.',
+  category: 'core',
+  config: z.object({ message: z.string() }),
+  defaultConfig: { message: 'run failed' },
+  inputs: [flowPort('in')],
+  outputs: [],
+  execute: async (ctx): Promise<never> => {
+    throw new Error(ctx.config.message)
+  },
+})
+
 export const coreNodes: readonly NodeDefinition[] = [
   input,
   output,
@@ -264,6 +284,7 @@ export const coreNodes: readonly NodeDefinition[] = [
   message,
   last,
   merge,
+  fail,
 ]
 export {
   input as coreInput,
@@ -276,4 +297,5 @@ export {
   message as coreMessage,
   last as coreLast,
   merge as coreMerge,
+  fail as coreFail,
 }

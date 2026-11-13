@@ -19,6 +19,7 @@
   "dependencies": {
     "@z1/graph": "workspace:*",
     "@z1/journal": "workspace:*",
+    "@z1/memory": "workspace:*",
     "@z1/module": "workspace:*",
     "@z1/node": "workspace:*",
     "@z1/node-host": "workspace:*",

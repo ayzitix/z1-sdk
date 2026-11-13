@@ -119,8 +119,10 @@ function applyBudget(sections: readonly StackedSection[], budget: number): Stack
 }
 
 /**
- * Renders the sections into one system prompt. Each body is emitted verbatim;
- * only placeholders are substituted and whitespace-only bodies disappear.
+ * Renders the sections into one system prompt. A section with pre-rendered
+ * `text` is emitted exactly as given and is never rendered again; otherwise
+ * only placeholders in `body` are substituted. A section whose effective text
+ * is whitespace-only disappears before hashing and budgeting.
  */
 export function stackSections(
   sections: readonly PromptSection[],
@@ -136,8 +138,8 @@ export function stackSections(
   for (const section of ordered) {
     if (seen.has(section.id)) continue
     seen.add(section.id)
-    if (section.body.trim() === '') continue
-    const text = renderTemplate(section.body, vars)
+    const text = section.text ?? renderTemplate(section.body, vars)
+    if (text.trim() === '') continue
     stacked.push({
       id: section.id,
       slot: section.slot,
