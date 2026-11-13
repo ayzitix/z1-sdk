@@ -5,6 +5,12 @@ import { createOpenAiLlmService } from '../src/index.ts'
 
 type Scenario = 'stream' | 'tools' | 'json' | 'fail'
 
+interface Failure {
+  status: number
+  retryAfter?: string
+  body?: string
+}
+
 interface CapturedRequest {
   method: string | undefined
   url: string
@@ -18,6 +24,7 @@ let server: ReturnType<typeof createServer>
 let baseURL = ''
 let captured: CapturedRequest[] = []
 let scenario: Scenario = 'stream'
+let failures: Failure[] = []
 
 const tools: ToolSchema[] = [
   {
@@ -40,6 +47,15 @@ function sse(res: ServerResponse, events: unknown[], usage?: Record<string, unkn
 }
 
 function respond(res: ServerResponse): void {
+  const failure = failures.shift()
+  if (failure !== undefined) {
+    const headers: Record<string, string> = { 'content-type': 'application/json' }
+    if (failure.retryAfter !== undefined) headers['retry-after'] = failure.retryAfter
+    res.writeHead(failure.status, headers)
+    res.end(failure.body ?? JSON.stringify({ error: { message: 'transient upstream' } }))
+    return
+  }
+
   switch (scenario) {
     case 'fail':
       res.writeHead(500, { 'content-type': 'text/plain' })
@@ -105,6 +121,7 @@ function respond(res: ServerResponse): void {
 
 beforeEach(async () => {
   captured = []
+  failures = []
   scenario = 'stream'
   server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = []
@@ -241,9 +258,92 @@ describe('OpenAiLlmService', () => {
 
   test('throws with the status when the endpoint fails', async () => {
     scenario = 'fail'
-    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY, retry: { attempts: 1 } })
 
     await expect(service.chat(request())).rejects.toThrow(/500/)
     await expect(service.chat(request())).rejects.toThrow(/upstream exploded/)
+  })
+})
+
+describe('OpenAiLlmService retry', () => {
+  test('retries a 429 honouring retry-after and succeeds', async () => {
+    failures = [
+      { status: 429, retryAfter: '0', body: '{"error":{"message":"Account request rate limit exceeded"}}' },
+      { status: 429, retryAfter: '0' },
+    ]
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY, retry: { baseDelayMs: 1 } })
+
+    const result = await service.chat(request())
+
+    expect(result.message.content).toBe('Hello world')
+    expect(captured).toHaveLength(3)
+  })
+
+  test('retries a 500 and then succeeds', async () => {
+    failures = [{ status: 500 }]
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY, retry: { baseDelayMs: 1 } })
+
+    const result = await service.chat(request())
+
+    expect(result.stopReason).toBe('stop')
+    expect(captured).toHaveLength(2)
+  })
+
+  test('retries a network failure and then succeeds', async () => {
+    let calls = 0
+    const service = createOpenAiLlmService({
+      baseURL,
+      apiKey: API_KEY,
+      retry: { baseDelayMs: 1 },
+      fetch: async (input, init) => {
+        calls += 1
+        if (calls < 3) throw new TypeError('fetch failed')
+        return await fetch(input, init)
+      },
+    })
+
+    const result = await service.chat(request())
+
+    expect(result.message.content).toBe('Hello world')
+    expect(calls).toBe(3)
+    expect(captured).toHaveLength(1)
+  })
+
+  test('does not retry a 400 and keeps status and body', async () => {
+    failures = [{ status: 400, body: '{"error":{"message":"bad request"}}' }]
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY, retry: { baseDelayMs: 1 } })
+
+    await expect(service.chat(request())).rejects.toThrow(/400.*bad request/s)
+    expect(captured).toHaveLength(1)
+  })
+
+  test('attempts: 1 disables retry', async () => {
+    failures = [{ status: 429 }]
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY, retry: { attempts: 1 } })
+
+    await expect(service.chat(request())).rejects.toThrow(/429/)
+    expect(captured).toHaveLength(1)
+  })
+
+  test('aborting during the backoff stops retrying', async () => {
+    failures = [{ status: 429 }, { status: 429 }]
+    const controller = new AbortController()
+    const service = createOpenAiLlmService({
+      baseURL,
+      apiKey: API_KEY,
+      retry: { baseDelayMs: 60_000, maxDelayMs: 60_000 },
+      signal: controller.signal,
+    })
+
+    const pending = service.chat(request())
+    const settled = pending.then(
+      () => 'resolved',
+      (error: unknown) => (error instanceof Error ? error.name : 'unknown'),
+    )
+    while (captured.length === 0) await new Promise((resolve) => setTimeout(resolve, 5))
+    controller.abort()
+
+    await expect(settled).resolves.toBe('AbortError')
+    expect(captured).toHaveLength(1)
   })
 })

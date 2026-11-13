@@ -11,7 +11,7 @@
  * @module @z1/server/live-llm
  */
 
-import { createOpenAiLlmService } from '@z1/provider-openai'
+import { createOpenAiLlmService, retryOptionsFromEnv } from '@z1/provider-openai'
 import type { ChatDelta, ChatRequest, ChatResult } from '@z1/node'
 import type { LlmService } from '@z1/runtime'
 
@@ -88,6 +88,7 @@ export class LiveLlmRouter implements LlmService {
     const created = createOpenAiLlmService({
       apiKey,
       baseURL: resolveBaseUrl(provider, this.#env),
+      retry: retryOptionsFromEnv(this.#env),
     })
     this.#live.set(provider, created)
     return created

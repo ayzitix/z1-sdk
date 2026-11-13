@@ -9,6 +9,16 @@ import type {
   ToolSchema,
 } from '@z1/node'
 import type { LlmService } from '@z1/runtime'
+import {
+  abortError,
+  backoffMs,
+  delay,
+  isAbortError,
+  isRetryableStatus,
+  resolveRetryOptions,
+  retryAfterMs,
+  type ResolvedRetryOptions,
+} from './retry.ts'
 import { readSseData } from './sse.ts'
 import type { OpenAiProviderOptions } from './types.ts'
 
@@ -87,12 +97,16 @@ export class OpenAiLlmService implements LlmService {
   private readonly apiKey: string
   private readonly extraHeaders: Record<string, string> | undefined
   private readonly fetchImpl: typeof fetch
+  private readonly retry: ResolvedRetryOptions
+  private readonly signal: AbortSignal | undefined
 
   constructor(options: OpenAiProviderOptions) {
     this.endpoint = options.baseURL.replace(/\/+$/, '')
     this.apiKey = options.apiKey
     this.extraHeaders = options.headers
     this.fetchImpl = options.fetch ?? globalThis.fetch
+    this.retry = resolveRetryOptions(options.retry)
+    this.signal = options.signal
   }
 
   async chat(
@@ -101,11 +115,7 @@ export class OpenAiLlmService implements LlmService {
   ): Promise<ChatResult> {
     const stream = request.model.params?.['stream'] !== false
     const body = buildBody(request, stream)
-    const response = await this.fetchImpl(`${this.endpoint}/chat/completions`, {
-      method: 'POST',
-      headers: this.headers(),
-      body: JSON.stringify(body),
-    })
+    const response = await this.send(JSON.stringify(body))
 
     if (!response.ok) {
       const detail = redact(await readErrorBody(response), this.apiKey)
@@ -138,6 +148,34 @@ export class OpenAiLlmService implements LlmService {
     }
 
     return accumulator.finish(finishReason, usage)
+  }
+
+  /**
+   * POSTs the body, retrying 429/5xx and network failures. Retries happen
+   * before the response stream is read, so a retried attempt emits no deltas.
+   */
+  private async send(body: string): Promise<Response> {
+    const url = `${this.endpoint}/chat/completions`
+    const signal = this.signal
+    for (let attempt = 1; ; attempt += 1) {
+      if (isAborted(signal)) throw abortError()
+      let response: Response
+      try {
+        response = await this.fetchImpl(url, initFor(this.headers(), body, signal))
+      } catch (error) {
+        if (isAbortError(error) || isAborted(signal)) throw error
+        if (attempt >= this.retry.attempts) throw error
+        await delay(backoffMs(attempt, this.retry), signal)
+        continue
+      }
+
+      if (response.ok || !isRetryableStatus(response.status)) return response
+      if (attempt >= this.retry.attempts) return response
+      const waitMs =
+        retryAfterMs(response.headers.get('retry-after')) ?? backoffMs(attempt, this.retry)
+      await discardBody(response)
+      await delay(waitMs, signal)
+    }
   }
 
   /** Non-streaming callers get one complete message; no deltas are emitted. */
@@ -354,6 +392,26 @@ function parseObject(payload: string): unknown {
     return isRecord(value) ? value : undefined
   } catch {
     return undefined
+  }
+}
+
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
+/** `exactOptionalPropertyTypes` forbids passing an explicit `undefined` signal. */
+function initFor(headers: Record<string, string>, body: string, signal: AbortSignal | undefined): RequestInit {
+  const init: RequestInit = { method: 'POST', headers, body }
+  if (signal !== undefined) init.signal = signal
+  return init
+}
+
+/** Releases a response we are about to retry so the socket can be reused. */
+async function discardBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel()
+  } catch {
+    // Already consumed or closed; the next attempt is unaffected.
   }
 }
 

@@ -68,3 +68,5 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] T29 iteration-scoped execution paths (fork inside a loop replays only the
   earlier iterations).
 - [x] T30 Review + commit.
+- [x] T31 Provider retry on 429/5xx with backoff and `retry-after`.
+  Live River verification: tool call + second model round.

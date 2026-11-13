@@ -18,7 +18,7 @@ import { BranchMemory } from '@z1/memory'
 import { ModuleStore, type ModuleCapabilities } from '@z1/module'
 import { createBuiltinRegistry } from '@z1/nodes'
 import { ModuleRuntime, type WorkerHostServices } from '@z1/node-host'
-import { createOpenAiLlmService } from '@z1/provider-openai'
+import { createOpenAiLlmService, retryOptionsFromEnv } from '@z1/provider-openai'
 import { startServer, type Z1Server } from '@z1/server'
 import {
   createMockRuntimeServices,
@@ -307,6 +307,7 @@ class LiveLlmRouter implements LlmService {
     const created = createOpenAiLlmService({
       apiKey,
       baseURL: resolveBaseUrl(provider, this.#env),
+      retry: retryOptionsFromEnv(this.#env),
     })
     this.#live.set(provider, created)
     return created
