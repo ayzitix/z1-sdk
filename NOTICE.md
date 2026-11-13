@@ -6,6 +6,9 @@ z1 sdk is derived from [DeepSeek Harness](https://github.com/deepseek-ai/deepsee
 [LICENSE](LICENSE), and third-party components are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+Code added in the `z1/` workspace is Copyright (c) 2026 z1 contributors and is
+released under the same MIT licence.
+
 ## What this fork changes
 
 The engine is kept as it is; product surfaces that the SDK does not need are

@@ -60,20 +60,20 @@ chat / CLI / canvas
 
 ## Architecture
 
-```mermaid
-%%{init: {'theme':'neutral'}}%%
-flowchart LR
-  U[chat · CLI · canvas] --> T[graph template]
-  T --> G[graph document]
-  G --> E[executor]
-  E --> N[nodes]
-  N --> J[(run journal)]
-  N --> M[(branch memory)]
-  N --> S[services<br/>llm · fs · tools]
-  S --> W[worker module]
-  W --> C[capability broker]
-  C --> N
+```text
+chat / CLI / canvas
+  → graph template
+    → executor
+      → nodes
+        ├── run journal      append-only, resume, fork
+        ├── branch memory    ancestors, siblings, recent steps
+        └── services         llm · fs · tools
+              └── worker module → capability broker → nodes
 ```
+
+The executor is the only component that schedules work. Everything it touches —
+a node, a service, a provider, a prompt section, a graph template — is resolved
+from a module or a config entry, never imported by the CLI directly.
 
 ## Quick start
 
@@ -87,15 +87,52 @@ pnpm -C z1 test                  # 690 tests
 # run the agent loop with the deterministic mock model
 pnpm z1 run --template agent.loop --message '[[tool:echo]] hi'
 
-# real model (OpenAI-compatible endpoint)
-export RIVER_API_KEY=...
-pnpm z1 run --template agent.loop --live \
-  --model river/deepseek-ai/DeepSeek-V4.1-Flash --message 'hello'
-
 # canvas from one process
 pnpm z1:canvas:build
 pnpm z1 studio
 ```
+
+## Providers
+
+z1 talks to any OpenAI-compatible `/chat/completions` endpoint. A run selects a
+model as `--model <provider>/<model>`; without `--live` it uses the mock.
+
+```bash
+# OpenAI
+export OPENAI_API_KEY=sk-...
+pnpm z1 run --template agent.loop --live \
+  --model openai/gpt-4.1-mini --message 'hello'
+
+# a local server (Ollama, vLLM, LM Studio): override the base URL
+export OPENAI_API_KEY=local
+export Z1_OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+pnpm z1 run --template agent.loop --live \
+  --model openai/qwen3 --message 'hello'
+
+# River is just another OpenAI-compatible endpoint
+export RIVER_API_KEY=...
+pnpm z1 run --template agent.loop --live \
+  --model river/deepseek-ai/DeepSeek-V4.1-Flash --message 'hello'
+```
+
+The model string is passed through, so use any model your key can access. A new
+provider is data, not code — add it to `z1.config.json`:
+
+```json
+{
+  "providers": [
+    {
+      "id": "local",
+      "envKey": "LOCAL_API_KEY",
+      "baseURL": "http://127.0.0.1:11434/v1"
+    }
+  ]
+}
+```
+
+then run with `--model local/qwen3`. `Z1_<ID>_BASE_URL` overrides a provider's
+base URL. Rate limits are retried with backoff; tune the budget with
+`Z1_LLM_RETRY_ATTEMPTS`, `Z1_LLM_RETRY_BASE_MS` and `Z1_LLM_RETRY_MAX_MS`.
 
 ## Commands
 
@@ -174,6 +211,7 @@ Not in this repository:
 
 ## Licence
 
-MIT. The upstream copyright notice is kept in [LICENSE](LICENSE); third-party
+MIT. z1 additions are Copyright (c) 2026 z1 contributors; the upstream
+DeepSeek Harness notice is retained in [LICENSE](LICENSE). Third-party
 components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and
 the fork is described in [NOTICE.md](NOTICE.md).
