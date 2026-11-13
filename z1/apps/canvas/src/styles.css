@@ -600,12 +600,21 @@ code {
 }
 
 .z1-node-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-top: 7px;
   padding-top: 5px;
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 10px;
   text-transform: lowercase;
+}
+
+.z1-node-duration {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
 }
 
 /* --- runs panel --------------------------------------------------------- */
@@ -801,11 +810,99 @@ code {
 
 .event-row {
   display: grid;
-  grid-template-columns: 48px 190px minmax(0, 1fr) 78px;
+  grid-template-columns: 48px 190px minmax(0, 1fr) 68px 78px;
   gap: 8px;
   padding: 2px 0;
   border-bottom: 1px solid var(--surface-3);
   font-size: 11px;
+}
+
+.event-duration {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.event-status {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.event-path-button {
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+
+.event-path-button:hover {
+  color: var(--ink);
+}
+
+.run-time {
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.run-branch {
+  color: var(--line-strong);
+  font-size: 10.5px;
+}
+
+.run-detail {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.run-detail h4 {
+  margin: 8px 0 4px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+/* --- node run block ----------------------------------------------------- */
+
+.node-run .inline-error {
+  margin-top: 6px;
+}
+
+.node-run-meta,
+.node-run-marker {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.node-run-marker {
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+}
+
+.node-run-outputs {
+  margin-top: 6px;
+}
+
+.node-run-outputs summary {
+  color: var(--muted);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.node-run-outputs .json-view {
+  margin-top: 5px;
+  max-height: 160px;
+}
+
+.node-run-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .event-seq,
@@ -868,4 +965,45 @@ code {
   .field input {
     width: 140px;
   }
+}
+
+/* --- schema form -------------------------------------------------------- */
+
+.field select {
+  width: 168px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+}
+
+.graph-status {
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.schema-form .schema-hint {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.schema-form .schema-required {
+  color: var(--ink-soft);
+}
+
+.schema-raw {
+  margin-top: 4px;
+  border-top: 1px dashed var(--line);
+  padding-top: 6px;
+}
+
+.schema-raw summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.schema-raw textarea {
+  margin-top: 6px;
 }

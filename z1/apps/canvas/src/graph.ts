@@ -29,6 +29,8 @@ export type Z1NodeData = {
   config: Json
   autonomy?: AutonomyMode
   status?: NodeRunStatus
+  /** Wall time of the node in the current run, shown next to its status. */
+  durationMs?: number
 }
 
 export type Z1FlowNode = Node<Z1NodeData, 'z1'>
@@ -85,6 +87,8 @@ function descriptorFor(node: GraphNode, descriptors: readonly NodeDescriptor[]):
     category: 'unknown',
     inputs: [],
     outputs: [],
+    configSchema: {},
+    defaultConfig: {},
   }
 }
 

@@ -53,6 +53,7 @@ import {
 } from '@z1/runtime'
 import { WebSocketServer, type WebSocket } from 'ws'
 
+import { GraphStore } from './graphs.ts'
 import { LiveLlmRouter } from './live-llm.ts'
 import {
   cloneRegistry,
@@ -62,6 +63,7 @@ import {
   proposalSummary,
 } from './modules.ts'
 import { SocketTransport } from './socket-transport.ts'
+import { createStaticHandler } from './static.ts'
 import { TeeJournal } from './tee-journal.ts'
 import type { ServerOptions, Z1Server } from './types.ts'
 
@@ -105,6 +107,8 @@ interface ResolvedConfig {
   readonly env: NodeJS.ProcessEnv
   readonly approvalTimeoutMs: number
   readonly modulesPath: string
+  readonly graphsPath: string
+  readonly staticDir?: string
 }
 
 interface StartArgs {
@@ -194,9 +198,18 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       options.modulesPath ??
       (options.env ?? process.env)['Z1_MODULES_DIR'] ??
       join(homedir(), '.z1', 'modules'),
+    graphsPath:
+      options.graphsPath ??
+      (options.env ?? process.env)['Z1_GRAPHS_DIR'] ??
+      join(process.cwd(), '.z1', 'graphs'),
+    ...(options.staticDir === undefined ? {} : { staticDir: options.staticDir }),
   }
 
   const modules = new ModuleStore(config.modulesPath)
+  const graphs = new GraphStore(config.graphsPath)
+  // Created before the socket is reachable so the first `graph.save` cannot fail
+  // on a missing directory.
+  await graphs.init()
   const journal = new SqliteJournal(options.dbPath)
   const runs = new Map<string, RunState>()
   const approvals = new Map<string, PendingApproval>()
@@ -478,6 +491,28 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       return { ok: issues.length === 0, issues }
     })
 
+    handle(connection, 'graph.list', async () => ({ graphs: await graphs.list() }))
+
+    handle(connection, 'graph.get', async (params) => {
+      assertParams(params, ['id'])
+      return await graphs.get(stringParam(params['id'], 'id'))
+    })
+
+    handle(connection, 'graph.save', async (params) => {
+      assertParams(params, ['graph'])
+      // Structure only: a saved graph may name a node type this server build
+      // does not have yet, which is a `graph.validate` concern, not a save one.
+      const graph = parseGraphParam(params['graph'])
+      const expectedVersion = optionalSeq(params['expectedVersion'], 'expectedVersion')
+      return await graphs.save(graph, expectedVersion)
+    })
+
+    handle(connection, 'graph.delete', async (params) => {
+      assertParams(params, ['id'])
+      await graphs.delete(stringParam(params['id'], 'id'))
+      return {}
+    })
+
     handle(connection, 'run.start', async (params) => {
       assertParams(params, ['graph'])
       const graph = parseGraphParam(params['graph'])
@@ -714,9 +749,29 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     registerHandlers(connection)
   }
 
-  const httpServer = createServer((_request, response) => {
-    response.writeHead(404, { 'content-type': 'text/plain' })
-    response.end('z1 server: connect to the /ws WebSocket endpoint\n')
+  const staticHandler =
+    config.staticDir === undefined ? undefined : createStaticHandler(config.staticDir)
+
+  const httpServer = createServer((request, response) => {
+    const url = request.url ?? '/'
+    // The socket endpoint owns this path; serving a page here would mask a
+    // client that forgot to upgrade.
+    if (url === WS_PATH || url.startsWith(`${WS_PATH}?`)) {
+      response.writeHead(404, { 'content-type': 'text/plain' })
+      response.end('z1 server: connect to the /ws WebSocket endpoint\n')
+      return
+    }
+    if (staticHandler === undefined) {
+      response.writeHead(404, { 'content-type': 'text/plain' })
+      response.end('z1 server: connect to the /ws WebSocket endpoint\n')
+      return
+    }
+    void staticHandler(request, response).catch(() => {
+      if (!response.headersSent) {
+        response.writeHead(500, { 'content-type': 'text/plain' })
+      }
+      response.end()
+    })
   })
 
   const wss = new WebSocketServer({

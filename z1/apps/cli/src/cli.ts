@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { DatabaseSync } from 'node:sqlite'
+import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import {
   graphDigest,
@@ -53,6 +55,8 @@ const USAGE = [
   '  memory context <runId> [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
   '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
+  '  studio [--host <host>] [--port <port>] [--db <path>] [--graphs-dir <path>]',
+  '      [--modules-dir <path>] [--token <token>] [--live] [--no-open] [--json]',
   '  module list [--modules-dir <path>] [--json]',
   '  module propose <dir> [--modules-dir <path>] [--json]',
   '  module approve <id>[@<version>] [--future] [--modules-dir <path>] [--json]',
@@ -1246,6 +1250,138 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
   return await waitForShutdown(server)
 }
 
+/**
+ * Canvas build locations relative to this module: `src/cli.ts` under tsx is
+ * two levels below `apps/`, a built `lib/cli.js` is three. First one that
+ * holds an `index.html` wins, so the same helper works for both layouts and for
+ * a caller-supplied `file:` URL pointing at a temp tree.
+ */
+const CANVAS_DIST_CANDIDATES = ['../../canvas/dist', '../../../apps/canvas/dist'] as const
+
+/** Absolute canvas build directory reachable from `baseUrl`, else undefined. */
+export function resolveCanvasDist(baseUrl: string | URL = import.meta.url): string | undefined {
+  const base = typeof baseUrl === 'string' ? baseUrl : baseUrl.href
+  for (const relative of CANVAS_DIST_CANDIDATES) {
+    let candidate: string
+    try {
+      candidate = fileURLToPath(new URL(relative, base))
+    } catch {
+      continue
+    }
+    if (existsSync(join(candidate, 'index.html'))) return candidate
+  }
+  return undefined
+}
+
+/** Best effort: opening a browser must never fail the studio server. */
+function openBrowser(url: string): void {
+  const [command, args] =
+    process.platform === 'darwin'
+      ? ['open', [url]]
+      : process.platform === 'win32'
+        ? ['cmd', ['/c', 'start', '', url]]
+        : ['xdg-open', [url]]
+  const child = spawn(command, args, { stdio: 'ignore', detached: true })
+  child.on('error', () => {
+    // A headless machine has no browser; the printed URL is still the answer.
+  })
+  child.unref()
+}
+
+async function studioCommand(args: readonly string[], io: CliIO): Promise<number> {
+  let values: {
+    host?: string
+    port?: string
+    db?: string
+    'graphs-dir'?: string
+    'modules-dir'?: string
+    token?: string
+    live?: boolean
+    'no-open'?: boolean
+    json?: boolean
+  }
+  let positionals: string[]
+  try {
+    const parsed = parseArgs({
+      args: [...args],
+      options: {
+        host: { type: 'string' },
+        port: { type: 'string' },
+        db: { type: 'string' },
+        'graphs-dir': { type: 'string' },
+        'modules-dir': { type: 'string' },
+        token: { type: 'string' },
+        live: { type: 'boolean' },
+        'no-open': { type: 'boolean' },
+        json: { type: 'boolean' },
+      },
+      allowPositionals: true,
+      strict: true,
+    })
+    values = parsed.values
+    positionals = [...parsed.positionals]
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return usage(io)
+  }
+  if (positionals.length > 0) return usage(io)
+
+  let port = DEFAULT_SERVE_PORT
+  if (values.port !== undefined) {
+    if (!/^\d{1,5}$/.test(values.port) || Number(values.port) > 65535) {
+      io.stderr(`invalid --port "${values.port}"; expected 0-65535\n`)
+      return usage(io)
+    }
+    port = Number(values.port)
+  }
+
+  if (values.token === '') {
+    io.stderr('--token must not be empty\n')
+    return usage(io)
+  }
+
+  const staticDir = resolveCanvasDist()
+  if (staticDir === undefined) {
+    io.stderr('canvas build not found; run pnpm z1:canvas:build\n')
+    return 1
+  }
+
+  const env = io.env ?? process.env
+  const host = values.host ?? DEFAULT_SERVE_HOST
+  const token = values.token
+  let server: Z1Server
+  try {
+    server = await startServer({
+      dbPath: values.db ?? '.z1/runs.db',
+      host,
+      port,
+      graphsPath: values['graphs-dir'] ?? join(process.cwd(), '.z1', 'graphs'),
+      modulesPath:
+        values['modules-dir'] ?? env['Z1_MODULES_DIR'] ?? join(homedir(), '.z1', 'modules'),
+      staticDir,
+      // Omitting `token` keeps the server's own random generation.
+      ...(token === undefined ? {} : { token }),
+      live: values.live === true,
+    })
+  } catch (error) {
+    io.stderr(`cannot start server: ${errorMessage(error)}\n`)
+    return 1
+  }
+
+  const page = `http://${host}:${String(server.port)}/?url=${server.url}&token=${server.token}`
+  if (values.json === true) {
+    io.stdout(
+      `${JSON.stringify({ url: page, ws: server.url, token: server.token, port: server.port })}\n`,
+    )
+  } else {
+    io.stdout(`z1 studio on ${page}\n`)
+  }
+
+  if (values['no-open'] !== true) openBrowser(page)
+
+  return await waitForShutdown(server)
+}
+
 /** Entry point shared by the bin and the tests; never exits the process. */
 export async function runCli(argv: readonly string[], io: CliIO): Promise<number> {
   const [command, ...rest] = argv
@@ -1266,6 +1402,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return await forkCommand(rest, io)
     case 'serve':
       return await serveCommand(rest, io)
+    case 'studio':
+      return await studioCommand(rest, io)
     case 'module':
       return await moduleCommand(rest, io)
     default:

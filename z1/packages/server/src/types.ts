@@ -28,6 +28,16 @@ export interface ServerOptions {
    * `Z1_MODULES_DIR` or `~/.z1/modules`.
    */
   modulesPath?: string
+  /**
+   * Graph library root, one JSON file per saved graph. Default `Z1_GRAPHS_DIR`
+   * or `<cwd>/.z1/graphs`.
+   */
+  graphsPath?: string
+  /**
+   * Built canvas directory served on the same port as `/ws` (`GET /`, assets,
+   * SPA fallback). Omitted means the HTTP port answers the protocol hint only.
+   */
+  staticDir?: string
 }
 
 export interface Z1Server {

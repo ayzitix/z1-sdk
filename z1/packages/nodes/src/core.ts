@@ -60,6 +60,7 @@ const input = defineNode({
   description: 'Run input as a value plus the flow token that starts a graph.',
   category: 'core',
   config: z.object({}),
+  defaultConfig: {},
   inputs: [],
   outputs: [dataPort('value', jsonValue), flowPort('out')],
   execute: async (ctx) => ({ value: ctx.input, out: true }),
@@ -72,6 +73,7 @@ const output = defineNode({
   description: 'Publishes a value under the configured run-output port name.',
   category: 'core',
   config: z.object({ port: z.string().optional() }),
+  defaultConfig: { port: 'output' },
   inputs: [flowPort('in'), dataPort('value', jsonValue)],
   outputs: [],
   // The executor reads the `value` input and writes `RunResult.outputs[port]`.
@@ -85,6 +87,7 @@ const constant = defineNode({
   description: 'Emits a literal JSON value.',
   category: 'core',
   config: z.object({ value: z.unknown() }),
+  defaultConfig: { value: null },
   inputs: [],
   outputs: [dataPort('value', jsonValue)],
   execute: async (ctx) => ({ value: configValue(ctx.config.value) }),
@@ -97,6 +100,7 @@ const template = defineNode({
   description: 'Renders {{dotted.path}} placeholders from the vars record.',
   category: 'core',
   config: z.object({ template: z.string() }),
+  defaultConfig: { template: '' },
   // SPEC §7 types `vars` as Json so any JSON root can be piped in; placeholders
   // resolve through arrays (numeric segment) and own object properties.
   inputs: [dataPort('vars', jsonValue, false)],
@@ -133,6 +137,7 @@ const value = defineNode({
   description: 'Emits a literal value when the flow token arrives.',
   category: 'core',
   config: z.object({ value: jsonValue }),
+  defaultConfig: { value: null },
   inputs: [flowPort('in')],
   outputs: [dataPort('value', jsonValue), flowPort('out')],
   execute: async (ctx) => ({ value: ctx.config.value, out: true }),
@@ -145,6 +150,7 @@ const get = defineNode({
   description: 'Reads a dotted path from a JSON value; a missing path is null.',
   category: 'core',
   config: z.object({ path: z.string() }),
+  defaultConfig: { path: '' },
   inputs: [flowPort('in'), dataPort('value', jsonValue)],
   outputs: [dataPort('value', jsonValue), flowPort('out')],
   execute: async (ctx) => ({
@@ -160,6 +166,7 @@ const concat = defineNode({
   description: 'Appends `b` to the `a` array, spreading `b` when it is an array.',
   category: 'core',
   config: z.object({}),
+  defaultConfig: {},
   inputs: [flowPort('in'), dataPort('a', z.array(jsonValue)), dataPort('b', jsonValue)],
   outputs: [dataPort('value', z.array(jsonValue)), flowPort('out')],
   execute: async (ctx) => {
@@ -180,6 +187,7 @@ const message = defineNode({
   description: 'Builds a chat message; non-string content is JSON-stringified.',
   category: 'core',
   config: z.object({ role: ROLE }),
+  defaultConfig: { role: 'user' },
   inputs: [
     flowPort('in'),
     dataPort('content', jsonValue),
@@ -209,6 +217,7 @@ const last = defineNode({
   description: 'Emits the last item of an array, or null when it is empty.',
   category: 'core',
   config: z.object({}),
+  defaultConfig: {},
   inputs: [flowPort('in'), dataPort('items', z.array(jsonValue))],
   outputs: [dataPort('value', jsonValue), flowPort('out')],
   execute: async (ctx) => {
@@ -229,6 +238,7 @@ const merge = defineNode({
   description: 'Passes through the first defined input, preferring `a` over `b`.',
   category: 'core',
   config: z.object({}),
+  defaultConfig: {},
   inputs: [
     flowPort('in'),
     dataPort('a', jsonValue, false, 'any'),

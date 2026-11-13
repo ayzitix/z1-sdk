@@ -67,6 +67,9 @@ export function stubNodeDefinition(declaration: ModuleNodeDeclaration): NodeDefi
     title: declaration.title,
     category: declaration.category,
     config: z.unknown(),
+    // Declarations carry no executable schema, so nothing is inserted beyond an
+    // empty object: the module panel edits config as raw JSON.
+    defaultConfig: {},
     inputs: declaration.inputs.map(declaredPort),
     outputs: declaration.outputs.map(declaredPort),
     cacheable: false,

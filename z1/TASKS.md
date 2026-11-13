@@ -78,3 +78,12 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] T33 nodes `prompt.section/stack/text/context`; `llm.chat.system` input.
 - [x] T34 agent graph rebuilt on prompt nodes; canvas section editor.
 - [ ] T35 Review + commit.
+
+## M7 — the base as a usable tool
+
+- [x] T36 Server-side graph storage with versions; node defaults + config schemas.
+- [x] T37 Canvas autosave/conflict handling, palette defaults, schema forms;
+  `z1 studio` serves the built canvas from the server.
+- [x] T38 Per-node run inspector (outputs, errors, duration, prompt hash),
+  run timeline and branch tree with fork-from-path.
+- [ ] T39 Review + commit.

@@ -2,6 +2,7 @@ import { Handle, Position, type NodeProps } from '@xyflow/react'
 import type { ReactElement } from 'react'
 
 import { handleId, type Z1FlowNode } from '../graph.ts'
+import { formatDuration } from '../runs.ts'
 
 /** One node on the canvas: typed handles, title, autonomy and run state. */
 export function Z1Node({ id, data, selected }: NodeProps<Z1FlowNode>): ReactElement {
@@ -55,7 +56,14 @@ export function Z1Node({ id, data, selected }: NodeProps<Z1FlowNode>): ReactElem
           ))}
         </div>
       </div>
-      {status === undefined ? null : <div className="z1-node-status">{status}</div>}
+      {status === undefined ? null : (
+        <div className="z1-node-status">
+          <span className="z1-node-status-label">{status}</span>
+          {data.durationMs === undefined ? null : (
+            <span className="z1-node-duration">{formatDuration(data.durationMs)}</span>
+          )}
+        </div>
+      )}
     </div>
   )
 }

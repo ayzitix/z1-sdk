@@ -14,6 +14,10 @@ import {
   JsonRpcPeer,
   type ApprovalRequestParams,
   type ArtifactGetResult,
+  type GraphGetResult,
+  type GraphListResult,
+  type GraphSaveParams,
+  type GraphSaveResult,
   type GraphValidateResult,
   type InitializeResult,
   type ModuleAuditResult,
@@ -202,6 +206,22 @@ export class CanvasClient {
 
   graphValidate(graph: unknown): Promise<GraphValidateResult> {
     return this.#peer.request('graph.validate', { graph })
+  }
+
+  graphList(): Promise<GraphListResult> {
+    return this.#peer.request('graph.list', {})
+  }
+
+  graphGet(id: string): Promise<GraphGetResult> {
+    return this.#peer.request('graph.get', { id })
+  }
+
+  graphSave(params: GraphSaveParams): Promise<GraphSaveResult> {
+    return this.#peer.request('graph.save', params)
+  }
+
+  graphDelete(id: string): Promise<Record<string, never>> {
+    return this.#peer.request('graph.delete', { id })
   }
 
   runStart(params: RunStartParams): Promise<RunReply> {

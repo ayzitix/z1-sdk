@@ -166,6 +166,11 @@ export interface NodeDefinition<C = unknown> {
   readonly description?: string
   readonly category: string
   readonly config: z.ZodType<C>
+  /**
+   * Config the palette inserts into a freshly dropped node. Must satisfy
+   * `config`, so a new node is valid before the human edits anything.
+   */
+  readonly defaultConfig?: Json
   readonly inputs: readonly PortSpec[]
   readonly outputs: readonly PortSpec[]
   readonly capabilities?: readonly Capability[]

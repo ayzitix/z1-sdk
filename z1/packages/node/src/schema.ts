@@ -40,6 +40,27 @@ export function portJsonSchema(port: PortSpec): Record<string, unknown> | undefi
   }
 }
 
+/**
+ * JSON Schema for a node's config object, used by the inspector form. `input`
+ * mode is the one that matters: it describes what a human may type, so
+ * defaults are not baked in as `const`. A schema zod cannot convert degrades to
+ * `{}` for the same reason ports do.
+ */
+export function configJsonSchema(definition: NodeDefinition): Record<string, unknown> {
+  try {
+    const schema = z.toJSONSchema(definition.config, { io: 'input' })
+    const record = schema as unknown as Record<string, unknown>
+    // A schema that constrains nothing (`z.unknown()`, which is how a module
+    // declaration is stubbed) is reported as `{}`: the canvas treats an empty
+    // schema as "free-form JSON" and must not see a lone `$schema` marker.
+    const keys = Object.keys(record)
+    if (keys.length === 0 || (keys.length === 1 && keys[0] === '$schema')) return {}
+    return record
+  } catch {
+    return {}
+  }
+}
+
 /** Parse and normalise a node's config; throws {@link NodeConfigError} on failure. */
 export function parseNodeConfig(definition: NodeDefinition, config: unknown): unknown {
   const result = definition.config.safeParse(config)

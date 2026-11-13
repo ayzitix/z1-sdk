@@ -2,6 +2,8 @@ import type { AutonomyMode, Json } from '@z1/node'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { useCanvas } from '../store.ts'
+import { formatDuration, nodeRunFor } from '../runs.ts'
+import { SchemaForm } from './SchemaForm.tsx'
 
 const AUTONOMY: readonly AutonomyMode[] = ['auto', 'ask', 'deny']
 
@@ -196,6 +198,11 @@ export function Inspector(): ReactElement {
   const node = useCanvas((state) => state.nodes.find((entry) => entry.id === state.selectedId) ?? null)
   const updateConfig = useCanvas((state) => state.updateConfig)
   const setAutonomy = useCanvas((state) => state.setAutonomy)
+  const nodeRun = useCanvas((state) =>
+    state.selectedId === null ? null : nodeRunFor(state.nodeRun, state.selectedId),
+  )
+  const runId = useCanvas((state) => state.runId)
+  const forkAt = useCanvas((state) => state.forkAt)
   const configText = node === null ? '' : JSON.stringify(node.data.config, null, 2)
   const [text, setText] = useState(configText)
   const [configError, setConfigError] = useState<string | null>(null)
@@ -258,6 +265,66 @@ export function Inspector(): ReactElement {
           ))}
         </select>
       </div>
+      {nodeRun === null ? null : (
+        <div className="inspector-section node-run" data-testid="node-run">
+          <h3>last run</h3>
+          <div className="inspector-row">
+            <span className="inspector-key">status</span>
+            <span
+              className={`run-status run-status-${nodeRun.status}`}
+              data-testid="node-run-status"
+            >
+              {nodeRun.status}
+            </span>
+            {nodeRun.durationMs === undefined ? null : (
+              <span className="node-run-meta">{formatDuration(nodeRun.durationMs)}</span>
+            )}
+            {nodeRun.cached === true ? (
+              <span className="node-run-marker">
+                {nodeRun.resumed === true ? 'resumed' : 'cached'}
+              </span>
+            ) : null}
+          </div>
+          {isStack ? (
+            <div className="inspector-row">
+              <span className="inspector-key">prompt</span>
+              <code data-testid="node-prompt-hash">
+                {nodeRun.promptHash === undefined
+                  ? '—'
+                  : `${nodeRun.promptHash.slice(0, 12)}…`}
+              </code>
+              <span className="node-run-meta">
+                {nodeRun.tokens === undefined ? 'tokens —' : `${String(nodeRun.tokens)} tok`}
+              </span>
+            </div>
+          ) : null}
+          {nodeRun.error === undefined ? null : (
+            <p className="inline-error" data-testid="node-error">
+              {nodeRun.error}
+            </p>
+          )}
+          {nodeRun.outputs === undefined ? null : (
+            <details className="node-run-outputs">
+              <summary>outputs</summary>
+              <pre className="json-view" data-testid="node-outputs">
+                {JSON.stringify(nodeRun.outputs, null, 2)}
+              </pre>
+            </details>
+          )}
+          {node.id.includes('/') ? null : (
+            <div className="node-run-actions">
+              <button
+                type="button"
+                data-testid="fork-here"
+                disabled={runId === null}
+                onClick={() => void forkAt(node.id)}
+              >
+                Fork here
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <div className="inspector-section">
         <h3>inputs</h3>
         {descriptor.inputs.length === 0 ? <p className="muted">none</p> : null}
@@ -306,7 +373,9 @@ export function Inspector(): ReactElement {
             graph to see rendered tokens and hash
           </p>
         ) : null}
-        {isSection || isPromptText ? null : (
+        {isSection || isPromptText ? null : descriptor.category === 'unknown' ? (
+          // A type this build does not know has no schema worth rendering, so
+          // the generic JSON editor remains its only config surface.
           <>
             <textarea
               className="config-editor"
@@ -319,6 +388,13 @@ export function Inspector(): ReactElement {
               Apply
             </button>
           </>
+        ) : (
+          <SchemaForm
+            key={draftKey}
+            schema={descriptor.configSchema}
+            config={node.data.config}
+            onApply={(config) => updateConfig(node.id, config)}
+          />
         )}
       </div>
     </section>

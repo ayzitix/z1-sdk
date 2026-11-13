@@ -87,4 +87,43 @@ describe('describeNodes', () => {
     const roundTripped = JSON.parse(JSON.stringify(descriptor)) as NodeDescriptor
     expect(roundTripped).toEqual(descriptor)
   })
+
+  test('derives a config schema and falls back to an empty object', () => {
+    const constNode = describeNode(
+      defineNode({
+        id: 'test.const',
+        version: '1.0.0',
+        title: 'Const',
+        category: 'test',
+        config: z.object({ value: z.unknown() }),
+        defaultConfig: { value: null },
+        inputs: [],
+        outputs: [],
+        execute: async () => ({}),
+      }),
+    )
+    const untyped = describeNode(
+      defineNode({
+        id: 'test.untyped',
+        version: '1.0.0',
+        title: 'Untyped',
+        category: 'test',
+        config: z.unknown(),
+        inputs: [],
+        outputs: [],
+        execute: async () => ({}),
+      }),
+    )
+
+    // `properties.value` is what the inspector renders a field for.
+    expect(constNode.configSchema).toMatchObject({
+      type: 'object',
+      properties: { value: {} },
+    })
+    expect(constNode.defaultConfig).toEqual({ value: null })
+    // A definition with no declared schema and no default is free-form, not
+    // missing: the canvas should never branch on the field's presence.
+    expect(untyped.configSchema).toEqual({})
+    expect(untyped.defaultConfig).toEqual({})
+  })
 })

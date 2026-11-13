@@ -9,7 +9,7 @@
  * @module @z1/protocol/types
  */
 
-import type { ValidationIssue } from '@z1/graph'
+import type { GraphDocument, ValidationIssue } from '@z1/graph'
 import type { RunRecord, RunStatus } from '@z1/journal'
 import type { AuditEntry, ModuleCapabilities } from '@z1/module'
 import type {
@@ -81,6 +81,7 @@ export const APP_ERRORS = {
   conflict: 1004,
   unauthorized: 1005,
   artifactNotFound: 1006,
+  graphNotFound: 1007,
 } as const
 
 export type JsonRpcErrorCode = (typeof JSON_RPC_ERRORS)[keyof typeof JSON_RPC_ERRORS]
@@ -114,6 +115,10 @@ export interface NodeDescriptor {
   category: string
   inputs: PortDescriptor[]
   outputs: PortDescriptor[]
+  /** JSON Schema of the node's config object, for the inspector form. */
+  configSchema: Record<string, unknown>
+  /** Config the palette inserts when the node is dropped; schema-valid. */
+  defaultConfig: Json
 }
 
 /** One journal event plus its per-run sequence number. */
@@ -151,6 +156,51 @@ export interface GraphValidateParams {
 export interface GraphValidateResult {
   ok: boolean
   issues: ValidationIssue[]
+}
+
+// --- persisted graphs ------------------------------------------------------
+
+/** One stored graph as `graph.list` shows it, without the graph body. */
+export interface GraphSummary {
+  id: string
+  title?: string
+  version: number
+  updatedAt: number
+  nodes: number
+  edges: number
+  digest: string
+}
+
+export type GraphListParams = EmptyParams
+
+export interface GraphListResult {
+  graphs: GraphSummary[]
+}
+
+export interface GraphGetParams {
+  id: string
+}
+
+export interface GraphGetResult {
+  graph: GraphDocument
+  version: number
+  updatedAt: number
+}
+
+export interface GraphSaveParams {
+  graph: unknown
+  /** Reject the save when the stored version is not this one. */
+  expectedVersion?: number
+}
+
+export interface GraphSaveResult {
+  id: string
+  version: number
+  updatedAt: number
+}
+
+export interface GraphDeleteParams {
+  id: string
 }
 
 /** How a node's approval policy is resolved for this run. */
@@ -338,6 +388,10 @@ export interface MethodMap extends ClientMethodMap {
   initialize: { params: InitializeParams; result: InitializeResult }
   'node.list': { params: NodeListParams; result: NodeListResult }
   'graph.validate': { params: GraphValidateParams; result: GraphValidateResult }
+  'graph.list': { params: GraphListParams; result: GraphListResult }
+  'graph.get': { params: GraphGetParams; result: GraphGetResult }
+  'graph.save': { params: GraphSaveParams; result: GraphSaveResult }
+  'graph.delete': { params: GraphDeleteParams; result: EmptyParams }
   'run.start': { params: RunStartParams; result: RunReply }
   'run.resume': { params: RunResumeParams; result: RunReply }
   'run.cancel': { params: RunCancelParams; result: EmptyParams }

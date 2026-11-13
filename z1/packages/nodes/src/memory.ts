@@ -15,6 +15,7 @@ const memoryContext = defineNode({
   description: 'Builds an envelope from ancestor runs, sibling branches and recent steps.',
   category: 'memory',
   config: z.object({}),
+  defaultConfig: {},
   inputs: [],
   outputs: [dataPort('text', z.string()), dataPort('messages', z.array(messageSchema))],
   execute: async (ctx) => {

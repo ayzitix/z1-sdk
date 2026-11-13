@@ -4,6 +4,13 @@ import { useRef, useState, type ReactElement } from 'react'
 import { fromFlow } from '../graph.ts'
 import { useCanvas } from '../store.ts'
 
+/** Local wall clock for the saved timestamp, `HH:MM`. */
+function formatClock(at: number): string {
+  const date = new Date(at)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 /** Server connection, graph transport and run controls. */
 export function Toolbar(): ReactElement {
   const url = useCanvas((state) => state.url)
@@ -24,7 +31,18 @@ export function Toolbar(): ReactElement {
   const loadGraph = useCanvas((state) => state.loadGraph)
   const runInput = useCanvas((state) => state.runInput)
   const setRunInput = useCanvas((state) => state.setRunInput)
+  const graphs = useCanvas((state) => state.graphs)
+  const currentGraphId = useCanvas((state) => state.currentGraphId)
+  const graphDirty = useCanvas((state) => state.graphDirty)
+  const graphSaving = useCanvas((state) => state.graphSaving)
+  const graphError = useCanvas((state) => state.graphError)
+  const lastSavedAt = useCanvas((state) => state.lastSavedAt)
+  const openGraph = useCanvas((state) => state.openGraph)
+  const saveGraph = useCanvas((state) => state.saveGraph)
+  const deleteGraph = useCanvas((state) => state.deleteGraph)
+  const newGraph = useCanvas((state) => state.newGraph)
   const [openError, setOpenError] = useState<string | null>(null)
+  const [newTemplate, setNewTemplate] = useState<'empty' | 'hello'>('empty')
   const fileInput = useRef<HTMLInputElement>(null)
 
   const save = (): void => {
@@ -66,6 +84,14 @@ export function Toolbar(): ReactElement {
 
   const connected = connection === 'connected'
   const running = runStatus === 'running'
+  const status =
+    graphSaving
+      ? 'saving…'
+      : graphDirty
+        ? 'unsaved'
+        : lastSavedAt === null
+          ? ''
+          : `saved ${formatClock(lastSavedAt)}`
 
   return (
     <header className="toolbar">
@@ -110,6 +136,69 @@ export function Toolbar(): ReactElement {
       <span className={`status status-${connection}`} title={connectionError ?? connection}>
         {connection}
       </span>
+      <label className="field">
+        <span>graph</span>
+        <select
+          data-testid="graph-select"
+          className="graph-select"
+          value={currentGraphId ?? ''}
+          onChange={(event) => {
+            const id = event.target.value
+            if (id.length > 0) void openGraph(id)
+          }}
+        >
+          <option value="">{currentGraphId === null ? 'unsaved' : 'select…'}</option>
+          {graphs.map((summary) => (
+            <option key={summary.id} value={summary.id}>
+              {summary.title ?? summary.id} · v{summary.version}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>new</span>
+        <select
+          data-testid="new-template"
+          value={newTemplate}
+          onChange={(event) => {
+            setNewTemplate(event.target.value === 'hello' ? 'hello' : 'empty')
+          }}
+        >
+          <option value="empty">empty</option>
+          <option value="hello">hello</option>
+        </select>
+      </label>
+      <button
+        type="button"
+        data-testid="new-graph"
+        onClick={() => newGraph(newTemplate)}
+      >
+        New
+      </button>
+      <button
+        type="button"
+        data-testid="save-graph"
+        onClick={() => void saveGraph()}
+        disabled={!connected || graphSaving}
+      >
+        Save
+      </button>
+      <button
+        type="button"
+        data-testid="delete-graph"
+        onClick={() => {
+          if (currentGraphId !== null) void deleteGraph(currentGraphId)
+        }}
+        disabled={!connected || currentGraphId === null}
+      >
+        Delete
+      </button>
+      {status.length === 0 ? null : (
+        <span className="graph-status" data-testid="graph-status">
+          {status}
+        </span>
+      )}
+      {graphError === null ? null : <span className="inline-error">{graphError}</span>}
       <div className="toolbar-spacer" />
       <label className="field">
         <span>input</span>

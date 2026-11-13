@@ -14,6 +14,9 @@ const subgraph = defineNode({
   // value is lost. Sibling outputs are intentionally *not* merged into the
   // selection: a single value keeps the parent edge type predictable.
   config: z.object({ graph: z.unknown(), outputPort: z.string().optional() }),
+  defaultConfig: {
+    graph: { schemaVersion: 1, id: 'subgraph', nodes: [], edges: [] },
+  },
   inputs: [flowPort('in'), dataPort('input', jsonValue, false)],
   outputs: [flowPort('out'), dataPort('output', jsonValue)],
   execute: async (ctx) => {

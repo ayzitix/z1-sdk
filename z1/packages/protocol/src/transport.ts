@@ -334,6 +334,11 @@ export function runNotFound(runId: string): JsonRpcFault {
   return new JsonRpcFault(APP_ERRORS.runNotFound, `run not found: ${runId}`, { runId })
 }
 
+/** Fault helper for an unknown persisted graph; the sibling of {@link runNotFound}. */
+export function graphNotFound(id: string): JsonRpcFault {
+  return new JsonRpcFault(APP_ERRORS.graphNotFound, `graph not found: ${id}`, { id })
+}
+
 /**
  * In-memory {@link Transport} pair for tests and in-process servers. Delivery is
  * queued on the microtask queue, so `send` never re-enters the peer that is

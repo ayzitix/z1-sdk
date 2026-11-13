@@ -2,12 +2,15 @@ import type { SequencedEvent } from '@z1/protocol'
 import type { ReactElement } from 'react'
 
 import type { RunEvent } from '../graph.ts'
+import { buildRunTree, formatDuration, outputsFromEvents, shortRunId } from '../runs.ts'
 import { useCanvas } from '../store.ts'
 
 interface EventRow {
   label: string
   path: string
   at: number | null
+  durationMs?: number
+  status?: string
 }
 
 function describeEvent(event: RunEvent): EventRow {
@@ -25,13 +28,19 @@ function describeEvent(event: RunEvent): EventRow {
     case 'run.suspended':
       return { label: 'run.suspended', path: event.path, at: event.at }
     case 'node.started':
-      return { label: 'node.started', path: event.path, at: event.at }
+      return { label: 'node.started', path: event.path, at: event.at, status: 'running' }
     case 'node.completed':
-      return { label: 'node.completed', path: event.path, at: event.at }
+      return {
+        label: 'node.completed',
+        path: event.path,
+        at: event.at,
+        durationMs: event.durationMs,
+        status: 'completed',
+      }
     case 'node.failed':
-      return { label: 'node.failed', path: event.path, at: event.at }
+      return { label: 'node.failed', path: event.path, at: event.at, status: 'failed' }
     case 'node.cached':
-      return { label: 'node.cached', path: event.path, at: event.at }
+      return { label: 'node.cached', path: event.path, at: event.at, status: 'cached' }
     case 'node.stream':
       return { label: `node.stream · ${event.port}`, path: event.path, at: null }
     case 'approval.requested':
@@ -45,17 +54,40 @@ function timeOf(row: EventRow): string {
   return row.at === null ? '—' : new Date(row.at).toLocaleTimeString()
 }
 
-function EventList({ events }: { events: readonly SequencedEvent[] }): ReactElement {
-  if (events.length === 0) return <p className="muted">no events</p>
+interface EventListProps {
+  events: readonly SequencedEvent[]
+  /** When set, a path is clickable and chooses the fork point. */
+  onPickPath?: (path: string) => void
+}
+
+function EventList({ events, onPickPath }: EventListProps): ReactElement {
+  if (events.length === 0) return <p className="muted">no node events</p>
   return (
     <div className="event-list">
       {events.map((entry) => {
         const row = describeEvent(entry.event)
         return (
-          <div className="event-row" key={entry.seq}>
+          <div className="event-row" key={entry.seq} data-testid={`run-event-${entry.seq}`}>
             <span className="event-seq">#{entry.seq}</span>
-            <span className="event-label">{row.label}</span>
-            <code className="event-path">{row.path}</code>
+            <span className="event-label">
+              {row.label}
+              {row.durationMs === undefined ? null : (
+                <span className="event-duration"> · {formatDuration(row.durationMs)}</span>
+              )}
+            </span>
+            {onPickPath === undefined || row.path.length === 0 ? (
+              <code className="event-path">{row.path}</code>
+            ) : (
+              <button
+                type="button"
+                className="event-path event-path-button"
+                title={`fork at ${row.path}`}
+                onClick={() => onPickPath(row.path)}
+              >
+                {row.path}
+              </button>
+            )}
+            <span className="event-status">{row.status ?? ''}</span>
             <span className="event-time">{timeOf(row)}</span>
           </div>
         )
@@ -64,7 +96,16 @@ function EventList({ events }: { events: readonly SequencedEvent[] }): ReactElem
   )
 }
 
-/** Journal run list with fork ancestry, and the selected run's events. */
+/** The timeline shows the per-node execution; run-level rows carry no path. */
+function isNodeTimeline(entry: SequencedEvent): boolean {
+  return (
+    entry.event.type === 'node.started' ||
+    entry.event.type === 'node.completed' ||
+    entry.event.type === 'node.failed'
+  )
+}
+
+/** Journal run list as a fork tree, plus the selected run's detail. */
 export function RunsPanel(): ReactElement {
   const open = useCanvas((state) => state.runsOpen)
   const runs = useCanvas((state) => state.runs)
@@ -72,9 +113,13 @@ export function RunsPanel(): ReactElement {
   const forkInput = useCanvas((state) => state.forkInput)
   const toggleRunsPanel = useCanvas((state) => state.toggleRunsPanel)
   const refreshRuns = useCanvas((state) => state.refreshRuns)
-  const openRun = useCanvas((state) => state.openRun)
+  const selectRun = useCanvas((state) => state.selectRun)
   const setForkInput = useCanvas((state) => state.setForkInput)
   const forkRun = useCanvas((state) => state.forkRun)
+
+  const tree = buildRunTree(runs)
+  const timeline = selectedRun === null ? [] : selectedRun.events.filter(isNodeTimeline)
+  const outputs = selectedRun === null ? {} : outputsFromEvents(selectedRun.events)
 
   return (
     <section className={`runs-panel${open ? ' is-open' : ''}`}>
@@ -91,28 +136,26 @@ export function RunsPanel(): ReactElement {
       {open ? (
         <div className="runs-body">
           <div className="runs-list">
-            {runs.length === 0 ? <p className="muted">no runs yet</p> : null}
-            {runs
-              .slice()
-              .reverse()
-              .map((record) => (
-                <button
-                  type="button"
-                  key={record.runId}
-                  data-testid={`run-row-${record.runId}`}
-                  data-status={record.status}
-                  className={`run-row${selectedRun?.record.runId === record.runId ? ' is-selected' : ''}`}
-                  onClick={() => void openRun(record.runId)}
-                >
-                  <span className="run-id">{record.runId}</span>
-                  <span className={`run-status run-status-${record.status}`}>{record.status}</span>
-                  {record.parentRunId === undefined ? null : (
-                    <span className="run-parent">
-                      ↳ {record.parentRunId}@{record.forkSeq ?? '?'}
-                    </span>
-                  )}
-                </button>
-              ))}
+            {tree.length === 0 ? <p className="muted">no runs yet</p> : null}
+            {tree.map(({ record, depth, parentLabel }) => (
+              <button
+                type="button"
+                key={record.runId}
+                data-testid={`run-row-${record.runId}`}
+                data-status={record.status}
+                data-depth={depth}
+                title={record.runId}
+                style={{ paddingLeft: `${String(6 + depth * 14)}px` }}
+                className={`run-row${selectedRun?.record.runId === record.runId ? ' is-selected' : ''}`}
+                onClick={() => void selectRun(record.runId)}
+              >
+                {depth === 0 ? null : <span className="run-branch">·</span>}
+                <span className="run-id">{shortRunId(record.runId)}</span>
+                <span className={`run-status run-status-${record.status}`}>{record.status}</span>
+                <span className="run-time">{new Date(record.createdAt).toLocaleTimeString()}</span>
+                {parentLabel === null ? null : <span className="run-parent">↳ {parentLabel}</span>}
+              </button>
+            ))}
           </div>
           <div className="runs-events">
             <div className="fork-bar">
@@ -135,7 +178,13 @@ export function RunsPanel(): ReactElement {
             {selectedRun === null ? (
               <p className="muted">Pick a run to see its events.</p>
             ) : (
-              <EventList events={selectedRun.events} />
+              <div className="run-detail" data-testid="run-detail">
+                <EventList events={timeline} onPickPath={setForkInput} />
+                <h4>outputs</h4>
+                <pre className="json-view" data-testid="run-outputs">
+                  {JSON.stringify(outputs, null, 2)}
+                </pre>
+              </div>
             )}
           </div>
         </div>

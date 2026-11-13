@@ -56,6 +56,7 @@ const section = defineNode({
     required: z.boolean().default(false),
     body: z.string(),
   }),
+  defaultConfig: { id: 'custom', slot: 'custom', priority: 0, required: false, body: '' },
   inputs: [dataPort('vars', jsonValue, false)],
   outputs: [dataPort('fragment', fragmentSchema)],
   execute: async (ctx) => {
@@ -80,6 +81,7 @@ const stack = defineNode({
   description: 'Orders, de-duplicates and budgets prompt fragments into one system prompt.',
   category: 'prompt',
   config: z.object({ budgetTokens: z.number().int().positive().optional() }),
+  defaultConfig: { budgetTokens: 6000 },
   inputs: [dataPort('fragments', z.array(jsonValue))],
   outputs: [
     dataPort('text', z.string()),
@@ -119,6 +121,7 @@ const text = defineNode({
   description: 'A literal prompt body plus the content hash of its section.',
   category: 'prompt',
   config: z.object({ text: z.string() }),
+  defaultConfig: { text: '' },
   inputs: [],
   outputs: [dataPort('text', z.string()), dataPort('hash', z.string())],
   execute: async (ctx) => ({
@@ -171,6 +174,7 @@ const context = defineNode({
   description: 'Normalizes memory, tools, autonomy and graph into template vars.',
   category: 'prompt',
   config: z.object({}),
+  defaultConfig: {},
   inputs: [
     dataPort('memory', jsonValue, false),
     dataPort('tools', z.array(toolLineSchema), false),

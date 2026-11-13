@@ -22,7 +22,7 @@ modify the engine.
 branch forks, sandboxed executable modules with an approval panel, the agent
 loop as a real graph, branch-tree memory, a headless server, real
 OpenAI-compatible models and a browser canvas are implemented and tested
-(412 tests). Not implemented yet: editor integration and OS-level sandboxing
+(457 tests). Not implemented yet: editor integration and OS-level sandboxing
 for untrusted modules.
 
 ## Quick start
@@ -60,6 +60,19 @@ Commands: `z1 list`, `z1 validate`, `z1 run`, `z1 tree`, `z1 fork`, `z1 serve`.
 Run state lives in `.z1/runs.db` (SQLite).
 
 ### Canvas
+
+```bash
+pnpm z1 studio               # server + built canvas, one command, opens the browser
+```
+
+`z1 studio` serves the canvas and the WebSocket API from one process and prints
+the URL with the token. Graph documents are stored server-side
+(`.z1/graphs/<id>.json`) with versions; the canvas autosaves, detects write
+conflicts, and can create empty or hello graphs. The inspector shows the last
+run of the selected node (status, duration, outputs, prompt hash, fork), and the
+runs panel is a branch tree with a per-run timeline.
+
+For development with hot reload:
 
 ```bash
 pnpm z1 serve --json          # prints {"url":"ws://…","token":"…"}

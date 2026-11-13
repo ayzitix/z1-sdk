@@ -48,6 +48,7 @@ const fake = {
   runResume: vi.fn(),
   runCancel: vi.fn(),
   moduleList: vi.fn(),
+  graphList: vi.fn(async () => ({ graphs: [] })),
   modulePropose: vi.fn(async () => proposal),
   moduleApprove: vi.fn(async () => installed),
   moduleRollback: vi.fn(async () => installed),
@@ -74,6 +75,7 @@ beforeEach(async () => {
     fake.nodeList,
     fake.runList,
     fake.moduleList,
+    fake.graphList,
     fake.modulePropose,
     fake.moduleApprove,
     fake.moduleRollback,
@@ -90,6 +92,7 @@ beforeEach(async () => {
   fake.runList.mockResolvedValue([])
   fake.nodeList.mockResolvedValue([])
   fake.moduleList.mockResolvedValue({ modules: [], proposals: [proposal] })
+  fake.graphList.mockResolvedValue({ graphs: [] })
   fake.moduleAudit.mockResolvedValue([])
 
   useCanvas.setState({
@@ -109,6 +112,9 @@ beforeEach(async () => {
     issues: [],
     events: [],
     nodeStatus: {},
+    nodeRun: {},
+    runTimeline: [],
+    runDetail: null,
     approvals: [],
     runs: [],
     selectedRun: null,

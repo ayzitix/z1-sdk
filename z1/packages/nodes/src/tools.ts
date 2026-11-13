@@ -16,6 +16,7 @@ const call = defineNode({
   description: 'Invokes a tool and reports failure as data instead of throwing.',
   category: 'tool',
   config: z.object({ name: z.string().optional() }),
+  defaultConfig: { name: 'echo' },
   inputs: [
     flowPort('in'),
     dataPort('name', z.string(), false),

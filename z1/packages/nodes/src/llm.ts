@@ -123,6 +123,7 @@ const model = defineNode({
     credentialRef: z.string().optional(),
     params: z.record(z.string(), jsonValue).optional(),
   }),
+  defaultConfig: { provider: 'mock', model: 'mock-1' },
   inputs: [],
   outputs: [dataPort('model', modelHandleSchema)],
   execute: async (ctx) => {
@@ -144,6 +145,7 @@ const chat = defineNode({
     system: z.string().optional(),
     maxTokens: z.number().int().positive().optional(),
   }),
+  defaultConfig: {},
   inputs: [
     flowPort('in'),
     dataPort('model', modelHandleSchema, false),

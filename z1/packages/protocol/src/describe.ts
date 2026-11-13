@@ -8,7 +8,7 @@
  * @module @z1/protocol/describe
  */
 
-import { portJsonSchema, type NodeDefinition, type NodeRegistry, type PortSpec } from '@z1/node'
+import { configJsonSchema, portJsonSchema, type NodeDefinition, type NodeRegistry, type PortSpec } from '@z1/node'
 
 import type { NodeDescriptor, PortDescriptor } from './types.ts'
 
@@ -26,6 +26,10 @@ export function describeNode(definition: NodeDefinition): NodeDescriptor {
     category: definition.category,
     inputs: definition.inputs.map((port) => describePort(port)),
     outputs: definition.outputs.map((port) => describePort(port)),
+    // A schema-less definition still gets an object to render, not `undefined`,
+    // so the canvas never has to branch on the field's presence.
+    configSchema: configJsonSchema(definition),
+    defaultConfig: definition.defaultConfig ?? {},
   }
 }
 

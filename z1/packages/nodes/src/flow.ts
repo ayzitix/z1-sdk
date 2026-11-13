@@ -23,6 +23,7 @@ const branch = defineNode({
   description: 'Routes the flow token to exactly one branch.',
   category: 'flow',
   config: z.object({}),
+  defaultConfig: {},
   inputs: [flowPort('in'), dataPort('condition', z.boolean())],
   outputs: [flowPort('then'), flowPort('else')],
   execute: async (ctx) =>
@@ -47,6 +48,12 @@ const loop = defineNode({
     body: z.unknown(),
     maxIterations: z.number().int().min(1).max(10_000),
   }),
+  // A loop body starts as an empty graph: it is still a valid graph, and the
+  // caps stay inside the schema's own bounds.
+  defaultConfig: {
+    body: { schemaVersion: 1, id: 'body', title: 'loop body', nodes: [], edges: [] },
+    maxIterations: 3,
+  },
   inputs: [flowPort('in'), dataPort('seed', jsonValue, false)],
   outputs: [flowPort('out'), dataPort('result', jsonValue), dataPort('iterations', z.number())],
   execute: async (ctx) => {
@@ -91,6 +98,9 @@ const map = defineNode({
     body: z.unknown(),
     maxItems: z.number().int().positive().optional(),
   }),
+  defaultConfig: {
+    body: { schemaVersion: 1, id: 'body', title: 'map body', nodes: [], edges: [] },
+  },
   inputs: [flowPort('in'), dataPort('items', z.array(jsonValue))],
   outputs: [flowPort('out'), dataPort('results', z.array(jsonValue))],
   execute: async (ctx) => {
