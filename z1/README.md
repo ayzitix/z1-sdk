@@ -34,7 +34,7 @@ declares empty `nodes` and a `services` list:
   "engines": { "z1": ">=0.1.0" },
   "entry": "index.js",
   "nodes": [],
-  "services": [{ "id": "llm", "kind": "llm", "trusted": true }]
+  "services": [{ "id": "llm", "kind": "llm", "mode": "worker" }]
 }
 ```
 
@@ -42,6 +42,8 @@ declares empty `nodes` and a `services` list:
 `{ moduleId, version, directory, config, log, get }`:
 
 ```js
+export const nodes = [] // required by the worker bootstrap
+
 export const services = {
   llm: (ctx) => ({
     async chat(request, onDelta) {
@@ -55,17 +57,20 @@ export const services = {
 }
 ```
 
-**Security:** service modules run **in-process**, not in the node worker. An
-approved service module has the host process's full reach, so approval is a
-statement that you trust its code. Manifests must declare `trusted: true`;
-there is no sandbox in v1.
+**Security:** `mode` defaults to `worker`, so a service runs in the module's
+child process next to its nodes and reaches the host only through the
+capability broker — declared `fs`/`net` capabilities apply, and an approval
+request from worker code is refused. `mode: 'host'` imports the service into
+the host process and therefore requires `trusted: true`; that is the escape
+hatch for code you are willing to run with full host reach. A legacy
+declaration with `trusted: true` and no `mode` is a host service.
 
 Run the example:
 
 ```sh
 pnpm z1 module propose z1/examples/modules/echo-llm --modules-dir /tmp/z1-modules
 pnpm z1 module approve com.example.echo-llm --modules-dir /tmp/z1-modules
-pnpm z1 module list --modules-dir /tmp/z1-modules   # shows `services: llm`
+pnpm z1 module list --modules-dir /tmp/z1-modules   # shows `services: llm(worker)`
 
 pnpm z1 run --template agent.loop --message 'hello' \
   --json --db /tmp/z1-modules.db --modules-dir /tmp/z1-modules
@@ -73,6 +78,7 @@ pnpm z1 run --template agent.loop --message 'hello' \
 
 The answer is `echo-llm: hello`. Precedence per run is
 `overrides > approved service module > built-in default`; the highest module
-version wins when several provide the same kind. Pass `--no-service-modules`
-(or `Z1_SERVICE_MODULES=0`, or `"useServiceModules": false` in
-`z1.config.json`) to ignore all service modules and fall back to the built-ins.
+version wins when several provide the same kind (ties keep the lower module
+id, across both modes). Pass `--no-service-modules` (or `Z1_SERVICE_MODULES=0`,
+or `"useServiceModules": false` in `z1.config.json`) to ignore all service
+modules and fall back to the built-ins.

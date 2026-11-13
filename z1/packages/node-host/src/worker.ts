@@ -9,6 +9,7 @@
  * every outbound result is checked to be plain JSON before it crosses IPC.
  */
 import { pathToFileURL } from 'node:url'
+import { dirname } from 'node:path'
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -73,6 +74,21 @@ interface ModuleContext {
 interface ModuleNode {
   readonly info: WorkerNodeInfo
   readonly execute: (ctx: ModuleContext) => unknown
+}
+
+/** The `ctx` handed to every factory exported in the entry's `services`. */
+interface ModuleServiceContext {
+  readonly moduleId: string
+  readonly version: string
+  readonly directory: string
+  readonly config: Record<string, unknown>
+  log(level: WorkerLogLevel, message: string, data?: unknown): void
+  get(name: string): unknown
+  fs: {
+    read(path: string): Promise<string>
+    write(path: string, data: string): Promise<void>
+  }
+  net: { request(request: NetRequest): Promise<NetResponse> }
 }
 
 interface PendingCall {
@@ -275,11 +291,115 @@ exported.forEach((raw: unknown, index: number) => {
 })
 
 const info = [...nodes.values()].map((node) => node.info)
-send({ t: 'ready', nodes: info })
 
+/** Optional argv[3] metadata the host passes alongside the entry path. */
+interface EntryMetadata {
+  moduleId: string
+  version: string
+  config: Record<string, unknown>
+}
+
+function readEntryMetadata(raw: string | undefined): EntryMetadata {
+  const metadata: EntryMetadata = { moduleId: 'unknown', version: '0.0.0', config: {} }
+  if (raw === undefined || raw.length === 0) return metadata
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return metadata
+  }
+  if (!isRecord(parsed)) return metadata
+  const moduleId = parsed['moduleId']
+  if (typeof moduleId === 'string' && moduleId.length > 0) metadata.moduleId = moduleId
+  const version = parsed['version']
+  if (typeof version === 'string' && version.length > 0) metadata.version = version
+  const config = parsed['config']
+  if (isRecord(config)) metadata.config = config
+  return metadata
+}
+
+const metadata = readEntryMetadata(process.argv[3])
+const moduleDirectory = dirname(entry)
+
+function serviceLog(
+  serviceId: string,
+  level: WorkerLogLevel,
+  message: string,
+  data?: unknown,
+): void {
+  const payload: WorkerToHost = {
+    t: 'log',
+    id: 0,
+    nodeId: `service:${serviceId}`,
+    level: LEVELS.includes(level) ? level : 'info',
+    message,
+  }
+  if (data !== undefined) payload.data = data
+  try {
+    send(payload)
+  } catch {
+    // The host is gone; logs are diagnostics only.
+  }
+}
+
+function serviceContext(
+  serviceId: string,
+  started: Map<string, Record<string, unknown>>,
+): ModuleServiceContext {
+  const invoke = (method: string, args: unknown): Promise<unknown> => call(0, method, args)
+  return {
+    moduleId: metadata.moduleId,
+    version: metadata.version,
+    directory: moduleDirectory,
+    config: metadata.config,
+    log: (level, message, data) => serviceLog(serviceId, level, message, data),
+    get: (name) => started.get(name),
+    fs: {
+      read: (path) => invoke('fs.read', { path }) as Promise<string>,
+      write: (path, data) => invoke('fs.write', { path, data }) as Promise<void>,
+    },
+    net: {
+      request: (netRequest) => invoke('net.request', netRequest) as Promise<NetResponse>,
+    },
+  }
+}
+
+const services = new Map<string, Record<string, unknown>>()
+// Declared before the factories run so a service may use ctx.fs/net while it is
+// still being constructed.
 const executions = new Map<number, AbortController>()
 const pendingCalls = new Map<number, PendingCall>()
 let callSequence = 0
+const rawServices = isRecord(loaded) ? loaded['services'] : undefined
+if (rawServices !== undefined) {
+  if (!isRecord(rawServices)) {
+    fatal('module entry `services` must be an object of factory functions')
+  }
+  for (const [serviceId, factory] of Object.entries(rawServices)) {
+    if (serviceId.length === 0) fatal('module entry exports a service with an empty id')
+    if (typeof factory !== 'function') {
+      fatal(`service "${serviceId}" must be a factory function (ctx) => instance`)
+    }
+    let instance: unknown
+    try {
+      instance = await (factory as (ctx: ModuleServiceContext) => unknown)(
+        serviceContext(serviceId, services),
+      )
+    } catch (error) {
+      fatal(`service "${serviceId}" failed to start: ${errorText(error)}`)
+    }
+    if (!isRecord(instance)) {
+      fatal(`service "${serviceId}" factory did not return an object`)
+    }
+    services.set(serviceId, instance)
+  }
+}
+
+send({
+  t: 'ready',
+  nodes: info,
+  services: [...services.keys()].map((id) => ({ id })),
+})
 
 function call(
   executionId: number,
@@ -393,9 +513,89 @@ async function runNode(
   }
 }
 
+/** Service call ids in flight, and those the host cancelled. */
+const activeServiceCalls = new Set<number>()
+const cancelledServices = new Set<number>()
+
+function sendServiceDelta(id: number, delta: unknown): void {
+  send({ t: 'service-delta', id, delta: toJsonValue(delta) })
+}
+
+function dropCancelled(serviceId: string, method: string, id: number): boolean {
+  if (!cancelledServices.delete(id)) return false
+  serviceLog(
+    serviceId,
+    'debug',
+    `service call "${serviceId}.${method}" was cancelled; result dropped`,
+  )
+  return true
+}
+
+async function runServiceCall(
+  id: number,
+  serviceId: string,
+  method: string,
+  rawArgs: unknown,
+): Promise<void> {
+  activeServiceCalls.add(id)
+  try {
+    const instance = services.get(serviceId)
+    if (instance === undefined) {
+      throw new Error(`module entry does not export service "${serviceId}"`)
+    }
+    const member = instance[method]
+    if (typeof member !== 'function') {
+      throw new Error(`service "${serviceId}" has no method "${method}"`)
+    }
+    const callable = member as (...callArgs: unknown[]) => unknown
+    const args: unknown[] = Array.isArray(rawArgs) ? [...rawArgs] : []
+    // A streaming method declares it by taking an extra parameter.
+    if (method === 'chat' && callable.length > args.length) {
+      args.push((delta: unknown) => sendServiceDelta(id, delta))
+    }
+
+    const produced = await Reflect.apply(callable, instance, args)
+    if (dropCancelled(serviceId, method, id)) return
+    const value = produced === undefined ? null : toJsonValue(produced)
+    send({ t: 'service-result', id, value })
+  } catch (error) {
+    if (dropCancelled(serviceId, method, id)) return
+    const payload: WorkerToHost = {
+      t: 'service-error',
+      id,
+      message: errorText(error),
+    }
+    if (error instanceof Error && typeof error.stack === 'string') payload.stack = error.stack
+    try {
+      send(payload)
+    } catch {
+      // The host is gone; nothing left to report to.
+    }
+  } finally {
+    activeServiceCalls.delete(id)
+  }
+}
+
 process.on('message', (raw: unknown) => {
   if (!isRecord(raw)) return
   const type = raw['t']
+
+  if (type === 'service-call') {
+    const id = raw['id']
+    const serviceId = raw['serviceId']
+    const method = raw['method']
+    if (typeof id !== 'number' || typeof serviceId !== 'string' || typeof method !== 'string') {
+      return
+    }
+    void runServiceCall(id, serviceId, method, raw['args'])
+    return
+  }
+
+  if (type === 'service-cancel') {
+    const id = raw['id']
+    if (typeof id === 'number' && activeServiceCalls.has(id)) cancelledServices.add(id)
+    return
+  }
 
   if (type === 'execute') {
     const id = raw['id']

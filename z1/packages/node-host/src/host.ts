@@ -21,6 +21,7 @@ import type {
   HostToWorker,
   WorkerLogLevel,
   WorkerNodeInfo,
+  WorkerServiceInfo,
 } from './protocol.ts'
 
 const PACKAGE = '@z1/node-host'
@@ -86,6 +87,8 @@ export interface WorkerHostOptions {
   entry: string
   /** Node ids the manifest declares; exported ids must be a subset. */
   manifestNodeIds: string[]
+  /** Service ids the manifest declares; reported ids must be a subset. */
+  manifestServiceIds?: string[]
   capabilities: ModuleCapabilities
   services: WorkerHostServices
   /** Identity reported with capability denials; the store knows it. */
@@ -95,6 +98,19 @@ export interface WorkerHostOptions {
   timeoutMs?: number
   maxMemoryMb?: number
   env?: Record<string, string>
+}
+
+/** What `startAll` reports: the nodes and services an entry exports. */
+export interface StartedWorker {
+  nodes: WorkerNodeInfo[]
+  services: WorkerServiceInfo[]
+}
+
+/** Streaming and timeout knobs for {@link ModuleWorker.serviceCall}. */
+export interface ServiceCallOptions {
+  onDelta?: (delta: unknown) => void
+  /** Defaults to 120_000 ms. */
+  timeoutMs?: number
 }
 
 interface PendingExecution {
@@ -111,12 +127,82 @@ interface PendingExecution {
   settled: boolean
 }
 
+interface PendingServiceCall {
+  readonly id: number
+  readonly serviceId: string
+  readonly method: string
+  readonly onDelta: ((delta: unknown) => void) | undefined
+  readonly resolve: (value: unknown) => void
+  readonly reject: (error: Error) => void
+  timer: NodeJS.Timeout | undefined
+  settled: boolean
+}
+
 interface SendResult {
   ok: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Reject service call arguments that cannot survive structured clone as JSON.
+ * The values travel through IPC, so non-JSON shapes are a caller bug.
+ */
+function assertServiceArgs(value: unknown, where: string, seen: Set<object> = new Set()): void {
+  if (value === null) return
+  const kind = typeof value
+  if (kind === 'string' || kind === 'boolean') return
+  if (kind === 'number') {
+    if (!Number.isFinite(value as number)) {
+      throw new Error(`${where} contains a non-finite number`)
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new Error(`${where} contains a cycle`)
+    seen.add(value)
+    try {
+      value.forEach((item, index) => assertServiceArgs(item, `${where}[${index}]`, seen))
+    } finally {
+      seen.delete(value)
+    }
+    return
+  }
+  if (isRecord(value)) {
+    if (seen.has(value)) throw new Error(`${where} contains a cycle`)
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new Error(`${where} contains an object that is not a plain record`)
+    }
+    seen.add(value)
+    try {
+      for (const [key, entry] of Object.entries(value)) {
+        assertServiceArgs(entry, `${where}.${key}`, seen)
+      }
+    } finally {
+      seen.delete(value)
+    }
+    return
+  }
+  throw new Error(`${where} contains a ${kind} that is not JSON`)
+}
+
+/** Validate the untrusted `services` list from the `ready` payload. */
+function parseServiceInfo(raw: unknown, index: number): WorkerServiceInfo {
+  if (!isRecord(raw)) throw new Error(`services[${index}] must be an object`)
+  const id = raw['id']
+  if (typeof id !== 'string' || id.trim().length === 0) {
+    throw new Error(`services[${index}].id is missing`)
+  }
+  return { id }
+}
+
+function parseServiceInfos(raw: unknown): WorkerServiceInfo[] {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) throw new Error('services must be an array')
+  return raw.map((service, index) => parseServiceInfo(service, index))
 }
 
 function errorMessage(error: unknown): string {
@@ -304,17 +390,20 @@ export class ModuleWorker {
   readonly #bootstrap: string
   readonly #bootstrapPackage: string
   readonly #executions = new Map<number, PendingExecution>()
+  readonly #serviceCalls = new Map<number, PendingServiceCall>()
   #child: ChildProcess | undefined
   #state: 'idle' | 'starting' | 'ready' | 'dead' | 'disposed' = 'idle'
   /** Identity used only for denial reporting; never trusted for policy. */
   #moduleId: string
   #moduleVersion: string
   #nodes: readonly WorkerNodeInfo[] = []
-  #starting: Promise<readonly WorkerNodeInfo[]> | undefined
-  #startResolve: ((nodes: readonly WorkerNodeInfo[]) => void) | undefined
+  #workerServices: readonly WorkerServiceInfo[] = []
+  #starting: Promise<StartedWorker> | undefined
+  #startResolve: ((started: StartedWorker) => void) | undefined
   #startReject: ((error: Error) => void) | undefined
   #handshakeTimer: NodeJS.Timeout | undefined
   #sequence = 0
+  #serviceSequence = 0
   #disposePromise: Promise<void> | undefined
 
   constructor(options: WorkerHostOptions) {
@@ -340,11 +429,26 @@ export class ModuleWorker {
     return this.#nodes
   }
 
+  /** Services reported by the child's `ready` handshake. */
+  get services(): readonly WorkerServiceInfo[] {
+    return this.#workerServices
+  }
+
   start(): Promise<readonly WorkerNodeInfo[]> {
+    return this.startAll().then((started) => started.nodes)
+  }
+
+  /** `start` plus the service ids the entry exports. */
+  startAll(): Promise<StartedWorker> {
     if (this.#state === 'disposed') {
       return Promise.reject(new Error('module worker has been disposed'))
     }
-    if (this.#state === 'ready') return Promise.resolve(this.#nodes)
+    if (this.#state === 'ready') {
+      return Promise.resolve({
+        nodes: [...this.#nodes],
+        services: [...this.#workerServices],
+      })
+    }
     if (this.#starting !== undefined) return this.#starting
 
     const entryPath = resolve(this.#moduleDir, this.#options.entry)
@@ -352,7 +456,7 @@ export class ModuleWorker {
       return Promise.reject(new Error(`module entry not found: ${entryPath}`))
     }
 
-    const promise = new Promise<readonly WorkerNodeInfo[]>((resolveReady, rejectReady) => {
+    const promise = new Promise<StartedWorker>((resolveReady, rejectReady) => {
       this.#startResolve = resolveReady
       this.#startReject = rejectReady
     })
@@ -395,12 +499,94 @@ export class ModuleWorker {
     return this.#execute(nodeId, config, inputs, seed, signal, hooks)
   }
 
+  /**
+   * Call a method on a service the entry exports, inside the child process.
+   *
+   * Numeric ids are internal; the returned value is whatever the method
+   * returned (JSON-safe, `undefined` normalised to `null` by the child).
+   */
+  serviceCall(
+    serviceId: string,
+    method: string,
+    args: readonly unknown[],
+    options: ServiceCallOptions = {},
+  ): Promise<unknown> {
+    if (this.#state === 'disposed') {
+      return Promise.reject(new Error('module worker has been disposed'))
+    }
+    if (this.#state !== 'ready') {
+      return Promise.reject(
+        new Error(
+          this.#state === 'dead'
+            ? 'module worker exited; call start() to respawn'
+            : 'module worker is not ready; call start() first',
+        ),
+      )
+    }
+    const child = this.#child
+    if (child === undefined) {
+      return Promise.reject(new Error('module worker exited; call start() to respawn'))
+    }
+    try {
+      assertServiceArgs(args, `serviceCall("${serviceId}.${method}") args`)
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)))
+    }
+
+    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const id = ++this.#serviceSequence
+
+    return new Promise<unknown>((resolveValue, rejectValue) => {
+      const pending: PendingServiceCall = {
+        id,
+        serviceId,
+        method,
+        onDelta: options.onDelta,
+        resolve: resolveValue,
+        reject: rejectValue,
+        timer: undefined,
+        settled: false,
+      }
+      this.#serviceCalls.set(id, pending)
+
+      pending.timer = setTimeout(() => {
+        if (pending.settled) return
+        this.#settleServiceCall(pending, {
+          ok: false,
+          error: new Error(
+            `service call "${serviceId}.${method}" exceeded its ${timeoutMs}ms timeout`,
+          ),
+        })
+        this.#send({ t: 'service-cancel', id })
+      }, timeoutMs)
+      pending.timer.unref?.()
+
+      const sent = this.#send({
+        t: 'service-call',
+        id,
+        serviceId,
+        method,
+        args: [...args],
+      })
+      if (!sent.ok) {
+        this.#settleServiceCall(pending, {
+          ok: false,
+          error: new Error('module worker exited before the service call could be dispatched'),
+        })
+      }
+    })
+  }
+
   /** Ask the child to abort and kill it after the 2 s grace period. */
   cancel(reason = 'module worker cancelled'): void {
     if (this.#child === undefined) return
     this.#send({ t: 'cancel', reason })
     for (const execution of [...this.#executions.values()]) {
       this.#abortExecution(execution, reason)
+    }
+    for (const pending of [...this.#serviceCalls.values()]) {
+      this.#send({ t: 'service-cancel', id: pending.id })
+      this.#settleServiceCall(pending, { ok: false, error: new Error(reason) })
     }
   }
 
@@ -419,6 +605,9 @@ export class ModuleWorker {
     this.#failStart(failure)
     for (const execution of [...this.#executions.values()]) {
       this.#settle(execution, { ok: false, error: failure })
+    }
+    for (const pending of [...this.#serviceCalls.values()]) {
+      this.#settleServiceCall(pending, { ok: false, error: failure })
     }
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       try {
@@ -462,12 +651,21 @@ export class ModuleWorker {
     if (this.#options.maxMemoryMb !== undefined) {
       args.push(`--max-old-space-size=${Math.trunc(this.#options.maxMemoryMb)}`)
     }
-    args.push(this.#bootstrap, entryPath)
+    args.push(
+      this.#bootstrap,
+      entryPath,
+      JSON.stringify({
+        moduleId: this.#moduleId,
+        version: this.#moduleVersion,
+        config: {},
+      }),
+    )
 
     const env: Record<string, string> = { PATH: process.env['PATH'] ?? '' }
     for (const [key, value] of Object.entries(this.#options.env ?? {})) env[key] = value
 
     this.#nodes = []
+    this.#workerServices = []
     this.#state = 'starting'
 
     const child = spawn(process.execPath, args, {
@@ -529,7 +727,7 @@ export class ModuleWorker {
     const type = raw['t']
 
     if (type === 'ready') {
-      this.#handleReady(child, raw['nodes'])
+      this.#handleReady(child, raw['nodes'], raw['services'])
       return
     }
     if (type === 'fatal') {
@@ -538,6 +736,37 @@ export class ModuleWorker {
         new Error(`module entry failed: ${typeof message === 'string' ? message : 'unknown error'}`),
       )
       this.#killChild(child)
+      return
+    }
+
+    if (type === 'service-result') {
+      const id = raw['id']
+      if (typeof id !== 'number') return
+      const pending = this.#serviceCalls.get(id)
+      if (pending === undefined) return
+      this.#settleServiceCall(pending, { ok: true, value: raw['value'] })
+      return
+    }
+    if (type === 'service-error') {
+      const id = raw['id']
+      if (typeof id !== 'number') return
+      const pending = this.#serviceCalls.get(id)
+      if (pending === undefined) return
+      const message = raw['message']
+      this.#settleServiceCall(pending, {
+        ok: false,
+        error: new Error(
+          typeof message === 'string'
+            ? message
+            : `service call "${pending.serviceId}.${pending.method}" failed`,
+        ),
+      })
+      return
+    }
+    if (type === 'service-delta') {
+      const id = raw['id']
+      if (typeof id !== 'number') return
+      this.#serviceCalls.get(id)?.onDelta?.(raw['delta'])
       return
     }
 
@@ -598,7 +827,7 @@ export class ModuleWorker {
     }
   }
 
-  #handleReady(child: ChildProcess, raw: unknown): void {
+  #handleReady(child: ChildProcess, raw: unknown, rawServices: unknown): void {
     if (this.#child !== child || this.#state !== 'starting') return
     if (!Array.isArray(raw)) {
       this.#failStart(new Error('module worker sent an invalid ready payload'))
@@ -611,6 +840,15 @@ export class ModuleWorker {
       nodes = raw.map((node, index) => parseNodeInfo(node, index))
     } catch (error) {
       this.#failStart(new Error(`module worker sent invalid node descriptors: ${errorMessage(error)}`))
+      this.#killChild(child)
+      return
+    }
+
+    let services: WorkerServiceInfo[]
+    try {
+      services = parseServiceInfos(rawServices)
+    } catch (error) {
+      this.#failStart(new Error(`module worker sent invalid service descriptors: ${errorMessage(error)}`))
       this.#killChild(child)
       return
     }
@@ -628,14 +866,35 @@ export class ModuleWorker {
       }
     }
 
+    const declaredServices = this.#options.manifestServiceIds
+    const seen = new Set<string>()
+    for (const service of services) {
+      if (seen.has(service.id)) {
+        this.#failStart(new Error(`module exports service "${service.id}" more than once`))
+        this.#killChild(child)
+        return
+      }
+      seen.add(service.id)
+      if (declaredServices !== undefined && !declaredServices.includes(service.id)) {
+        this.#failStart(
+          new Error(
+            `module exports service "${service.id}" which the manifest does not declare`,
+          ),
+        )
+        this.#killChild(child)
+        return
+      }
+    }
+
     this.#clearHandshake()
     this.#nodes = nodes
+    this.#workerServices = services
     this.#state = 'ready'
     const resolveReady = this.#startResolve
     this.#startResolve = undefined
     this.#startReject = undefined
     this.#starting = undefined
-    resolveReady?.(nodes)
+    resolveReady?.({ nodes: [...nodes], services: [...services] })
   }
 
   #failStart(error: Error): void {
@@ -664,6 +923,7 @@ export class ModuleWorker {
     if (this.#child !== child) return
     this.#child = undefined
     this.#nodes = []
+    this.#workerServices = []
     const wasStarting = this.#state === 'starting'
     if (this.#state !== 'disposed') this.#state = 'dead'
     this.#clearHandshake()
@@ -678,6 +938,14 @@ export class ModuleWorker {
       this.#settle(execution, {
         ok: false,
         error: new Error(`${suffix} while running module node "${execution.nodeId}"`),
+      })
+    }
+    for (const pending of [...this.#serviceCalls.values()]) {
+      this.#settleServiceCall(pending, {
+        ok: false,
+        error: new Error(
+          `${suffix} while waiting for service call "${pending.serviceId}.${pending.method}"`,
+        ),
       })
     }
   }
@@ -811,6 +1079,19 @@ export class ModuleWorker {
     this.#executions.delete(execution.id)
     if (outcome.ok) execution.resolve(outcome.outputs)
     else execution.reject(outcome.error)
+  }
+
+  /** Settle one service call: clear its timer, forget it, then resolve/reject. */
+  #settleServiceCall(
+    pending: PendingServiceCall,
+    outcome: { ok: true; value: unknown } | { ok: false; error: Error },
+  ): void {
+    if (pending.settled) return
+    pending.settled = true
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
+    this.#serviceCalls.delete(pending.id)
+    if (outcome.ok) pending.resolve(outcome.value)
+    else pending.reject(outcome.error)
   }
 
   async #handleCall(

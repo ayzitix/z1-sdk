@@ -21,7 +21,12 @@ import {
   type GraphDocument,
   type ValidationIssue,
 } from '@z1/graph'
-import { ModuleStore, type ModuleCapabilities, type ModuleServiceDeclaration } from '@z1/module'
+import {
+  ModuleStore,
+  serviceMode,
+  type ModuleCapabilities,
+  type ModuleServiceDeclaration,
+} from '@z1/module'
 import type { SequencedEvent } from '@z1/journal'
 import {
   MOCK_PROVIDER,
@@ -439,9 +444,9 @@ function capabilitySummary(capabilities: ModuleCapabilities | undefined): string
   return parts.length > 0 ? parts.join('  ') : 'none'
 }
 
-/** `services: llm, tools`; absent when the module declares none. */
+/** `services: llm(worker), tools(host)`; absent when the module declares none. */
 function serviceSummary(services: readonly ModuleServiceDeclaration[] | undefined): string {
-  return (services ?? []).map((service) => service.kind).join(', ')
+  return (services ?? []).map((service) => `${service.kind}(${serviceMode(service)})`).join(', ')
 }
 
 function splitModuleSpec(spec: string): { moduleId: string; version?: string } {

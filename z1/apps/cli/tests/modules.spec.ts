@@ -477,7 +477,7 @@ describe('service modules', () => {
       serviceModulesDir,
     ])
     expect(proposed.code).toBe(0)
-    expect(proposed.out).toContain('services: llm')
+    expect(proposed.out).toContain('services: llm(worker)')
 
     const approved = await run([
       'module',
@@ -498,7 +498,7 @@ describe('service modules', () => {
       serviceModulesDir,
     ])
     expect(listed.code).toBe(0)
-    expect(listed.out).toContain('services: llm')
+    expect(listed.out).toContain('services: llm(worker)')
 
     const json = await run([
       'module',
@@ -509,9 +509,9 @@ describe('service modules', () => {
     ])
     const modules = JSON.parse(json.out.trimEnd()) as {
       id: string
-      services: { kind: string }[]
+      services: { kind: string; mode?: string }[]
     }[]
-    expect(modules[0]?.services).toEqual([{ id: 'llm', kind: 'llm', trusted: true }])
+    expect(modules[0]?.services).toEqual([{ id: 'llm', kind: 'llm', mode: 'worker' }])
   })
 
   test('an approved service module answers the agent loop', async () => {

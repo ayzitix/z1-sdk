@@ -28,7 +28,7 @@ export interface RuntimeConfig {
   live: boolean
   /** Load active module declarations and start their workers on a run. */
   useModules: boolean
-  /** Start trusted in-process service modules (`Z1_SERVICE_MODULES`). */
+  /** Start services of active modules, in-process or in a worker (`Z1_SERVICE_MODULES`). */
   useServiceModules: boolean
   /** Give runs branch memory over the journal. */
   useMemory: boolean

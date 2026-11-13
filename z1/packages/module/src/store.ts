@@ -14,7 +14,7 @@ import { AuditLog } from './audit.ts'
 import type { AuditEntry } from './audit.ts'
 import { canonicalJson } from './canonical.ts'
 import { copyPayload, directoryIntegrity } from './integrity.ts'
-import { compareVersions, ModuleManifestError, parseManifest } from './manifest.ts'
+import { compareVersions, ModuleManifestError, parseManifest, serviceMode } from './manifest.ts'
 import { writeFileAtomic } from './fsutil.ts'
 import type {
   ModuleCapabilities,
@@ -97,19 +97,37 @@ function isServiceKind(value: unknown): value is ModuleServiceDeclaration['kind'
   )
 }
 
+/** One persisted declaration; `undefined` when the grant entry is malformed. */
+function toGrantService(entry: unknown): ModuleServiceDeclaration | undefined {
+  if (!isRecord(entry)) return undefined
+  const id = entry['id']
+  const kind = entry['kind']
+  if (typeof id !== 'string' || id.length === 0 || !isServiceKind(kind)) return undefined
+
+  const mode = entry['mode']
+  const trusted = entry['trusted']
+  if (mode !== undefined && mode !== 'worker' && mode !== 'host') return undefined
+  if (trusted !== undefined && typeof trusted !== 'boolean') return undefined
+
+  const declaration: ModuleServiceDeclaration = { id, kind }
+  if (mode !== undefined) declaration.mode = mode
+  if (trusted !== undefined) declaration.trusted = trusted
+  // A grant stays readable only while it still obeys the manifest's safety
+  // rules; a legacy `trusted: true` with no mode remains a host service.
+  if (serviceMode(declaration) === 'host' && trusted !== true) return undefined
+  if (mode === 'worker' && trusted === true) return undefined
+  return declaration
+}
+
 /** Missing services (pre-R3 grants) is `[]`; a malformed array is a bad grant. */
 function toGrantServices(value: unknown): ModuleServiceDeclaration[] | undefined {
   if (value === undefined) return []
   if (!Array.isArray(value)) return undefined
   const services: ModuleServiceDeclaration[] = []
   for (const entry of value) {
-    if (!isRecord(entry)) return undefined
-    const id = entry['id']
-    const kind = entry['kind']
-    if (typeof id !== 'string' || !isServiceKind(kind) || entry['trusted'] !== true) {
-      return undefined
-    }
-    services.push({ id, kind, trusted: true })
+    const declaration = toGrantService(entry)
+    if (declaration === undefined) return undefined
+    services.push(declaration)
   }
   return services
 }

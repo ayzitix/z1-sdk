@@ -20,8 +20,13 @@ export interface WorkerNodeInfo {
   outputs: DeclaredPort[]
 }
 
+/** Exported service descriptor reported in the `ready` handshake. */
+export interface WorkerServiceInfo {
+  id: string
+}
+
 export type WorkerToHost =
-  | { t: 'ready'; nodes: WorkerNodeInfo[] }
+  | { t: 'ready'; nodes: WorkerNodeInfo[]; services: WorkerServiceInfo[] }
   | { t: 'fatal'; message: string }
   | {
       t: 'log'
@@ -36,6 +41,9 @@ export type WorkerToHost =
   | { t: 'delta'; callId: number; delta: unknown }
   | { t: 'result'; id: number; outputs: unknown }
   | { t: 'error'; id: number; message: string; stack?: string }
+  | { t: 'service-result'; id: number; value: unknown }
+  | { t: 'service-error'; id: number; message: string; stack?: string }
+  | { t: 'service-delta'; id: number; delta: unknown }
 
 export type HostToWorker =
   | {
@@ -50,3 +58,11 @@ export type HostToWorker =
   | { t: 'delta'; callId: number; delta: unknown }
   | { t: 'call-result'; callId: number; ok: true; value: unknown }
   | { t: 'call-result'; callId: number; ok: false; error: string }
+  | {
+      t: 'service-call'
+      id: number
+      serviceId: string
+      method: string
+      args: unknown
+    }
+  | { t: 'service-cancel'; id: number }

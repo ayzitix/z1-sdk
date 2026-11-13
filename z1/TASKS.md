@@ -113,8 +113,9 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 
 ## M9 — services in modules and the audit fixes
 
-- [x] R3 service modules: manifest `services`, trusted v1, `ModuleServiceRuntime`,
-  bootstrap precedence (`overrides > service module > built-in`), echo-llm example.
+- [x] R3 service modules: manifest `services` with `mode`/`trusted`, worker-mode
+  adapters, `ModuleServiceRuntime` for host mode, bootstrap precedence
+  (`overrides > service module > built-in`), echo-llm example.
 - [x] Server fork uses own sequence numbers; journal rejects unknown runs and
   past-end forks.
 - [x] Resume without repeating the input works; different input still fails.
@@ -124,3 +125,14 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   require `--template`.
 - [x] Config env flags, duplicate provider rejection, `beginRun`/`close` race,
   failed listen closes the runtime, runId reuse conflict.
+
+## M10 — services in the sandbox
+
+- [x] T45 worker RPC for services: call/result/delta/cancel, timeout, crash
+  rejection, service-only modules.
+- [x] T46 manifest `mode: worker|host` (worker default, host requires
+  `trusted: true`), proxy adapters for llm/tools/fs/artifacts/memory,
+  bootstrap starts worker services, pid-isolation and crash tests.
+- Known limitations: a module with nodes + worker services starts two child
+  processes; worker `dispose()` is not called (the process is killed); worker
+  services cannot request approval; service selection is cached per runtime.

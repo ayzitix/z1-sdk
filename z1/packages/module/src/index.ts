@@ -7,6 +7,7 @@ export type {
   ModuleNodeDeclaration,
   ModuleServiceDeclaration,
   ModuleServiceKind,
+  ModuleServiceMode,
 } from './types.ts'
 export type { ManifestIssue } from './manifest.ts'
 export {
@@ -14,6 +15,7 @@ export {
   compareVersions,
   manifestDigest,
   parseManifest,
+  serviceMode,
 } from './manifest.ts'
 export type {
   InstalledModule,

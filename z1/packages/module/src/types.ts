@@ -19,8 +19,9 @@ export interface ModuleManifest {
   entry: string
   nodes: ModuleNodeDeclaration[]
   /**
-   * Ambient services this module provides. v1 only accepts trusted in-process
-   * modules; see {@link ModuleServiceDeclaration}.
+   * Ambient services this module provides. Defaults to sandboxed workers; a
+   * host-mode service additionally requires `trusted: true`. See
+   * {@link ModuleServiceDeclaration}.
    */
   services?: ModuleServiceDeclaration[]
   capabilities?: ModuleCapabilities
@@ -30,17 +31,25 @@ export interface ModuleManifest {
 /** The runtime service slots a module may replace. */
 export type ModuleServiceKind = 'llm' | 'tools' | 'fs' | 'artifacts' | 'memory'
 
+/** Where a declared service runs. */
+export type ModuleServiceMode = 'worker' | 'host'
+
 /**
- * A service a module provides to the host process.
+ * A service a module provides to the host.
  *
- * v1 runs service modules in-process, so `trusted` must be literally `true`:
- * the grant is the security boundary, not a worker sandbox.
+ * `worker` services run in the same child process as module nodes, behind the
+ * capability broker; `host` services are imported into the host process and
+ * rely on the approval grant alone. `mode` defaults to `host` when `trusted` is
+ * literally `true` (the pre-mode spelling) and to `worker` otherwise.
  */
 export interface ModuleServiceDeclaration {
   /** Unique within this module, e.g. `llm` or `my-tools`. */
   id: string
   kind: ModuleServiceKind
-  trusted: true
+  /** Effective mode is `mode ?? (trusted === true ? 'host' : 'worker')`. */
+  mode?: ModuleServiceMode
+  /** Required `true` for host services; rejected for worker services. */
+  trusted?: boolean
 }
 
 export type DeclaredPort =

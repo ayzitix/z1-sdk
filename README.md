@@ -22,7 +22,7 @@ modify the engine.
 branch forks, sandboxed executable modules with an approval panel, the agent
 loop as a real graph, branch-tree memory, a headless server, real
 OpenAI-compatible models and a browser canvas are implemented and tested
-(579 tests). Not implemented yet: editor integration and OS-level sandboxing
+(612 tests). Not implemented yet: editor integration and OS-level sandboxing
 for untrusted modules.
 
 ## Quick start
@@ -94,8 +94,9 @@ A **module** is an npm package. It contributes **nodes** (typed data inputs and
 outputs, plus explicit flow edges) and may contribute services. A module can
 also be **service-only** (`nodes: []`): it declares an ambient service such as
 `llm`, `tools`, `fs`, `artifacts` or `memory`, and once approved the runtime
-uses it instead of the built-in default. Service modules are trusted in-process
-code in v1 (no worker). A node is real code:
+uses it instead of the built-in default. Services default to `mode: "worker"`
+(sandboxed child process, same capability broker as nodes); `mode: "host"` with
+`trusted: true` runs them in-process. A node is real code:
 
 ```ts
 export const chat = defineNode({

@@ -512,19 +512,34 @@ A service-only module declares `nodes: []` and a non-empty `services` list:
   "engines": { "z1": ">=0.1.0" },
   "entry": "index.js",
   "nodes": [],
-  "services": [{ "id": "llm", "kind": "llm", "trusted": true }]
+  "services": [{ "id": "llm", "kind": "llm", "mode": "worker" }]
 }
 ```
 
 `services` is optional. Each declaration has a unique-within-module `id`, a
-`kind` of `llm | tools | fs | artifacts | memory`, and `trusted`. Duplicate ids
-in one manifest, unknown kinds and `trusted` values other than `true` are
-manifest errors; the same kind declared by two different modules is not.
+`kind` of `llm | tools | fs | artifacts | memory`, an optional `mode` of
+`worker | host`, and an optional `trusted` boolean. Duplicate ids in one
+manifest, unknown kinds and unknown modes are manifest errors; the same kind
+declared by two different modules is not.
 
-**v1 runs service modules in-process**, not in the node worker. The approval
-grant is the security boundary: an approved service module can reach the whole
-host, so only code the operator trusts may declare `trusted: true`. Approving
-`com.example.echo-llm` therefore means trusting its code with the process.
+**`mode` defaults to `worker`.** A legacy declaration with no `mode` and
+`trusted: true` is a host service, so pre-mode manifests keep working.
+
+- `mode: "worker"` runs the service in the module's child process, next to its
+  nodes. It reaches the host only through the same capability broker as a node:
+  `ctx.llm`/`ctx.tools`/`ctx.fs`/`ctx.net` are brokered, its `fs`/`net` calls
+  are checked against the manifest's capabilities, and an approval request from
+  worker code is refused (`rejected`). A worker mode declaration must not also
+  say `trusted: true`.
+- `mode: "host"` imports the service into the host process. It requires
+  `trusted: true`, because the approval grant is then the only boundary: an
+  approved host service can reach the whole process. Declaring `mode: "host"`
+  without `trusted: true`, or `mode: "worker"` with it, is a manifest error.
+
+Worker isolation is process-level, not a container: the child runs under Node's
+permission model with read access to its module directory and write access only
+to declared `fs.write` globs. It sees no host memory and cannot call a host
+service that was not brokered to it.
 
 The entry exports factories alongside any `nodes`:
 
@@ -532,21 +547,27 @@ The entry exports factories alongside any `nodes`:
 export const services = {
   llm: (ctx) => ({
     async chat(request, onDelta) { /* ... */ },
-    dispose() { /* optional */ },
+    dispose() { /* optional, host mode */ },
   }),
 }
 ```
 
-Each factory receives `{ moduleId, version, directory, config, log, get }`.
+A worker-mode entry must also export `nodes` (an empty array is fine) because
+the child bootstrap requires it. Each factory receives
+`{ moduleId, version, directory, config, log, get }`.
 Required instance methods per kind: `llm.chat`, `tools.call`/`list`,
-`fs.read`/`write`, `artifacts.put`/`get`, `memory.buildContext`. `dispose()` is
-optional and called once when the runtime closes.
+`fs.read`/`write`, `artifacts.put`/`get`, `memory.buildContext`. For a worker
+service, `artifacts` crosses IPC as base64: `put({ data, mime })` returns
+`{ hash, mime }`, `get({ hash })` returns `{ data, mime }`. `dispose()` is
+optional and called once when the runtime closes for host services; a worker
+service is stopped with its process.
 
 Service modules are approved through the normal store; the approved `services`
-list is recorded on the grant and in the audit log. The runtime starts active
-service modules lazily on the first `beginRun` and resolves one instance per
-kind. Multiple providers of the same kind resolve to the highest module
-version; ties keep the first module id. Service precedence for a run is:
+list is recorded on the grant and in the audit log as declared, including
+`mode`/`trusted`. The runtime starts active service modules lazily on the first
+`beginRun` and resolves one instance per kind. Multiple providers of the same
+kind resolve to the highest module version across both modes; ties keep the
+lower module id, and the choice is logged. Service precedence for a run is:
 
 ```
 overrides > approved service module > built-in default
@@ -554,7 +575,8 @@ overrides > approved service module > built-in default
 
 Built-in defaults are the provider registry's `llm` (mock when `live` is off),
 the mock `tools`/`fs`/`artifacts`, and `BranchMemory` when enabled. Service
-modules do not need a per-call approval.
+modules do not need a per-call approval; a worker service that asks for one is
+refused.
 
 `RuntimeConfig.useServiceModules` (default `true`, env `Z1_SERVICE_MODULES=0|1`,
 file key `useServiceModules`) disables all service modules; the CLI exposes

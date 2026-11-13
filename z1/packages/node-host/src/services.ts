@@ -1,12 +1,13 @@
 /**
  * Trusted in-process service modules.
  *
- * Unlike node modules, which run in a child worker, a service module is
- * imported into the host process: it replaces an ambient capability (`llm`,
- * `tools`, …) that every node already uses. There is therefore no capability
- * broker between the service and the host. Approving the module is the security
- * decision; v1 only accepts `trusted: true` declarations and never pretends
- * this is a sandbox.
+ * Unlike node modules, which run in a child worker, a *host-mode* service
+ * module is imported into the host process: it replaces an ambient capability
+ * (`llm`, `tools`, …) that every node already uses. There is therefore no
+ * capability broker between the service and the host. Approving the module is
+ * the security decision; a host declaration must say `trusted: true`, and this
+ * runtime never pretends it is a sandbox. Worker-mode services use the child
+ * process instead and are adapted by `./adapters.ts`.
  *
  * @module @z1/node-host/services
  */

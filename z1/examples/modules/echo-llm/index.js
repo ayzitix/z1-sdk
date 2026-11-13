@@ -1,5 +1,8 @@
-// Trusted in-process service module. Unlike a node module this file runs in the
-// host process, so it can reach the host directly; the approval is the boundary.
+// Sandboxed worker service module. It runs in the same child process as module
+// nodes and reaches the host only through the capability broker, so it must
+// export `nodes` (empty here) for the worker handshake.
+export const nodes = []
+
 export const services = {
   llm(ctx) {
     ctx.log('info', 'echo-llm service started')

@@ -7,6 +7,7 @@ import type {
   ModuleManifest,
   ModuleNodeDeclaration,
   ModuleServiceDeclaration,
+  ModuleServiceMode,
 } from './types.ts'
 
 /**
@@ -106,13 +107,32 @@ type PortData = z.infer<typeof declaredPortSchema>
 type CapabilitiesData = z.infer<typeof capabilitiesSchema>
 type LimitsData = z.infer<typeof limitsSchema>
 
-const serviceDeclarationSchema = z.strictObject({
-  id: z.string().regex(SERVICE_ID_PATTERN, 'must be a lower-kebab service id'),
-  kind: z.enum(['llm', 'tools', 'fs', 'artifacts', 'memory']),
-  // v1 has no worker for services: only code that was explicitly trusted may
-  // run in-process, so any other value is a manifest error.
-  trusted: z.literal(true, 'v1 service modules must be trusted: true'),
-})
+const serviceDeclarationSchema = z
+  .strictObject({
+    id: z.string().regex(SERVICE_ID_PATTERN, 'must be a lower-kebab service id'),
+    kind: z.enum(['llm', 'tools', 'fs', 'artifacts', 'memory']),
+    mode: z.enum(['worker', 'host']).optional(),
+    // Kept optional: a legacy declaration is `trusted: true` with no mode, and
+    // the default security posture (no mode, no trust) is a worker.
+    trusted: z.boolean().optional(),
+  })
+  .superRefine((service, ctx) => {
+    const mode = service.mode ?? (service.trusted === true ? 'host' : 'worker')
+    if (mode === 'host' && service.trusted !== true) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['mode'],
+        message: 'host services run in the host process; add "trusted": true',
+      })
+    }
+    if (mode === 'worker' && service.trusted === true) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['trusted'],
+        message: 'worker services run in the sandbox; remove "trusted"',
+      })
+    }
+  })
 
 type ServiceData = z.infer<typeof serviceDeclarationSchema>
 
@@ -260,7 +280,21 @@ function toLimits(data: LimitsData): NonNullable<ModuleManifest['limits']> {
 }
 
 function toService(data: ServiceData): ModuleServiceDeclaration {
-  return { id: data.id, kind: data.kind, trusted: true }
+  // Persist the declaration as written: grants and the audit log are the
+  // reviewable record, and a legacy `trusted: true` must not be rewritten.
+  const result: ModuleServiceDeclaration = { id: data.id, kind: data.kind }
+  if (data.mode !== undefined) result.mode = data.mode
+  if (data.trusted !== undefined) result.trusted = data.trusted
+  return result
+}
+
+/**
+ * Where a declared service actually runs. `trusted: true` without an explicit
+ * mode is the pre-mode spelling of a host service; everything else defaults to
+ * the sandbox.
+ */
+export function serviceMode(declaration: ModuleServiceDeclaration): ModuleServiceMode {
+  return declaration.mode ?? (declaration.trusted === true ? 'host' : 'worker')
 }
 
 function toNode(data: NodeData): ModuleNodeDeclaration {

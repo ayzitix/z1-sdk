@@ -1,6 +1,8 @@
 export const PACKAGE = '@z1/node-host'
 
 export type {
+  ServiceCallOptions,
+  StartedWorker,
   WorkerCapabilityDenial,
   WorkerExecutionHooks,
   WorkerHostOptions,
@@ -26,5 +28,12 @@ export type {
   StartedModuleServices,
 } from './services.ts'
 export { ModuleServiceRuntime } from './services.ts'
-export type { WorkerNodeInfo } from './protocol.ts'
+export type { WorkerNodeInfo, WorkerServiceInfo } from './protocol.ts'
+export {
+  workerArtifactService,
+  workerFsService,
+  workerLlmService,
+  workerMemoryService,
+  workerToolService,
+} from './adapters.ts'
 export { asJsonOutputs, declaredPortToPortSpec, moduleCapabilities, moduleNodeDefinition } from './adapter.ts'
