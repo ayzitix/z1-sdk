@@ -229,4 +229,53 @@ describe('z1.llm nodes', () => {
     expect(result.status).toBe('failed')
     expect(result.error).toContain('no model')
   })
+
+  test('forwards a connected tools declaration to the model request', async () => {
+    const tools = [
+      { name: 'echo', description: 'Echo text', parameters: { type: 'object' } },
+    ]
+    const graph = makeGraph(
+      'chat-tools',
+      [
+        graphNode('model1', 'z1.llm.model', { provider: 'mock', model: 'mock-1' }),
+        graphNode('prompt', 'z1.core.const', { value: 'hi' }),
+        graphNode('decls', 'z1.core.const', { value: tools }),
+        graphNode('chat1', 'z1.llm.chat'),
+        graphNode('out1', 'z1.core.output'),
+      ],
+      [
+        dataEdge('d1', 'model1', 'model', 'chat1', 'model'),
+        dataEdge('d2', 'prompt', 'value', 'chat1', 'prompt'),
+        dataEdge('d3', 'decls', 'value', 'chat1', 'tools'),
+        dataEdge('d4', 'chat1', 'text', 'out1', 'value'),
+      ],
+    )
+
+    const { result, services } = await runBuiltins({ graph })
+
+    expect(result.status).toBe('completed')
+    expect(services.lastChatRequest?.tools).toEqual(tools)
+  })
+
+  test('omits tools when no port is connected', async () => {
+    const graph = makeGraph(
+      'chat-no-tools',
+      [
+        graphNode('model1', 'z1.llm.model', { provider: 'mock', model: 'mock-1' }),
+        graphNode('prompt', 'z1.core.const', { value: 'hi' }),
+        graphNode('chat1', 'z1.llm.chat'),
+        graphNode('out1', 'z1.core.output'),
+      ],
+      [
+        dataEdge('d1', 'model1', 'model', 'chat1', 'model'),
+        dataEdge('d2', 'prompt', 'value', 'chat1', 'prompt'),
+        dataEdge('d3', 'chat1', 'text', 'out1', 'value'),
+      ],
+    )
+
+    const { services } = await runBuiltins({ graph })
+
+    expect(services.lastChatRequest).toBeDefined()
+    expect(services.lastChatRequest?.tools).toBeUndefined()
+  })
 })

@@ -94,10 +94,19 @@ describe('z1.flow.loop', () => {
       ],
     )
 
-    const { result } = await runBuiltins({ graph, input: null, definitions: [bodyDone] })
+    const { result, events } = await runBuiltins({ graph, input: null, definitions: [bodyDone] })
 
     expect(result.status).toBe('completed')
     expect(result.outputs).toEqual({ result: 'x!!!', iterations: 3 })
+    // Each iteration owns a distinct path segment, so the journal can tell them
+    // apart on resume.
+    const startedPaths = events
+      .filter((event) => event.type === 'node.started')
+      .map((event) => event.path)
+    expect(startedPaths).toContain('loop1/0/tpl')
+    expect(startedPaths).toContain('loop1/1/tpl')
+    expect(startedPaths).toContain('loop1/2/tpl')
+    expect(startedPaths).not.toContain('loop1/tpl')
   })
 
   test('a body without a done port runs exactly maxIterations with an absent seed', async () => {
@@ -165,10 +174,15 @@ describe('z1.flow.map', () => {
       ],
     )
 
-    const { result } = await runBuiltins({ graph })
+    const { result, events } = await runBuiltins({ graph })
 
     expect(result.status).toBe('completed')
     expect(result.outputs).toEqual({ output: ['1*', '2*', '3*'] })
+    const startedPaths = events
+      .filter((event) => event.type === 'node.started')
+      .map((event) => event.path)
+    expect(startedPaths).toContain('map1/0/tpl')
+    expect(startedPaths).toContain('map1/2/tpl')
   })
 
   test('an empty array produces an empty result list', async () => {

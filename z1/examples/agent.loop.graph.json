@@ -1,0 +1,1067 @@
+{
+  "schemaVersion": 1,
+  "id": "agent.loop",
+  "title": "Agent loop",
+  "nodes": [
+    {
+      "id": "input",
+      "type": "z1.core.input",
+      "version": "1.0.0",
+      "config": {},
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "empty",
+      "type": "z1.core.const",
+      "version": "1.0.0",
+      "config": {
+        "value": []
+      },
+      "position": {
+        "x": 0,
+        "y": -140
+      }
+    },
+    {
+      "id": "userMessage",
+      "type": "z1.core.message",
+      "version": "1.0.0",
+      "config": {
+        "role": "user"
+      },
+      "position": {
+        "x": 220,
+        "y": 0
+      }
+    },
+    {
+      "id": "seed",
+      "type": "z1.core.concat",
+      "version": "1.0.0",
+      "config": {},
+      "position": {
+        "x": 440,
+        "y": 0
+      }
+    },
+    {
+      "id": "loop",
+      "type": "z1.flow.loop",
+      "version": "1.0.0",
+      "config": {
+        "body": {
+          "schemaVersion": 1,
+          "id": "agent.loop.body",
+          "title": "Agent loop body",
+          "nodes": [
+            {
+              "id": "body",
+              "type": "z1.core.input",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 0,
+                "y": 0
+              }
+            },
+            {
+              "id": "messages",
+              "type": "z1.core.get",
+              "version": "1.0.0",
+              "config": {
+                "path": "value"
+              },
+              "position": {
+                "x": 220,
+                "y": 0
+              }
+            },
+            {
+              "id": "tools",
+              "type": "z1.core.const",
+              "version": "1.0.0",
+              "config": {
+                "value": []
+              },
+              "position": {
+                "x": 220,
+                "y": -140
+              }
+            },
+            {
+              "id": "chat",
+              "type": "z1.llm.chat",
+              "version": "1.0.0",
+              "config": {
+                "model": {
+                  "provider": "mock",
+                  "model": "mock-1"
+                }
+              },
+              "position": {
+                "x": 440,
+                "y": 0
+              }
+            },
+            {
+              "id": "branch",
+              "type": "z1.flow.if",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 660,
+                "y": 0
+              }
+            },
+            {
+              "id": "assistantMsg",
+              "type": "z1.core.message",
+              "version": "1.0.0",
+              "config": {
+                "role": "assistant"
+              },
+              "position": {
+                "x": 880,
+                "y": -120
+              }
+            },
+            {
+              "id": "callName",
+              "type": "z1.core.get",
+              "version": "1.0.0",
+              "config": {
+                "path": "toolCalls.0.name"
+              },
+              "position": {
+                "x": 1100,
+                "y": -120
+              }
+            },
+            {
+              "id": "callArgs",
+              "type": "z1.core.get",
+              "version": "1.0.0",
+              "config": {
+                "path": "toolCalls.0.arguments"
+              },
+              "position": {
+                "x": 1100,
+                "y": 0
+              }
+            },
+            {
+              "id": "callId",
+              "type": "z1.core.get",
+              "version": "1.0.0",
+              "config": {
+                "path": "toolCalls.0.id"
+              },
+              "position": {
+                "x": 1100,
+                "y": 120
+              }
+            },
+            {
+              "id": "tool",
+              "type": "z1.tool.call",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 1320,
+                "y": 0
+              }
+            },
+            {
+              "id": "toolMsg",
+              "type": "z1.core.message",
+              "version": "1.0.0",
+              "config": {
+                "role": "tool"
+              },
+              "position": {
+                "x": 1540,
+                "y": 0
+              }
+            },
+            {
+              "id": "thenConcat",
+              "type": "z1.core.concat",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 1760,
+                "y": -60
+              }
+            },
+            {
+              "id": "thenMsgs",
+              "type": "z1.core.concat",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 1900,
+                "y": 20
+              }
+            },
+            {
+              "id": "thenDone",
+              "type": "z1.core.value",
+              "version": "1.0.0",
+              "config": {
+                "value": false
+              },
+              "position": {
+                "x": 1760,
+                "y": -180
+              }
+            },
+            {
+              "id": "elseMessages",
+              "type": "z1.core.get",
+              "version": "1.0.0",
+              "config": {
+                "path": "value"
+              },
+              "position": {
+                "x": 880,
+                "y": 340
+              }
+            },
+            {
+              "id": "elseMsgs",
+              "type": "z1.core.concat",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 1100,
+                "y": 340
+              }
+            },
+            {
+              "id": "elseDone",
+              "type": "z1.core.value",
+              "version": "1.0.0",
+              "config": {
+                "value": true
+              },
+              "position": {
+                "x": 1320,
+                "y": 340
+              }
+            },
+            {
+              "id": "messagesMerge",
+              "type": "z1.core.merge",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 2060,
+                "y": 0
+              }
+            },
+            {
+              "id": "doneMerge",
+              "type": "z1.core.merge",
+              "version": "1.0.0",
+              "config": {},
+              "position": {
+                "x": 2060,
+                "y": -180
+              }
+            },
+            {
+              "id": "outValue",
+              "type": "z1.core.output",
+              "version": "1.0.0",
+              "config": {
+                "port": "value"
+              },
+              "position": {
+                "x": 2280,
+                "y": 0
+              }
+            },
+            {
+              "id": "outDone",
+              "type": "z1.core.output",
+              "version": "1.0.0",
+              "config": {
+                "port": "done"
+              },
+              "position": {
+                "x": 2280,
+                "y": -180
+              }
+            }
+          ],
+          "edges": [
+            {
+              "id": "d1",
+              "kind": "data",
+              "from": {
+                "node": "body",
+                "port": "value"
+              },
+              "to": {
+                "node": "messages",
+                "port": "value"
+              }
+            },
+            {
+              "id": "d2",
+              "kind": "data",
+              "from": {
+                "node": "messages",
+                "port": "value"
+              },
+              "to": {
+                "node": "chat",
+                "port": "messages"
+              }
+            },
+            {
+              "id": "d3",
+              "kind": "data",
+              "from": {
+                "node": "tools",
+                "port": "value"
+              },
+              "to": {
+                "node": "chat",
+                "port": "tools"
+              }
+            },
+            {
+              "id": "d4",
+              "kind": "data",
+              "from": {
+                "node": "chat",
+                "port": "hasToolCalls"
+              },
+              "to": {
+                "node": "branch",
+                "port": "condition"
+              }
+            },
+            {
+              "id": "d5",
+              "kind": "data",
+              "from": {
+                "node": "assistantMsg",
+                "port": "message"
+              },
+              "to": {
+                "node": "callName",
+                "port": "value"
+              }
+            },
+            {
+              "id": "d6",
+              "kind": "data",
+              "from": {
+                "node": "assistantMsg",
+                "port": "message"
+              },
+              "to": {
+                "node": "callArgs",
+                "port": "value"
+              }
+            },
+            {
+              "id": "d7",
+              "kind": "data",
+              "from": {
+                "node": "assistantMsg",
+                "port": "message"
+              },
+              "to": {
+                "node": "callId",
+                "port": "value"
+              }
+            },
+            {
+              "id": "d8",
+              "kind": "data",
+              "from": {
+                "node": "callName",
+                "port": "value"
+              },
+              "to": {
+                "node": "tool",
+                "port": "name"
+              }
+            },
+            {
+              "id": "d9",
+              "kind": "data",
+              "from": {
+                "node": "callArgs",
+                "port": "value"
+              },
+              "to": {
+                "node": "tool",
+                "port": "args"
+              }
+            },
+            {
+              "id": "d10",
+              "kind": "data",
+              "from": {
+                "node": "tool",
+                "port": "result"
+              },
+              "to": {
+                "node": "toolMsg",
+                "port": "content"
+              }
+            },
+            {
+              "id": "d11",
+              "kind": "data",
+              "from": {
+                "node": "callId",
+                "port": "value"
+              },
+              "to": {
+                "node": "toolMsg",
+                "port": "toolCallId"
+              }
+            },
+            {
+              "id": "d12",
+              "kind": "data",
+              "from": {
+                "node": "chat",
+                "port": "text"
+              },
+              "to": {
+                "node": "assistantMsg",
+                "port": "content"
+              }
+            },
+            {
+              "id": "d13",
+              "kind": "data",
+              "from": {
+                "node": "chat",
+                "port": "toolCalls"
+              },
+              "to": {
+                "node": "assistantMsg",
+                "port": "toolCalls"
+              }
+            },
+            {
+              "id": "d14",
+              "kind": "data",
+              "from": {
+                "node": "messages",
+                "port": "value"
+              },
+              "to": {
+                "node": "thenConcat",
+                "port": "a"
+              }
+            },
+            {
+              "id": "d15",
+              "kind": "data",
+              "from": {
+                "node": "assistantMsg",
+                "port": "message"
+              },
+              "to": {
+                "node": "thenConcat",
+                "port": "b"
+              }
+            },
+            {
+              "id": "d16",
+              "kind": "data",
+              "from": {
+                "node": "thenConcat",
+                "port": "value"
+              },
+              "to": {
+                "node": "thenMsgs",
+                "port": "a"
+              }
+            },
+            {
+              "id": "d17",
+              "kind": "data",
+              "from": {
+                "node": "toolMsg",
+                "port": "message"
+              },
+              "to": {
+                "node": "thenMsgs",
+                "port": "b"
+              }
+            },
+            {
+              "id": "d18",
+              "kind": "data",
+              "from": {
+                "node": "thenMsgs",
+                "port": "value"
+              },
+              "to": {
+                "node": "messagesMerge",
+                "port": "a"
+              }
+            },
+            {
+              "id": "d19",
+              "kind": "data",
+              "from": {
+                "node": "body",
+                "port": "value"
+              },
+              "to": {
+                "node": "elseMessages",
+                "port": "value"
+              }
+            },
+            {
+              "id": "d20",
+              "kind": "data",
+              "from": {
+                "node": "elseMessages",
+                "port": "value"
+              },
+              "to": {
+                "node": "elseMsgs",
+                "port": "a"
+              }
+            },
+            {
+              "id": "d21",
+              "kind": "data",
+              "from": {
+                "node": "chat",
+                "port": "message"
+              },
+              "to": {
+                "node": "elseMsgs",
+                "port": "b"
+              }
+            },
+            {
+              "id": "d22",
+              "kind": "data",
+              "from": {
+                "node": "elseMsgs",
+                "port": "value"
+              },
+              "to": {
+                "node": "messagesMerge",
+                "port": "b"
+              }
+            },
+            {
+              "id": "d23",
+              "kind": "data",
+              "from": {
+                "node": "thenDone",
+                "port": "value"
+              },
+              "to": {
+                "node": "doneMerge",
+                "port": "a"
+              }
+            },
+            {
+              "id": "d24",
+              "kind": "data",
+              "from": {
+                "node": "elseDone",
+                "port": "value"
+              },
+              "to": {
+                "node": "doneMerge",
+                "port": "b"
+              }
+            },
+            {
+              "id": "d25",
+              "kind": "data",
+              "from": {
+                "node": "messagesMerge",
+                "port": "value"
+              },
+              "to": {
+                "node": "outValue",
+                "port": "value"
+              }
+            },
+            {
+              "id": "d26",
+              "kind": "data",
+              "from": {
+                "node": "doneMerge",
+                "port": "value"
+              },
+              "to": {
+                "node": "outDone",
+                "port": "value"
+              }
+            },
+            {
+              "id": "f1",
+              "kind": "flow",
+              "from": {
+                "node": "body",
+                "port": "out"
+              },
+              "to": {
+                "node": "messages",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f2",
+              "kind": "flow",
+              "from": {
+                "node": "messages",
+                "port": "out"
+              },
+              "to": {
+                "node": "chat",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f3",
+              "kind": "flow",
+              "from": {
+                "node": "chat",
+                "port": "out"
+              },
+              "to": {
+                "node": "branch",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f4",
+              "kind": "flow",
+              "from": {
+                "node": "branch",
+                "port": "then"
+              },
+              "to": {
+                "node": "assistantMsg",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f5",
+              "kind": "flow",
+              "from": {
+                "node": "assistantMsg",
+                "port": "out"
+              },
+              "to": {
+                "node": "callName",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f6",
+              "kind": "flow",
+              "from": {
+                "node": "callName",
+                "port": "out"
+              },
+              "to": {
+                "node": "callArgs",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f7",
+              "kind": "flow",
+              "from": {
+                "node": "callArgs",
+                "port": "out"
+              },
+              "to": {
+                "node": "callId",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f8",
+              "kind": "flow",
+              "from": {
+                "node": "callId",
+                "port": "out"
+              },
+              "to": {
+                "node": "tool",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f9",
+              "kind": "flow",
+              "from": {
+                "node": "tool",
+                "port": "out"
+              },
+              "to": {
+                "node": "toolMsg",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f10",
+              "kind": "flow",
+              "from": {
+                "node": "toolMsg",
+                "port": "out"
+              },
+              "to": {
+                "node": "thenConcat",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f11",
+              "kind": "flow",
+              "from": {
+                "node": "thenConcat",
+                "port": "out"
+              },
+              "to": {
+                "node": "thenMsgs",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f12",
+              "kind": "flow",
+              "from": {
+                "node": "thenMsgs",
+                "port": "out"
+              },
+              "to": {
+                "node": "thenDone",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f13",
+              "kind": "flow",
+              "from": {
+                "node": "branch",
+                "port": "else"
+              },
+              "to": {
+                "node": "elseMessages",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f14",
+              "kind": "flow",
+              "from": {
+                "node": "elseMessages",
+                "port": "out"
+              },
+              "to": {
+                "node": "elseMsgs",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f15",
+              "kind": "flow",
+              "from": {
+                "node": "elseMsgs",
+                "port": "out"
+              },
+              "to": {
+                "node": "elseDone",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f16",
+              "kind": "flow",
+              "from": {
+                "node": "thenMsgs",
+                "port": "out"
+              },
+              "to": {
+                "node": "messagesMerge",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f17",
+              "kind": "flow",
+              "from": {
+                "node": "elseMsgs",
+                "port": "out"
+              },
+              "to": {
+                "node": "messagesMerge",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f18",
+              "kind": "flow",
+              "from": {
+                "node": "thenDone",
+                "port": "out"
+              },
+              "to": {
+                "node": "doneMerge",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f19",
+              "kind": "flow",
+              "from": {
+                "node": "elseDone",
+                "port": "out"
+              },
+              "to": {
+                "node": "doneMerge",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f20",
+              "kind": "flow",
+              "from": {
+                "node": "messagesMerge",
+                "port": "out"
+              },
+              "to": {
+                "node": "outValue",
+                "port": "in"
+              }
+            },
+            {
+              "id": "f21",
+              "kind": "flow",
+              "from": {
+                "node": "doneMerge",
+                "port": "out"
+              },
+              "to": {
+                "node": "outDone",
+                "port": "in"
+              }
+            }
+          ]
+        },
+        "maxIterations": 12
+      },
+      "position": {
+        "x": 660,
+        "y": 0
+      }
+    },
+    {
+      "id": "last",
+      "type": "z1.core.last",
+      "version": "1.0.0",
+      "config": {},
+      "position": {
+        "x": 880,
+        "y": 0
+      }
+    },
+    {
+      "id": "content",
+      "type": "z1.core.get",
+      "version": "1.0.0",
+      "config": {
+        "path": "content"
+      },
+      "position": {
+        "x": 1100,
+        "y": 0
+      }
+    },
+    {
+      "id": "output",
+      "type": "z1.core.output",
+      "version": "1.0.0",
+      "config": {
+        "port": "output"
+      },
+      "position": {
+        "x": 1320,
+        "y": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "d1",
+      "kind": "data",
+      "from": {
+        "node": "input",
+        "port": "value"
+      },
+      "to": {
+        "node": "userMessage",
+        "port": "content"
+      }
+    },
+    {
+      "id": "d2",
+      "kind": "data",
+      "from": {
+        "node": "empty",
+        "port": "value"
+      },
+      "to": {
+        "node": "seed",
+        "port": "a"
+      }
+    },
+    {
+      "id": "d3",
+      "kind": "data",
+      "from": {
+        "node": "userMessage",
+        "port": "message"
+      },
+      "to": {
+        "node": "seed",
+        "port": "b"
+      }
+    },
+    {
+      "id": "d4",
+      "kind": "data",
+      "from": {
+        "node": "seed",
+        "port": "value"
+      },
+      "to": {
+        "node": "loop",
+        "port": "seed"
+      }
+    },
+    {
+      "id": "d5",
+      "kind": "data",
+      "from": {
+        "node": "loop",
+        "port": "result"
+      },
+      "to": {
+        "node": "last",
+        "port": "items"
+      }
+    },
+    {
+      "id": "d6",
+      "kind": "data",
+      "from": {
+        "node": "last",
+        "port": "value"
+      },
+      "to": {
+        "node": "content",
+        "port": "value"
+      }
+    },
+    {
+      "id": "d7",
+      "kind": "data",
+      "from": {
+        "node": "content",
+        "port": "value"
+      },
+      "to": {
+        "node": "output",
+        "port": "value"
+      }
+    },
+    {
+      "id": "f1",
+      "kind": "flow",
+      "from": {
+        "node": "input",
+        "port": "out"
+      },
+      "to": {
+        "node": "userMessage",
+        "port": "in"
+      }
+    },
+    {
+      "id": "f2",
+      "kind": "flow",
+      "from": {
+        "node": "userMessage",
+        "port": "out"
+      },
+      "to": {
+        "node": "seed",
+        "port": "in"
+      }
+    },
+    {
+      "id": "f3",
+      "kind": "flow",
+      "from": {
+        "node": "seed",
+        "port": "out"
+      },
+      "to": {
+        "node": "loop",
+        "port": "in"
+      }
+    },
+    {
+      "id": "f4",
+      "kind": "flow",
+      "from": {
+        "node": "loop",
+        "port": "out"
+      },
+      "to": {
+        "node": "last",
+        "port": "in"
+      }
+    },
+    {
+      "id": "f5",
+      "kind": "flow",
+      "from": {
+        "node": "last",
+        "port": "out"
+      },
+      "to": {
+        "node": "content",
+        "port": "in"
+      }
+    },
+    {
+      "id": "f6",
+      "kind": "flow",
+      "from": {
+        "node": "content",
+        "port": "out"
+      },
+      "to": {
+        "node": "output",
+        "port": "in"
+      }
+    }
+  ]
+}

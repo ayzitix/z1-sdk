@@ -9,5 +9,6 @@ export function defineNode<C>(definition: NodeDefinition<C>): NodeDefinition<C> 
 }
 
 export * from './types.ts'
+export * from './memory.ts'
 export * from './registry.ts'
 export * from './schema.ts'

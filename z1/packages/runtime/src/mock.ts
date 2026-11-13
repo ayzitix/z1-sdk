@@ -25,6 +25,8 @@ export interface MockRuntimeOptions {
 export interface MockRuntimeServices extends RuntimeServices {
   readonly files: Map<string, string>
   readonly chatCalls: ChatRequest[]
+  /** The most recent chat request; `undefined` before the first call. */
+  readonly lastChatRequest: ChatRequest | undefined
   readonly toolCalls: { name: string; args: Json }[]
 }
 
@@ -34,6 +36,11 @@ function lastUserContent(messages: readonly { role: string; content: string }[])
     if (message !== undefined && message.role === 'user') return message.content
   }
   return ''
+}
+
+/** A tool result in the transcript means the agent loop already took its turn. */
+function hasToolMessage(messages: readonly { role: string }[]): boolean {
+  return messages.some((message) => message.role === 'tool')
 }
 
 const TOOL_MARKER = /\[\[tool:([^\]]+)\]\]/
@@ -54,10 +61,22 @@ export function createMockRuntimeServices(
   return {
     files,
     chatCalls,
+    get lastChatRequest(): ChatRequest | undefined {
+      return chatCalls[chatCalls.length - 1]
+    },
     toolCalls,
     llm: {
       async chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult> {
         chatCalls.push(request)
+        // A terminating agent: once a tool result is in the transcript the mock
+        // answers with plain text, so a loop graph stops instead of looping.
+        if (hasToolMessage(request.messages)) {
+          return {
+            message: { role: 'assistant', content: 'mock: done' },
+            toolCalls: [],
+            stopReason: 'stop',
+          }
+        }
         const content = lastUserContent(request.messages)
         const marker = TOOL_MARKER.exec(content)
 

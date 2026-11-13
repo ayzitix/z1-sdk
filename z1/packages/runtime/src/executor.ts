@@ -102,6 +102,8 @@ function loadResumeState(
 interface ResolvedInputs {
   readonly values: Record<string, Json>
   readonly missing: readonly string[]
+  /** True when the port `waitFor` contract is satisfied. */
+  readonly ready: boolean
 }
 
 type NodeOutcome =
@@ -363,6 +365,7 @@ function makeContext(input: NodeRunInput, signal: AbortSignal, attempt: number):
     approval: {
       request: (request) => services.approval.request(request, { runId, nodeId: node.id }),
     },
+    ...(services.memory !== undefined ? { memory: services.memory } : {}),
     runSubgraph: async (subgraph: SubgraphRunOptions) => {
       if (signal.aborted) throw new RunFailure('CANCELLED', 'run cancelled before subgraph')
       const nestedOptions: RunOptions = {
@@ -371,7 +374,8 @@ function makeContext(input: NodeRunInput, signal: AbortSignal, attempt: number):
         services: options.services,
         runId,
         journal,
-        pathPrefix: `${path}/`,
+        pathPrefix:
+          subgraph.label === undefined ? `${path}/` : `${path}/${subgraph.label}/`,
         ...(subgraph.input !== undefined ? { input: subgraph.input } : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
         ...(options.suspendOnApproval !== undefined
@@ -693,21 +697,45 @@ async function executeRun(options: RunOptions, context: RunContext): Promise<Run
   const outputs: Record<string, Json> = {}
   let outputExecuted = false
 
+  /**
+   * `waitFor: 'all'` ports must all resolve; `'any'` ports form a single group
+   * that only needs one resolved value. A node whose connected inputs are all
+   * `'any'` runs on the first arrival.
+   */
   const resolveInputs = (node: GraphNode): ResolvedInputs => {
     const values: Record<string, Json> = {}
     const missing: string[] = []
+    const definition = definitions.get(node.id)
+    let anyConnected = 0
+    let anyResolved = 0
+    let allUnresolved = false
+
     for (const edge of incomingData.get(node.id) ?? []) {
+      const port = definition?.inputs.find(
+        (candidate) => candidate.kind === 'data' && candidate.id === edge.to.port,
+      )
+      const waitFor = port !== undefined && port.kind === 'data' ? (port.waitFor ?? 'all') : 'all'
+      if (waitFor === 'any') anyConnected += 1
+
       const source = outputValues.get(edge.from.node)
       const value = source === undefined ? undefined : source[edge.from.port]
-      if (value === undefined) missing.push(edge.to.port)
-      else values[edge.to.port] = value
+      if (value === undefined) {
+        missing.push(edge.to.port)
+        if (waitFor === 'all') allUnresolved = true
+        continue
+      }
+      values[edge.to.port] = value
+      if (waitFor === 'any') anyResolved += 1
     }
-    return { values, missing }
+
+    // An empty `any` group imposes no condition; a non-empty one needs a hit.
+    const anySatisfied = anyConnected === 0 || anyResolved > 0
+    return { values, missing, ready: !allUnresolved && anySatisfied }
   }
 
   const isRunnable = (node: GraphNode): boolean => {
     if (executed.has(node.id)) return false
-    if (resolveInputs(node).missing.length > 0) return false
+    if (!resolveInputs(node).ready) return false
     const needsFlow = (incomingFlow.get(node.id)?.length ?? 0) > 0
     if (needsFlow && !pendingFlow.has(node.id)) return false
     return true

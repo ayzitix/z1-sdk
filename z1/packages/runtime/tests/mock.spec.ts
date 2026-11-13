@@ -44,6 +44,22 @@ describe('mock runtime services', () => {
     expect(result.usage).toEqual({ inputTokens: 1, outputTokens: 1 })
   })
 
+  test('terminates with text once the transcript carries a tool result', async () => {
+    const services = createMockRuntimeServices()
+    const result = await services.llm.chat({
+      model,
+      messages: [
+        { role: 'user', content: 'please [[tool:search]] now' },
+        { role: 'assistant', content: '', toolCalls: [{ id: 'call_1', name: 'search', arguments: {} }] },
+        { role: 'tool', content: '{"ok":true}', toolCallId: 'call_1' },
+      ],
+    })
+
+    expect(result.message).toEqual({ role: 'assistant', content: 'mock: done' })
+    expect(result.toolCalls).toEqual([])
+    expect(result.stopReason).toBe('stop')
+  })
+
   test('tools return a default result and record invocations', async () => {
     const services = createMockRuntimeServices()
     const result = await services.tools.call('echo', { text: 'hi' })

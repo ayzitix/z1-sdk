@@ -1,5 +1,7 @@
 import type { z } from 'zod'
 
+import type { MemoryService } from './memory.ts'
+
 /** Wire value: everything a node may send through a port or persist. */
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
 
@@ -22,6 +24,12 @@ export type PortSpec =
       required?: boolean
       /** Default 'value'. */
       mode?: StreamMode
+      /**
+       * Readiness of a connected data input. `'all'` (default) makes the node
+       * wait for this port; `'any'` ports form a group the node can start on as
+       * soon as one of them resolves.
+       */
+      waitFor?: 'all' | 'any'
     }
   | { kind: 'flow'; id: string; title?: string; description?: string }
 
@@ -109,6 +117,12 @@ export interface SubgraphRunOptions {
   /** GraphDocument; typed in @z1/runtime to avoid an import cycle. */
   graph: unknown
   input?: Json
+  /**
+   * Segment inserted between the calling node's path and the nested nodes, e.g.
+   * the loop iteration or map index. Without it every repeat shares one path and
+   * a journal resume cannot tell the repetitions apart.
+   */
+  label?: string
 }
 
 export interface NodeContext<C = unknown> {
@@ -137,6 +151,8 @@ export interface NodeContext<C = unknown> {
     get(hash: string): Promise<Uint8Array>
   }
   approval: { request(request: ApprovalRequest): Promise<ApprovalDecision> }
+  /** External memory over the run tree; absent when the host supplies none. */
+  readonly memory?: MemoryService
   /** Run a nested graph (loop body, subgraph node). Shares services and run id. */
   runSubgraph(options: SubgraphRunOptions): Promise<{ outputs: Record<string, Json> }>
 }

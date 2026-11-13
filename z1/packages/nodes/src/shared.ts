@@ -24,8 +24,9 @@ export function dataPort(
   id: string,
   schema: z.ZodType = z.unknown(),
   required = true,
+  waitFor: 'all' | 'any' = 'all',
 ): PortSpec {
-  return { kind: 'data', id, schema, required }
+  return { kind: 'data', id, schema, required, waitFor }
 }
 
 export function flowPort(id: string): PortSpec {

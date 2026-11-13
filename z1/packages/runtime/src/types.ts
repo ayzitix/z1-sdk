@@ -6,6 +6,7 @@ import type {
   ChatRequest,
   ChatResult,
   Json,
+  MemoryService,
   NodeRegistry,
   ToolSchema,
 } from '@z1/node'
@@ -134,6 +135,8 @@ export interface RuntimeServices {
   fs: FsService
   artifacts: ArtifactService
   approval: ApprovalService
+  /** External memory over the run tree; nodes see it as `ctx.memory`. */
+  memory?: MemoryService
   /** Receives every run event, including stream chunks. */
   onEvent?: (event: RunEvent) => void
   /** Receives node log lines; a no-op when omitted. */

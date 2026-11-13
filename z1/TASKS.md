@@ -56,9 +56,15 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [ ] T23 Runtime/CLI integration: load installed modules into the registry,
   `z1 module list/propose/approve/rollback`, end-to-end fixture module.
 - [ ] T24 Protocol/server/canvas: module inventory + approval panel.
-- [ ] T25 Review + commit.
+- [x] T25 Review + commit (module core).
 
-## Later
+## M5 — agent as a graph and branch memory
 
-- Agent-as-graph template + context assembly from the branch tree (M5).
-- z1-app editor integration (M6).
+- [x] T26 `waitFor: any` ports and assembly nodes (`get`, `concat`, `message`,
+  `last`, `merge`, `value`), flow-gated branches.
+- [x] T27 `@z1/agent`: the default tool loop built from nodes, example graph.
+- [x] T28 `@z1/memory`: ancestry/siblings/recent, context envelope,
+  `memory.context` node, `z1 memory context`.
+- [x] T29 iteration-scoped execution paths (fork inside a loop replays only the
+  earlier iterations).
+- [ ] T30 Review + commit.

@@ -429,6 +429,76 @@ describe('z1 cli', () => {
     })
   })
 
+  describe('memory context', () => {
+    let directory = ''
+    let db = ''
+
+    beforeAll(async () => {
+      directory = await mkdtemp(join(tmpdir(), 'z1-memory-'))
+      db = join(directory, 'runs.db')
+    })
+
+    afterAll(async () => {
+      await rm(directory, { recursive: true, force: true })
+    })
+
+    test('prints the envelope of a completed run', async () => {
+      const hello = await run(['run', HELLO, '--input', '{"name":"memo"}', '--json', '--db', db])
+      expect(hello.code).toBe(0)
+      const { runId } = JSON.parse(hello.out.trimEnd()) as { runId: string }
+
+      const text = await run(['memory', 'context', runId, '--db', db])
+      expect(text.code).toBe(0)
+      expect(text.err).toBe('')
+      expect(text.out).toContain('## Recent steps')
+
+      const json = await run(['memory', 'context', runId, '--db', db, '--json'])
+      expect(json.code).toBe(0)
+      const envelope = JSON.parse(json.out.trimEnd()) as {
+        text: string
+        messages: { role: string; content: string }[]
+        spine: string[]
+        siblings: string[]
+        recent: unknown[]
+      }
+      expect(envelope.text).toBe(text.out.trimEnd())
+      expect(envelope.messages[0]?.role).toBe('system')
+      expect(envelope.siblings).toEqual([])
+      expect(envelope.recent.length).toBeGreaterThan(0)
+    })
+
+    test('a forked run reports its parent as an ancestor', async () => {
+      const hello = await run(['run', HELLO, '--input', '{"name":"fork"}', '--json', '--db', db])
+      expect(hello.code).toBe(0)
+      const { runId } = JSON.parse(hello.out.trimEnd()) as { runId: string }
+
+      const forked = await run(['fork', runId, '--at', 'template', '--json', '--db', db])
+      expect(forked.code).toBe(0)
+      const fork = JSON.parse(forked.out.trimEnd()) as { runId: string }
+
+      const envelope = await run(['memory', 'context', fork.runId, '--db', db, '--json'])
+      expect(envelope.code).toBe(0)
+      const parsed = JSON.parse(envelope.out.trimEnd()) as { text: string; spine: string[] }
+      expect(parsed.text).toContain('## Ancestors')
+      expect(parsed.text).toContain(runId)
+      expect(parsed.spine.join('\n')).toContain(runId)
+    })
+
+    test('an unknown run exits 1', async () => {
+      const { code, err } = await run(['memory', 'context', 'run_missing', '--db', db])
+
+      expect(code).toBe(1)
+      expect(err).toContain('unknown run')
+    })
+
+    test('a missing subcommand is a usage error', async () => {
+      const { code, err } = await run(['memory', 'nope'])
+
+      expect(code).toBe(2)
+      expect(err).toContain('unknown memory command')
+    })
+  })
+
   test('unknown command is a usage error', async () => {
     const { code, err } = await run(['nope'])
 

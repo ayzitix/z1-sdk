@@ -14,6 +14,7 @@ import {
   type ValidationIssue,
 } from '@z1/graph'
 import { SqliteJournal } from '@z1/journal'
+import { BranchMemory } from '@z1/memory'
 import { ModuleStore, type ModuleCapabilities } from '@z1/module'
 import { createBuiltinRegistry } from '@z1/nodes'
 import { ModuleRuntime, type WorkerHostServices } from '@z1/node-host'
@@ -47,8 +48,9 @@ const USAGE = [
   '  validate <graph.json>',
   '  run <graph.json> [--input <json>] [--input-file <path>] [--json] [--trace]',
   '      [--approve auto|ask|deny] [--db <path>] [--suspend] [--resume <runId>] [--live]',
-  '      [--modules-dir <path>] [--no-modules]',
+  '      [--modules-dir <path>] [--no-modules] [--no-memory]',
   '  tree [--db <path>] [--json]',
+  '  memory context <runId> [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
   '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
   '  module list [--modules-dir <path>] [--json]',
@@ -703,6 +705,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     live?: boolean
     'modules-dir'?: string
     'no-modules'?: boolean
+    'no-memory'?: boolean
   }
   let positionals: string[]
   try {
@@ -720,6 +723,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         live: { type: 'boolean' },
         'modules-dir': { type: 'string' },
         'no-modules': { type: 'boolean' },
+        'no-memory': { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -829,6 +833,10 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
       io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
       return 1
     }
+
+    // The journal is already the run tree, so a resumed or forked graph can read
+    // its ancestry from the same database without a second store.
+    if (values['no-memory'] !== true) services.memory = new BranchMemory(journal)
 
     const resume = values.resume
     const runId = resume ?? `run_${randomUUID()}`
@@ -964,6 +972,57 @@ async function treeCommand(args: readonly string[], io: CliIO): Promise<number> 
   } finally {
     journal.close()
   }
+}
+
+/** `z1 memory context <runId>`: what a resumed graph would be told about itself. */
+async function memoryContextCommand(args: readonly string[], io: CliIO): Promise<number> {
+  let values: { db?: string; json?: boolean }
+  let positionals: string[]
+  try {
+    const parsed = parseArgs({
+      args: [...args],
+      options: { db: { type: 'string' }, json: { type: 'boolean' } },
+      allowPositionals: true,
+      strict: true,
+    })
+    values = parsed.values
+    positionals = [...parsed.positionals]
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return usage(io)
+  }
+
+  const runId = positionals[0]
+  if (runId === undefined || positionals.length > 1) return usage(io)
+
+  const dbPath = values.db ?? '.z1/runs.db'
+  let journal: SqliteJournal
+  try {
+    journal = new SqliteJournal(dbPath)
+  } catch (error) {
+    io.stderr(`cannot open journal "${dbPath}": ${errorMessage(error)}\n`)
+    return 1
+  }
+
+  try {
+    if (journal.getRun(runId) === undefined) {
+      io.stderr(`unknown run "${runId}"\n`)
+      return 1
+    }
+    const envelope = await new BranchMemory(journal).buildContext({ runId })
+    if (values.json === true) io.stdout(`${JSON.stringify(envelope)}\n`)
+    else if (envelope.text !== '') io.stdout(`${envelope.text}\n`)
+    return 0
+  } finally {
+    journal.close()
+  }
+}
+
+async function memoryCommand(args: readonly string[], io: CliIO): Promise<number> {
+  const [subcommand, ...rest] = args
+  if (subcommand === 'context') return await memoryContextCommand(rest, io)
+  io.stderr(`unknown memory command "${subcommand ?? ''}"\n`)
+  return usage(io)
 }
 
 function isNodeStartedEvent(value: unknown): value is { type: 'node.started'; path: string } {
@@ -1200,6 +1259,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return await runCommand(rest, io)
     case 'tree':
       return await treeCommand(rest, io)
+    case 'memory':
+      return await memoryCommand(rest, io)
     case 'fork':
       return await forkCommand(rest, io)
     case 'serve':

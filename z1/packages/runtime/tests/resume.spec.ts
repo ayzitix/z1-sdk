@@ -146,6 +146,147 @@ function countingServices(): { services: MockRuntimeServices; asked(): number } 
   return { services, asked: () => asked }
 }
 
+/** Body root: republishes the loop's `{ value, iteration }` record. */
+const binNode = defineNode<unknown>({
+  id: 'test.bin',
+  version: '1.0.0',
+  title: 'bin',
+  category: 'test',
+  config: configOf(z.object({})),
+  inputs: [],
+  outputs: [dataPort('value'), dataPort('iteration')],
+  execute: async (ctx) => {
+    const input = isRecord(ctx.input) ? ctx.input : {}
+    return { value: input['value'] ?? null, iteration: input['iteration'] ?? null }
+  },
+})
+
+/** Body step: finishes on the third iteration and records every execution. */
+function chatNode(calls: string[]) {
+  return defineNode<unknown>({
+    id: 'test.chat',
+    version: '1.0.0',
+    title: 'chat',
+    category: 'test',
+    config: configOf(z.object({})),
+    inputs: [dataPort('value'), dataPort('iteration')],
+    outputs: [dataPort('value'), dataPort('done')],
+    execute: async (ctx) => {
+      const input = isRecord(ctx.input) ? ctx.input : {}
+      const iteration = typeof input['iteration'] === 'number' ? input['iteration'] : 0
+      calls.push(`${ctx.path}@${String(iteration)}`)
+      return { value: `msg-${String(iteration)}`, done: iteration >= 2 }
+    },
+  })
+}
+
+/** Loop that labels each body run with its iteration, like `z1.flow.loop`. */
+const iterationLoopNode = defineNode<unknown>({
+  id: 'test.iterationLoop',
+  version: '1.0.0',
+  title: 'iteration loop',
+  category: 'test',
+  config: configOf(z.object({ body: z.unknown(), maxIterations: z.number() })),
+  inputs: [],
+  outputs: [dataPort('result'), dataPort('iterations')],
+  execute: async (ctx) => {
+    const config = isRecord(ctx.config) ? ctx.config : {}
+    const max = typeof config['maxIterations'] === 'number' ? config['maxIterations'] : 1
+    let current: unknown = null
+    let iterations = 0
+    while (iterations < max) {
+      const { outputs } = await ctx.runSubgraph({
+        graph: config['body'],
+        input: { value: current as Json, iteration: iterations },
+        label: String(iterations),
+      })
+      iterations += 1
+      current = outputs['value'] ?? null
+      if (outputs['done'] === true) break
+    }
+    return { result: current as Json, iterations }
+  },
+})
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function labelledLoopGraph(): GraphDocument {
+  const body: GraphDocument = {
+    schemaVersion: 1,
+    id: 'iteration-body',
+    nodes: [
+      graphNode('bin', 'test.bin'),
+      graphNode('chat', 'test.chat'),
+      {
+        id: 'outValue',
+        type: 'z1.core.output',
+        version: '1.0.0',
+        config: { port: 'value' },
+        position: { x: 0, y: 0 },
+      },
+      {
+        id: 'outDone',
+        type: 'z1.core.output',
+        version: '1.0.0',
+        config: { port: 'done' },
+        position: { x: 0, y: 0 },
+      },
+    ],
+    edges: [
+      dataEdge('e1', 'bin', 'value', 'chat', 'value'),
+      dataEdge('e2', 'bin', 'iteration', 'chat', 'iteration'),
+      dataEdge('e3', 'chat', 'value', 'outValue', 'value'),
+      dataEdge('e4', 'chat', 'done', 'outDone', 'value'),
+    ],
+  }
+  return {
+    schemaVersion: 1,
+    id: 'iteration-loop',
+    nodes: [
+      {
+        id: 'loop',
+        type: 'test.iterationLoop',
+        version: '1.0.0',
+        config: { body, maxIterations: 10 },
+        position: { x: 0, y: 0 },
+      },
+      graphNode('outResult', 'z1.core.output'),
+      {
+        id: 'outCount',
+        type: 'z1.core.output',
+        version: '1.0.0',
+        config: { port: 'iterations' },
+        position: { x: 0, y: 0 },
+      },
+    ],
+    edges: [
+      dataEdge('e1', 'loop', 'result', 'outResult', 'value'),
+      dataEdge('e2', 'loop', 'iterations', 'outCount', 'value'),
+    ],
+  }
+}
+
+/**
+ * Copy a run's journal up to (excluding) the first `node.started` at `path`,
+ * mirroring `SqliteJournal.fork`: the node at `path` must re-execute.
+ */
+function forkBefore(
+  source: MemoryJournal,
+  sourceRunId: string,
+  forkedRunId: string,
+  path: string,
+): MemoryJournal {
+  const forked = new MemoryJournal()
+  for (const event of source.read(sourceRunId)) {
+    if (event.type === 'node.started' && event.path === path) break
+    forked.append({ ...event, runId: forkedRunId })
+  }
+  return forked
+}
+
+
 describe('resume', () => {
   test('replays completed nodes instead of executing them', async () => {
     const journal = new MemoryJournal()
@@ -298,5 +439,61 @@ describe('resume', () => {
     expect(result.status).toBe('failed')
     expect(result.error).toContain('APPROVAL_REJECTED')
     expect(asked()).toBe(0)
+  })
+
+  test('a fork inside a loop replays completed iterations and re-executes only the fork point', async () => {
+    const calls: string[] = []
+    const registry = makeRegistry(
+      binNode,
+      chatNode(calls),
+      iterationLoopNode,
+      outputNode,
+    )
+    const graph = labelledLoopGraph()
+    const source = new MemoryJournal()
+    const sourceId = 'run_loop_source'
+    const first = await runGraph({
+      graph,
+      registry,
+      services: createMockRuntimeServices(),
+      journal: source,
+      runId: sourceId,
+    })
+
+    expect(first.status).toBe('completed')
+    // Done on iteration 2: three iterations, well under the cap of 10.
+    expect(first.outputs['iterations']).toBe(3)
+    expect(calls).toEqual(['loop/0/chat@0', 'loop/1/chat@1', 'loop/2/chat@2'])
+
+    const forkedId = 'run_loop_fork'
+    const forked = forkBefore(source, sourceId, forkedId, 'loop/1/chat')
+    calls.length = 0
+    const resumed = await runGraph({
+      graph,
+      registry,
+      services: createMockRuntimeServices(),
+      journal: forked,
+      runId: forkedId,
+      resume: true,
+    })
+    const events = forked.read(forkedId)
+
+    expect(resumed.status).toBe('completed')
+    // The bug replayed iteration 0's completion for every later iteration and
+    // ran to the cap; with per-iteration paths the loop stops at 3 again.
+    expect(resumed.outputs['iterations']).toBe(3)
+    expect(calls).toEqual(['loop/1/chat@1', 'loop/2/chat@2'])
+
+    const cached = events.filter(
+      (event) => event.type === 'node.cached' && event.path === 'loop/0/chat',
+    )
+    expect(cached).toHaveLength(1)
+    expect(cached[0]?.type === 'node.cached' ? cached[0].reason : undefined).toBe('resume')
+    expect(
+      events.filter((event) => event.type === 'node.started' && event.path === 'loop/1/chat'),
+    ).toHaveLength(1)
+    expect(
+      events.filter((event) => event.type === 'node.completed' && event.path === 'loop/0/chat'),
+    ).toHaveLength(1)
   })
 })

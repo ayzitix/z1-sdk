@@ -87,6 +87,8 @@ export type PortSpec =
       schema: z.ZodType
       required?: boolean          // default true
       mode?: StreamMode           // default 'value'
+      /** Readiness: all connected inputs must resolve, or any one of them. */
+      waitFor?: 'all' | 'any'     // default 'all'
     }
   | { kind: 'flow'; id: string; title?: string; description?: string }
 
@@ -368,7 +370,8 @@ export async function runGraph(options: RunOptions): Promise<RunResult>
 2. A node is runnable when every **connected** data input has a value, every
    **required unconnected** data input is a definition error caught by
    `validateGraph`, and it has at least one flow token if it has incoming flow
-   edges.
+   edges. Connected inputs with `waitFor: 'any'` form one group: at least one of
+   them must resolve instead of all.
 3. On completion, for each data output, propagate to connected inputs. For flow:
    - if the definition declares one or more `flow` outputs, exactly one returned
      output must be `true`; propagate only along that port;
@@ -396,8 +399,11 @@ export async function runGraph(options: RunOptions): Promise<RunResult>
     `deny` fails immediately with `AUTONOMY_DENIED`.
 13. Cancellation: `AbortSignal` aborts running nodes and stops scheduling.
 14. Nested graphs: `ctx.runSubgraph` calls the executor recursively with
-    `pathPrefix = ${ctx.path}/` and the same services, registry and journal.
-    Outputs of the nested run are returned to the calling node.
+    `pathPrefix = ${ctx.path}/` (plus `${label}/` when the caller passes
+    `options.label`) and the same services, registry and journal. `flow.loop`
+    and `flow.map` pass the iteration/index as the label, so a fork inside a
+    loop resumes per iteration. Outputs of the nested run are returned to the
+    calling node.
 15. `RunEvent`:
 
 ```ts
@@ -438,6 +444,13 @@ All ids are namespaced `z1.<name>`.
 | `z1.llm.model` | — | `model` (data ModelHandle) | config `ModelHandle` fields; root |
 | `z1.llm.chat` | `in` (flow, optional), `model` (data ModelHandle, optional), `messages` (data ChatMessage[], optional), `prompt` (data string, optional) | `out` (flow), `text` (data string), `message` (data ChatMessage), `toolCalls` (data ToolCall[]), `hasToolCalls` (data boolean), `usage` (data Json) | config `{ model?: ModelHandle; system?: string; maxTokens?: number }`; a connected `model` port wins over config; `prompt` is used only when `messages` is empty; streams text via `ctx.emit('text', …)` |
 | `z1.tool.call` | `in` (flow, optional), `name` (data string, optional), `args` (data Json) | `out` (flow), `result` (data Json), `isError` (data boolean) | config `{ name?: string }`; config is used only when the `name` port is absent |
+| `z1.core.get` | `in` (flow, optional), `value` (data Json) | `out` (flow), `value` (data Json) | config `{ path }`; array indices; prototype keys blocked; missing → null |
+| `z1.core.concat` | `in` (flow, optional), `a` (data Json[]), `b` (data Json) | `out` (flow), `value` (data Json[]) | array `b` spreads, otherwise appends |
+| `z1.core.message` | `in` (flow, optional), `content` (data Json), `toolCallId` (string, optional), `toolCalls` (array, optional) | `out` (flow), `message` (data object) | config `{ role }`; non-string content stringified |
+| `z1.core.last` | `in` (flow, optional), `items` (data Json[]) | `out` (flow), `value` (data Json) | last item or null |
+| `z1.core.merge` | `in` (flow, optional), `a` (data Json, optional, `waitFor: any`), `b` (data Json, optional, `waitFor: any`) | `out` (flow), `value` (data Json) | first defined input |
+| `z1.core.value` | `in` (flow) | `out` (flow), `value` (data Json) | config `{ value }`; a branch-local constant |
+| `z1.memory.context` | — | `text` (data string), `messages` (data ChatMessage[]) | root; builds the branch-tree envelope through `ctx.memory` |
 
 Nested-graph body contract: the body must contain exactly one rooted
 `z1.core.input` (fed `{ value, iteration }`) and exactly one `z1.core.output`

@@ -23,6 +23,9 @@
       "path": "../../packages/nodes"
     },
     {
+      "path": "../../packages/memory"
+    },
+    {
       "path": "../../packages/journal"
     },
     {

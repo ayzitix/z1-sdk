@@ -40,6 +40,12 @@
       "@z1/nodes": [
         "./packages/nodes/src/index.ts"
       ],
+      "@z1/agent": [
+        "./packages/agent/src/index.ts"
+      ],
+      "@z1/memory": [
+        "./packages/memory/src/index.ts"
+      ],
       "@z1/journal": [
         "./packages/journal/src/index.ts"
       ],

@@ -19,9 +19,10 @@ modify the engine.
 ## Status
 
 **Working prototype.** The graph engine, durable journal, resume, approvals,
-branch forks, headless server, real OpenAI-compatible models and a browser
-canvas are implemented and tested (226 tests). Not implemented yet: sandboxed
-third-party modules, the agent-as-a-graph template, and editor integration.
+branch forks, sandboxed executable modules, the agent loop as a real graph,
+branch-tree memory, a headless server, real OpenAI-compatible models and a
+browser canvas are implemented and tested (326 tests). Not implemented yet:
+the module approval panel in the canvas and editor integration.
 
 ## Quick start
 
@@ -43,6 +44,15 @@ pnpm z1 run z1/examples/agent.live.graph.json --live --input '"hello"'
 pnpm z1 tree
 pnpm z1 fork <runId> --at chat
 pnpm z1 run <graph> --resume <forkedRunId>
+
+# the agent loop as a graph (tool call, loop, memory)
+pnpm z1 run z1/examples/agent.loop.graph.json --input '"[[tool:echo]] hi"'
+
+# executable modules: propose, review, approve, then run
+pnpm z1 module propose z1/examples/modules/echo
+pnpm z1 module approve com.example.echo
+pnpm z1 module list
+pnpm z1 memory context <runId>
 ```
 
 Commands: `z1 list`, `z1 validate`, `z1 run`, `z1 tree`, `z1 fork`, `z1 serve`.
@@ -97,8 +107,19 @@ JSON-RPC and the canvas answers it. A paused run is persisted as
 `run.suspended`, not a parked process.
 
 The branch tree is the long-term memory: every node completion is a node in the
-tree, non-taken siblings are recorded as history, and summaries are regenerated
-lazily with provenance back to the node or artifact.
+tree, non-taken siblings are recorded as history, summaries are regenerated
+lazily with provenance back to the node or artifact, and `memory.context`
+injects an ancestor/sibling/recent envelope into the agent graph.
+
+Modules are reviewed before they run. A module is an npm-shaped directory with a
+manifest (id, version, integrity, declared ports and capabilities) and a
+dependency-free ESM entry. `z1 module propose` copies it to a proposal store;
+`z1 module approve` installs an immutable version, records a grant and an audit
+entry. At run time each module executes in a child process under Node's
+permission model, and every `ctx.*` capability call is checked against the
+manifest. Node's permission model does not block direct sockets, so untrusted
+modules still need an OS-level sandbox — this is documented in
+`z1/packages/node-host/README.md`.
 
 ## Repository
 
@@ -109,6 +130,10 @@ lazily with provenance back to the node or artifact.
 | `z1/packages/runtime` | executor, cache, approvals, resume, nested runs |
 | `z1/packages/nodes` | core, flow, subgraph, llm and tool nodes |
 | `z1/packages/journal` | SQLite journal, forks, content-addressed blobs |
+| `z1/packages/module` | manifest, capabilities, integrity, store, grants, audit |
+| `z1/packages/node-host` | sandboxed child-process worker and capability RPC |
+| `z1/packages/memory` | branch-tree queries and context envelopes |
+| `z1/packages/agent` | the default agent loop as a graph |
 | `z1/packages/protocol` | JSON-RPC 2.0 transport and method map |
 | `z1/packages/server` | headless WebSocket server |
 | `z1/packages/provider-openai` | OpenAI-compatible streaming provider |

@@ -942,3 +942,123 @@ async function runApprovalGraph(
     ...(options.journal !== undefined ? { journal: options.journal } : {}),
   })
 }
+
+describe('data port waitFor', () => {
+  function anyPort(id: string): PortSpec {
+    return { kind: 'data', id, schema: z.unknown(), required: false, waitFor: 'any' }
+  }
+
+  /** Records each execution so a test can prove the node did (not) run. */
+  function sinkNode(id: string, inputs: readonly PortSpec[], seen: Json[]): NodeDefinition<unknown> {
+    return defineNode<unknown>({
+      id,
+      version: '1.0.0',
+      title: id,
+      category: 'test',
+      config: configOf(z.object({})),
+      inputs,
+      outputs: [dataPort('seen')],
+      execute: async (ctx) => {
+        const size = seen.length
+        seen.push((isRecord(ctx.input) ? ctx.input : {}) as Json)
+        return { seen: size + 1 }
+      },
+    })
+  }
+
+  /** Completes but publishes no `value` when `emit` is absent. */
+  const emitNode = defineNode<unknown>({
+    id: 'test.emit',
+    version: '1.0.0',
+    title: 'emit',
+    category: 'test',
+    config: configOf(z.object({ value: z.unknown().optional() })),
+    inputs: [],
+    outputs: [dataPort('value')],
+    execute: async (ctx) => {
+      const config = isRecord(ctx.config) ? ctx.config : {}
+      return Object.hasOwn(config, 'value') ? { value: (config['value'] ?? null) as Json } : {}
+    },
+  })
+
+  async function run(
+    nodes: GraphNode[],
+    edges: GraphEdge[],
+    definitions: NodeDefinition<unknown>[],
+  ) {
+    return await runGraph({
+      graph: makeGraph('wait-for', nodes, edges),
+      registry: makeRegistry(constNode, outputNode, emitNode, ...definitions),
+      services: createMockRuntimeServices(),
+      journal: new MemoryJournal(),
+    })
+  }
+
+  test('two "any" inputs run on the first produced value', async () => {
+    const seen: Json[] = []
+    const sink = sinkNode('test.sink', [anyPort('a'), anyPort('b')], seen)
+    const result = await run(
+      [
+        graphNode('none', 'test.emit', {}),
+        graphNode('sink', 'test.sink', {}),
+        graphNode('only', 'test.const', { value: 'A' }),
+      ],
+      [
+        dataEdge('e1', 'none', 'value', 'sink', 'a'),
+        dataEdge('e2', 'only', 'value', 'sink', 'b'),
+      ],
+      [sink],
+    )
+
+    expect(result.status).toBe('completed')
+    expect(seen).toEqual([{ b: 'A' }])
+  })
+
+  test('one "all" plus "any" inputs waits for the all port and one any port', async () => {
+    const seen: Json[] = []
+    const sink = sinkNode(
+      'test.sink',
+      [dataPort('base'), anyPort('x'), anyPort('y')],
+      seen,
+    )
+    const result = await run(
+      [
+        graphNode('xsrc', 'test.const', { value: 'X' }),
+        graphNode('sink', 'test.sink', {}),
+        graphNode('base', 'test.const', { value: 'B' }),
+        graphNode('ysrc', 'test.emit', {}),
+      ],
+      [
+        dataEdge('e1', 'xsrc', 'value', 'sink', 'x'),
+        dataEdge('e2', 'base', 'value', 'sink', 'base'),
+        dataEdge('e3', 'ysrc', 'value', 'sink', 'y'),
+      ],
+      [sink],
+    )
+
+    expect(result.status).toBe('completed')
+    expect(seen).toEqual([{ x: 'X', base: 'B' }])
+  })
+
+  test('two "all" inputs still wait for both and deadlock when one is absent', async () => {
+    const seen: Json[] = []
+    const sink = sinkNode('test.sink', [dataPort('p'), dataPort('q')], seen)
+    const result = await run(
+      [
+        graphNode('psrc', 'test.const', { value: 'P' }),
+        graphNode('sink', 'test.sink', {}),
+        graphNode('qsrc', 'test.emit', {}),
+      ],
+      [
+        dataEdge('e1', 'psrc', 'value', 'sink', 'p'),
+        dataEdge('e2', 'qsrc', 'value', 'sink', 'q'),
+      ],
+      [sink],
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('DEADLOCK')
+    expect(result.error).toContain('sink.q')
+    expect(seen).toEqual([])
+  })
+})

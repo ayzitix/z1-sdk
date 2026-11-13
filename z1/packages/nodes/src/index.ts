@@ -1,8 +1,21 @@
 import { NodeRegistry, type NodeDefinition } from '@z1/node'
-import { coreNodes, coreConst, coreInput, coreOutput, coreTemplate } from './core.ts'
+import {
+  coreNodes,
+  coreConcat,
+  coreConst,
+  coreGet,
+  coreInput,
+  coreLast,
+  coreMerge,
+  coreMessage,
+  coreOutput,
+  coreTemplate,
+  coreValue,
+} from './core.ts'
 import { flowIf, flowLoop, flowMap, flowNodes } from './flow.ts'
 import { graphNodes, graphSubgraph } from './graph.ts'
 import { llmChat, llmModel, llmNodes } from './llm.ts'
+import { memoryContext, memoryNodes } from './memory.ts'
 import { toolCall, toolNodes } from './tools.ts'
 
 export const PACKAGE = '@z1/nodes'
@@ -17,6 +30,7 @@ export const builtinNodes: readonly NodeDefinition[] = [
   ...flowNodes,
   ...graphNodes,
   ...llmNodes,
+  ...memoryNodes,
   ...toolNodes,
 ]
 
@@ -28,10 +42,16 @@ export function createBuiltinRegistry(): NodeRegistry {
 
 export {
   coreNodes,
+  coreConcat,
   coreConst,
+  coreGet,
   coreInput,
+  coreLast,
+  coreMerge,
+  coreMessage,
   coreOutput,
   coreTemplate,
+  coreValue,
   flowNodes,
   flowIf,
   flowLoop,
@@ -41,6 +61,8 @@ export {
   llmNodes,
   llmChat,
   llmModel,
+  memoryNodes,
+  memoryContext,
   toolNodes,
   toolCall,
 }

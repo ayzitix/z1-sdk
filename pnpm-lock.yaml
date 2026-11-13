@@ -19003,6 +19003,9 @@ importers:
       '@z1/journal':
         specifier: workspace:*
         version: link:../../packages/journal
+      '@z1/memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
       '@z1/module':
         specifier: workspace:*
         version: link:../../packages/module
@@ -19028,6 +19031,21 @@ importers:
         specifier: workspace:*
         version: link:../../packages/server
 
+  z1/packages/agent:
+    dependencies:
+      '@z1/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/nodes':
+        specifier: workspace:*
+        version: link:../nodes
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
   z1/packages/graph:
     dependencies:
       '@z1/node':
@@ -19040,6 +19058,18 @@ importers:
   z1/packages/host-dsh: {}
 
   z1/packages/journal: {}
+
+  z1/packages/memory:
+    dependencies:
+      '@z1/journal':
+        specifier: workspace:*
+        version: link:../journal
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
   z1/packages/module:
     dependencies:

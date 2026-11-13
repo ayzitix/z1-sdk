@@ -7,6 +7,7 @@ import {
   type ModelHandle,
   type NodeDefinition,
   type ToolCall,
+  type ToolSchema,
 } from '@z1/node'
 import {
   asJson,
@@ -63,6 +64,30 @@ function toToolCalls(value: Json | undefined): ToolCall[] {
     calls.push({ id, name, arguments: entry['arguments'] ?? null })
   }
   return calls
+}
+
+const toolSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  parameters: z.record(z.string(), jsonValue).optional(),
+})
+
+/** Rebuilds the typed tool declarations from their wire value. */
+function toToolSchemas(value: Json | undefined): ToolSchema[] {
+  if (!Array.isArray(value)) return []
+  const schemas: ToolSchema[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) continue
+    const name = entry['name']
+    if (typeof name !== 'string') continue
+    const schema: ToolSchema = {
+      name,
+      parameters: isRecord(entry['parameters']) ? entry['parameters'] : {},
+    }
+    if (typeof entry['description'] === 'string') schema.description = entry['description']
+    schemas.push(schema)
+  }
+  return schemas
 }
 
 /** Rebuilds the typed messages from a wire value, keeping tool-call fidelity. */
@@ -123,6 +148,7 @@ const chat = defineNode({
     flowPort('in'),
     dataPort('model', modelHandleSchema, false),
     dataPort('messages', z.array(chatMessageSchema), false),
+    dataPort('tools', z.array(toolSchema), false),
     // Convenience for one-shot turns: a single user message without building
     // the `messages` array in the graph.
     dataPort('prompt', z.string(), false),
@@ -164,9 +190,13 @@ const chat = defineNode({
       system === undefined || messages[0]?.role === 'system'
         ? messages
         : [{ role: 'system' as const, content: system }, ...messages]
+    // A connected `tools` port is a deliberate declaration, so an empty array
+    // still means "no tools" and is forwarded as such.
+    const tools = Object.hasOwn(values, 'tools') ? toToolSchemas(values['tools']) : undefined
     const request: ChatRequest = {
       model: resolved,
       messages: withSystem,
+      ...(tools !== undefined ? { tools } : {}),
       ...(ctx.config.maxTokens !== undefined ? { maxTokens: ctx.config.maxTokens } : {}),
     }
 

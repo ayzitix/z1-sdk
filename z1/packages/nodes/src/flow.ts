@@ -60,6 +60,9 @@ const loop = defineNode({
       const { outputs } = await ctx.runSubgraph({
         graph: body,
         input: { value: current, iteration: iterations },
+        // The iteration is part of the execution path so a journal resume can
+        // replay iteration N and re-execute the one that was interrupted.
+        label: String(iterations),
       })
       iterations += 1
       current = bodyValue(outputs)
@@ -104,6 +107,8 @@ const map = defineNode({
       const { outputs } = await ctx.runSubgraph({
         graph: body,
         input: { item, index },
+        // Same as a loop: the index distinguishes per-item paths in the journal.
+        label: String(index),
       })
       results.push(bodyValue(outputs))
     }

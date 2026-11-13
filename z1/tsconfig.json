@@ -18,6 +18,12 @@
       "path": "./packages/nodes"
     },
     {
+      "path": "./packages/agent"
+    },
+    {
+      "path": "./packages/memory"
+    },
+    {
       "path": "./packages/journal"
     },
     {
