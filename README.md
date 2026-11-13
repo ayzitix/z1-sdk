@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner.svg" alt="z1 sdk — everything is a module" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-night.svg">
+    <img src="assets/banner-light.svg" alt="z1 sdk — everything is a module" width="100%">
   </picture>
 </p>
 
