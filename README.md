@@ -148,6 +148,23 @@ modules still need an OS-level sandbox — this is documented in
 The upstream engine still builds with its 10 gates (`pnpm run build`); the z1
 layer is a separate workspace group with its own tsconfig and test runner.
 
+## Providers
+
+Bring your own key. The built-in OpenAI-compatible provider talks to any
+`/chat/completions` endpoint — River, OpenAI, or a local server — with streaming
+text, reasoning deltas and tool calls. Configure it with env vars:
+
+```bash
+export RIVER_API_KEY=...            # provider "river" in the graph
+export Z1_OPENAI_BASE_URL=...       # optional endpoint override
+pnpm z1 run <graph> --live
+```
+
+Rate limits are retried with exponential backoff and `retry-after`;
+`Z1_LLM_RETRY_ATTEMPTS`, `Z1_LLM_RETRY_BASE_MS` and `Z1_LLM_RETRY_MAX_MS` tune
+the budget. A live River turn was verified end to end: the model returned a tool
+call, the tool ran, and a second model round produced the final answer.
+
 ## Licence
 
 MIT. The upstream copyright notice is kept in [LICENSE](LICENSE); third-party
