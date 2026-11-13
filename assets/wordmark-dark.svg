@@ -1,18 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 220" role="img" aria-label="z1 sdk">
-  <g transform="translate(0,30) scale(0.3125)">
-    <rect x="16" y="16" width="480" height="480" rx="112" fill="#f5f5f3"/>
-    <g fill="none" stroke="#0b0b0b" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M150 168 H302 L150 344 H302"/>
-      <path d="M362 168 L404 138 V344"/>
-      <path d="M352 344 H424"/>
-    </g>
-    <g fill="#0b0b0b">
-      <circle cx="150" cy="168" r="11"/>
-      <circle cx="302" cy="168" r="11"/>
-      <circle cx="150" cy="344" r="11"/>
-      <circle cx="302" cy="344" r="11"/>
-      <circle cx="404" cy="138" r="11"/>
-    </g>
+  <g transform="translate(0,30) scale(0.5333)">
+    <path d="M110.94 33.4257C133.425 14.1838 166.575 14.1838 189.06 33.4257V33.4257C196.987 40.2087 206.543 44.8107 216.788 46.7786V46.7786C245.851 52.3614 266.52 78.2786 265.495 107.856V107.856C265.134 118.282 267.494 128.622 272.343 137.859V137.859C286.099 164.063 278.723 196.381 254.96 214.021V214.021C246.583 220.239 239.97 228.532 235.772 238.082V238.082C223.862 265.175 193.995 279.558 165.388 271.977V271.977C155.303 269.305 144.697 269.305 134.612 271.977V271.977C106.005 279.558 76.1383 265.175 64.2283 238.082V238.082C60.0299 228.532 53.4169 220.239 45.0402 214.021V214.021C21.2772 196.381 13.9008 164.063 27.6568 137.859V137.859C32.5059 128.622 34.8661 118.282 34.5049 107.856V107.856C33.4805 78.2786 54.1488 52.3614 83.2122 46.7786V46.7786C93.4574 44.8107 103.013 40.2087 110.94 33.4257V33.4257Z" fill="#FFFFFF"/>
+    <ellipse cx="202.837" cy="113.514" rx="31.5" ry="42" transform="rotate(-9.24205 202.837 113.514)" fill="#2A2A2A"/>
+    <ellipse cx="121.657" cy="123.393" rx="31.5" ry="42" transform="rotate(-8.95985 121.657 123.393)" fill="#2A2A2A"/>
   </g>
-  <text x="196" y="140" fill="#f5f5f3" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="92" font-weight="700" letter-spacing="-4">z1 sdk</text>
+  <text x="196" y="140" fill="#F5F5F3" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="92" font-weight="700" letter-spacing="-4">z1 sdk</text>
 </svg>
