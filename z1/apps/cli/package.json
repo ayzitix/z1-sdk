@@ -31,7 +31,7 @@
     "@z1/protocol": "workspace:*",
     "@z1/server": "workspace:*",
     "@z1/bootstrap": "workspace:*",
-    "@z1/host-dsh": "workspace:*",
-    "@z1/memory": "workspace:*"
+    "@z1/memory": "workspace:*",
+    "@z1/template": "workspace:*"
   }
 }

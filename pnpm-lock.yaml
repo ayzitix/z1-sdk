@@ -19000,9 +19000,6 @@ importers:
       '@z1/graph':
         specifier: workspace:*
         version: link:../../packages/graph
-      '@z1/host-dsh':
-        specifier: workspace:*
-        version: link:../../packages/host-dsh
       '@z1/journal':
         specifier: workspace:*
         version: link:../../packages/journal
@@ -19033,6 +19030,9 @@ importers:
       '@z1/server':
         specifier: workspace:*
         version: link:../../packages/server
+      '@z1/template':
+        specifier: workspace:*
+        version: link:../../packages/template
 
   z1/packages/agent:
     dependencies:
@@ -19051,9 +19051,15 @@ importers:
       '@z1/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@z1/template':
+        specifier: workspace:*
+        version: link:../template
 
   z1/packages/bootstrap:
     dependencies:
+      '@z1/agent':
+        specifier: workspace:*
+        version: link:../agent
       '@z1/journal':
         specifier: workspace:*
         version: link:../journal
@@ -19078,6 +19084,9 @@ importers:
       '@z1/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@z1/template':
+        specifier: workspace:*
+        version: link:../template
 
   z1/packages/graph:
     dependencies:
@@ -19087,8 +19096,6 @@ importers:
       zod:
         specifier: 4.6.6
         version: 4.6.6
-
-  z1/packages/host-dsh: {}
 
   z1/packages/journal: {}
 
@@ -19244,6 +19251,15 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+
+  z1/packages/template:
+    dependencies:
+      '@z1/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
 
 packages:
 

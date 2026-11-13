@@ -41,7 +41,7 @@
       "path": "../../packages/bootstrap"
     },
     {
-      "path": "../../packages/host-dsh"
+      "path": "../../packages/template"
     }
   ],
   "compilerOptions": {

@@ -19,6 +19,7 @@ import {
 } from '@z1/node-host'
 import { createBuiltinRegistry } from '@z1/nodes'
 import { ProviderRegistry } from '@z1/provider'
+import type { TemplateRegistry } from '@z1/template'
 import {
   createMockRuntimeServices,
   type ApprovalService,
@@ -31,6 +32,7 @@ import {
 } from '@z1/runtime'
 
 import type { RuntimeConfig } from './config.ts'
+import { createTemplateRegistry } from './templates.ts'
 
 export interface RunOverrides {
   approval: ApprovalService
@@ -61,6 +63,8 @@ export interface Runtime {
   readonly memory: BranchMemory | undefined
   readonly providers: ProviderRegistry
   readonly llm: LlmService
+  /** Built-in `agent.loop` plus every static template under `templatesPath`. */
+  readonly templates: TemplateRegistry
   /** Builtins + declaration stubs for active modules (no workers). */
   readonly registry: NodeRegistry
   beginRun(overrides: RunOverrides): Promise<RunHandle>
@@ -90,6 +94,7 @@ export function builtinRegistry(): NodeRegistry {
 export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   mkdirSync(config.graphsPath, { recursive: true })
   mkdirSync(config.modulesPath, { recursive: true })
+  mkdirSync(config.templatesPath, { recursive: true })
 
   const journal = new SqliteJournal(config.dbPath)
   let modules: ModuleStore
@@ -109,6 +114,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   })
   const llm = config.live ? providers.create() : mock.llm
   const builtins = builtinRegistry()
+  const templates = createTemplateRegistry(config)
 
   /** A store projection, so an approval or rollback is visible immediately. */
   function currentRegistry(): NodeRegistry {
@@ -126,6 +132,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     memory,
     providers,
     llm,
+    templates,
     get registry(): NodeRegistry {
       return currentRegistry()
     },

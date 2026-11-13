@@ -1,5 +1,5 @@
 {
-  "name": "@z1/host-dsh",
+  "name": "@z1/template",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -15,5 +15,9 @@
   "files": [
     "lib",
     "src"
-  ]
+  ],
+  "dependencies": {
+    "@z1/graph": "workspace:*",
+    "@z1/node": "workspace:*"
+  }
 }

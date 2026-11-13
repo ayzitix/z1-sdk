@@ -2,6 +2,7 @@
   "dbPath": ".z1/runs.db",
   "graphsPath": ".z1/graphs",
   "modulesPath": "~/.z1/modules",
+  "templatesPath": ".z1/templates",
   "live": false,
   "useModules": true,
   "useMemory": true,

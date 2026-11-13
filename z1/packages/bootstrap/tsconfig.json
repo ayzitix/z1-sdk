@@ -5,6 +5,9 @@
   ],
   "references": [
     {
+      "path": "../agent"
+    },
+    {
       "path": "../journal"
     },
     {
@@ -27,6 +30,9 @@
     },
     {
       "path": "../runtime"
+    },
+    {
+      "path": "../template"
     }
   ],
   "compilerOptions": {

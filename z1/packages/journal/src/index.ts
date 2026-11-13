@@ -1,4 +1,10 @@
 export const PACKAGE = '@z1/journal'
 
-export type { BlobRecord, RunRecord, RunStatus } from './types.ts'
+export type {
+  BlobRecord,
+  RunJournal,
+  RunRecord,
+  RunStatus,
+  SequencedEvent,
+} from './types.ts'
 export { SqliteJournal } from './sqlite.ts'

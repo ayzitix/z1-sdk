@@ -3,6 +3,14 @@
   "include": [
     "src"
   ],
+  "references": [
+    {
+      "path": "../graph"
+    },
+    {
+      "path": "../node"
+    }
+  ],
   "compilerOptions": {
     "outDir": "lib",
     "rootDir": "src"

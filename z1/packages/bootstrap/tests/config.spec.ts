@@ -32,6 +32,7 @@ test('defaults resolve the relative paths against cwd', () => {
     dbPath: join(resolve(directory), DEFAULT_CONFIG.dbPath),
     graphsPath: join(resolve(directory), DEFAULT_CONFIG.graphsPath),
     modulesPath: join(homedir(), '.z1', 'modules'),
+    templatesPath: join(resolve(directory), DEFAULT_CONFIG.templatesPath),
     live: false,
     useModules: true,
     useMemory: true,

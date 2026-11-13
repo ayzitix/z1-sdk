@@ -5,7 +5,7 @@ import { DatabaseSync, type SQLOutputValue } from 'node:sqlite'
 
 import type { Journal, RunEvent } from '@z1/runtime'
 
-import { type BlobRecord, type RunRecord, parseRunStatus } from './types.ts'
+import { type BlobRecord, type RunJournal, type RunRecord, type SequencedEvent, parseRunStatus } from './types.ts'
 
 /** A fork chain deeper than this point at corrupted data rather than a real tree. */
 const MAX_FORK_DEPTH = 64
@@ -74,7 +74,7 @@ function rowToRun(row: Record<string, SQLOutputValue>): RunRecord {
  * SQLite-backed journal. Synchronous by design: a run must never report an
  * event it failed to persist, so writes commit before `append` returns.
  */
-export class SqliteJournal implements Journal {
+export class SqliteJournal implements Journal, RunJournal {
   readonly #file: string
   #db: DatabaseSync | undefined
 
@@ -189,6 +189,21 @@ export class SqliteJournal implements Journal {
       }
     }
     return events
+  }
+
+  /**
+   * This run's own rows, ascending, with their stored sequence numbers. Unlike
+   * `read` it never walks the fork chain, so `seq` is the run's own numbering
+   * (a fork point is a position in that numbering, not in the merged replay).
+   */
+  ownedEvents(runId: string): readonly SequencedEvent[] {
+    const rows = this.#handle()
+      .prepare('SELECT seq, data FROM events WHERE run_id = ? ORDER BY seq')
+      .all(runId)
+    return rows.map((row) => ({
+      seq: columnNumber(row, 'seq'),
+      event: JSON.parse(columnText(row, 'data')) as RunEvent,
+    }))
   }
 
   fork(sourceRunId: string, atSeq: number, newRunId: string): RunRecord {

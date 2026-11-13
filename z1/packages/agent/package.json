@@ -21,6 +21,7 @@
     "@z1/node": "workspace:*",
     "@z1/nodes": "workspace:*",
     "@z1/prompt": "workspace:*",
-    "@z1/runtime": "workspace:*"
+    "@z1/runtime": "workspace:*",
+    "@z1/template": "workspace:*"
   }
 }

@@ -8,7 +8,7 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 ## M0 — working headless graph engine
 
 - [x] T0 Scaffold `z1/` workspace: packages `graph`, `node`, `runtime`, `nodes`,
-  `journal`, `protocol`, `server`, `host-dsh`; app `cli`; tsconfigs, vitest,
+  `journal`, `protocol`, `server`; app `cli`; tsconfigs, vitest,
   scripts, root wiring, `pnpm install`, build + one trivial test green.
 - [x] T1 `@z1/node`: contract types + `defineNode` + `NodeRegistry`.
 - [x] T2 `@z1/graph`: document schema, `parseGraph`, `validateGraph`,
@@ -105,5 +105,8 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 
 - [x] T40 Provider registry as data; `@z1/provider`, config-only providers.
 - [x] T41 `@z1/bootstrap` + `z1.config.json`; CLI and server share one runtime.
-- [ ] T42 Agent template and prompt presets as data.
-- [ ] T43 Journal interface, path defaults, dead dependency cleanup.
+- [x] T42 Agent template and static templates as data (`@z1/template`,
+  `z1 run --template`, `z1 template list`).
+- [x] T43 `RunJournal` interface (no raw SQL in CLI), centralized paths,
+  `host-dsh` removed.
+- [ ] T44 Prompt presets as data files (deferred; the prompt is already nodes).

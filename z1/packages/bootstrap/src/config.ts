@@ -22,6 +22,8 @@ export interface RuntimeConfig {
   graphsPath: string
   /** Installed modules, proposals and the audit log. */
   modulesPath: string
+  /** Static graph templates, one JSON file per template. */
+  templatesPath: string
   /** Route model calls to the configured providers instead of the mock. */
   live: boolean
   /** Load active module declarations and start their workers on a run. */
@@ -38,12 +40,15 @@ export const DEFAULT_DB_PATH = '.z1/runs.db'
 export const DEFAULT_GRAPHS_PATH = '.z1/graphs'
 /** Default module store, relative to the home directory. */
 export const DEFAULT_MODULES_PATH = '~/.z1/modules'
+/** Default static template library, relative to `cwd`. */
+export const DEFAULT_TEMPLATES_PATH = '.z1/templates'
 
 /** The config used when neither a file nor the environment says otherwise. */
 export const DEFAULT_CONFIG = {
   dbPath: DEFAULT_DB_PATH,
   graphsPath: DEFAULT_GRAPHS_PATH,
   modulesPath: DEFAULT_MODULES_PATH,
+  templatesPath: DEFAULT_TEMPLATES_PATH,
   live: false,
   useModules: true,
   useMemory: true,
@@ -53,6 +58,7 @@ const FILE_KEYS = [
   'dbPath',
   'graphsPath',
   'modulesPath',
+  'templatesPath',
   'live',
   'useModules',
   'useMemory',
@@ -65,6 +71,7 @@ interface RuntimeConfigFile {
   dbPath?: string
   graphsPath?: string
   modulesPath?: string
+  templatesPath?: string
   live?: boolean
   useModules?: boolean
   useMemory?: boolean
@@ -155,7 +162,7 @@ function readConfigFile(file: string): RuntimeConfigFile {
   }
 
   const config: RuntimeConfigFile = {}
-  for (const key of ['dbPath', 'graphsPath', 'modulesPath'] as const) {
+  for (const key of ['dbPath', 'graphsPath', 'modulesPath', 'templatesPath'] as const) {
     const value = raw[key]
     if (value !== undefined) {
       if (typeof value !== 'string' || value === '') {
@@ -253,6 +260,11 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
     env['Z1_MODULES_DIR'] ??
     fromFile.modulesPath ??
     DEFAULT_CONFIG.modulesPath
+  const templatesPath =
+    overrides.templatesPath ??
+    env['Z1_TEMPLATES_DIR'] ??
+    fromFile.templatesPath ??
+    DEFAULT_CONFIG.templatesPath
   const live =
     overrides.live ?? envBoolean('Z1_LIVE', env) ?? fromFile.live ?? DEFAULT_CONFIG.live
 
@@ -261,6 +273,7 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
     dbPath: expandPath(dbPath, cwd),
     graphsPath: expandPath(graphsPath, cwd),
     modulesPath: expandPath(modulesPath, cwd),
+    templatesPath: expandPath(templatesPath, cwd),
     live,
     useModules: overrides.useModules ?? fromFile.useModules ?? DEFAULT_CONFIG.useModules,
     useMemory: overrides.useMemory ?? fromFile.useMemory ?? DEFAULT_CONFIG.useMemory,

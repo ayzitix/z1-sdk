@@ -22,7 +22,7 @@ modify the engine.
 branch forks, sandboxed executable modules with an approval panel, the agent
 loop as a real graph, branch-tree memory, a headless server, real
 OpenAI-compatible models and a browser canvas are implemented and tested
-(516 tests). Not implemented yet: editor integration and OS-level sandboxing
+(538 tests). Not implemented yet: editor integration and OS-level sandboxing
 for untrusted modules.
 
 ## Quick start
@@ -48,6 +48,10 @@ pnpm z1 run <graph> --resume <forkedRunId>
 
 # the agent loop as a graph (tool call, loop, memory)
 pnpm z1 run z1/examples/agent.loop.graph.json --message '[[tool:echo]] hi'
+
+# or run a template without a graph file
+pnpm z1 run --template agent.loop --message '[[tool:echo]] hi'
+pnpm z1 template list
 
 # executable modules: propose, review, approve, then run
 pnpm z1 module propose z1/examples/modules/echo
@@ -161,6 +165,7 @@ modules still need an OS-level sandbox — this is documented in
 | `z1/packages/protocol` | JSON-RPC 2.0 transport and method map |
 | `z1/packages/bootstrap` | one runtime composition from `z1.config.json` |
 | `z1/packages/provider` | provider registry and routing |
+| `z1/packages/template` | graph templates: builder and static, loaded by id |
 | `z1/packages/server` | headless WebSocket server |
 | `z1/packages/provider-openai` | OpenAI-compatible streaming provider |
 | `z1/apps/cli` | the `z1` executable |
@@ -182,6 +187,7 @@ the CLI and the server:
   "dbPath": ".z1/runs.db",
   "graphsPath": ".z1/graphs",
   "modulesPath": "~/.z1/modules",
+  "templatesPath": ".z1/templates",
   "live": false,
   "useModules": true,
   "useMemory": true,
@@ -193,9 +199,11 @@ the CLI and the server:
 ```
 
 Precedence: CLI flags > environment (`Z1_DB`, `Z1_GRAPHS_DIR`,
-`Z1_MODULES_DIR`, `Z1_LIVE`, `Z1_PROVIDERS`) > file > defaults. A provider is
+`Z1_MODULES_DIR`, `Z1_TEMPLATES_DIR`, `Z1_LIVE`, `Z1_PROVIDERS`) > file > defaults. A provider is
 data: add one by config, not by editing the CLI. See
-[`z1.config.example.json`](z1.config.example.json).
+[`z1.config.example.json`](z1.config.example.json). Static graph templates are
+`*.json` files under `templatesPath`, listed by `z1 template list` and run with
+`z1 run --template <id>`.
 
 ## Providers
 

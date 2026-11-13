@@ -41,7 +41,6 @@ z1/
     journal/                # @z1/journal (M1)
     protocol/               # @z1/protocol (M2)
     server/                 # @z1/server (M2)
-    host-dsh/               # @z1/host-dsh (M1)
   apps/
     cli/                    # @z1/cli, bin `z1`
   examples/

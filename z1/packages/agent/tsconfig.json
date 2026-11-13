@@ -17,6 +17,9 @@
       "path": "../prompt"
     },
     {
+      "path": "../template"
+    },
+    {
       "path": "../runtime"
     }
   ],

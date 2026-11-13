@@ -42,13 +42,13 @@
       "path": "./packages/bootstrap"
     },
     {
-      "path": "./packages/host-dsh"
-    },
-    {
       "path": "./packages/node-host"
     },
     {
       "path": "./packages/prompt"
+    },
+    {
+      "path": "./packages/template"
     },
     {
       "path": "./apps/cli"

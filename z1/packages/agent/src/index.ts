@@ -6,6 +6,7 @@ import {
   type PromptSection,
   type RoleId,
 } from '@z1/prompt'
+import type { GraphTemplate, TemplateContext, TemplateRegistry } from '@z1/template'
 
 export const PACKAGE = '@z1/agent'
 
@@ -404,3 +405,44 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
 export const agentLoopExample: GraphDocument = buildAgentGraph({
   model: { provider: 'mock', model: 'mock-1' },
 })
+
+function isRoleId(value: string): value is RoleId {
+  return Object.prototype.hasOwnProperty.call(ROLE_SECTIONS, value)
+}
+
+/** A role name is data, so an unknown one names the role instead of failing in a node. */
+function templateRole(role: string | undefined): RoleId | undefined {
+  if (role === undefined) return undefined
+  if (!isRoleId(role)) {
+    throw new Error(`unknown role "${role}"; expected ${Object.keys(ROLE_SECTIONS).join(', ')}`)
+  }
+  return role
+}
+
+/**
+ * The agent loop as a template: `kind: 'builder'` because its graph depends on
+ * the model, tools and prompt settings the caller supplies.
+ */
+export const agentTemplate: GraphTemplate = {
+  kind: 'builder',
+  id: 'agent.loop',
+  version: '1.0.0',
+  title: 'Agent loop',
+  description: 'Prompt stack, model turn, tool round trip and final answer as one graph.',
+  build(context: TemplateContext): GraphDocument {
+    const role = templateRole(context.role)
+    return buildAgentGraph({
+      model: context.model ?? { provider: 'mock', model: 'mock-1' },
+      ...(role === undefined ? {} : { role }),
+      ...(context.tools === undefined ? {} : { tools: context.tools }),
+      ...(context.maxSteps === undefined ? {} : { maxSteps: context.maxSteps }),
+      ...(context.system === undefined ? {} : { system: context.system }),
+      ...(context.budgetTokens === undefined ? {} : { budgetTokens: context.budgetTokens }),
+    })
+  },
+}
+
+/** Register the built-in templates; the registry stays the caller's. */
+export function registerAgentTemplates(registry: TemplateRegistry): void {
+  registry.register(agentTemplate)
+}

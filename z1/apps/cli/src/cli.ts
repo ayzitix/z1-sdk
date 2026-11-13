@@ -2,15 +2,14 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
-import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 import {
   builtinRegistry,
   createRuntime,
+  createTemplateRegistry,
   loadRuntimeConfig,
   type Runtime,
   type RuntimeConfig,
@@ -23,6 +22,7 @@ import {
   type ValidationIssue,
 } from '@z1/graph'
 import { ModuleStore, type ModuleCapabilities } from '@z1/module'
+import type { SequencedEvent } from '@z1/journal'
 import {
   MOCK_PROVIDER,
   resolveApiKey,
@@ -36,7 +36,8 @@ import {
   type RunEvent,
   type RunResult,
 } from '@z1/runtime'
-import type { Json } from '@z1/node'
+import type { Json, ModelHandle } from '@z1/node'
+import type { TemplateContext } from '@z1/template'
 
 /** Everything the CLI is allowed to touch outside the graph itself. */
 export interface CliIO {
@@ -57,12 +58,16 @@ const USAGE = [
   '      [--approve auto|ask|deny] [--module-approve auto|ask|deny] [--db <path>]',
   '      [--suspend] [--resume <runId>] [--live]',
   '      [--modules-dir <path>] [--no-modules] [--no-memory]',
+  '  run --template <id> [--model <provider/model>] [--provider <id>] [--role <id>]',
+  '      [--max-steps <n>] [--system <text>] [--budget-tokens <n>] [--json] [--db <path>]',
+  '  template list [--templates-dir <path>] [--json]',
   '  tree [--db <path>] [--json]',
   '  memory context <runId> [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
   '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
+  '      [--templates-dir <path>]',
   '  studio [--host <host>] [--port <port>] [--db <path>] [--graphs-dir <path>]',
-  '      [--modules-dir <path>] [--token <token>] [--live] [--no-open] [--json]',
+  '      [--modules-dir <path>] [--templates-dir <path>] [--token <token>] [--live] [--no-open] [--json]',
   '  module list [--modules-dir <path>] [--json]',
   '  module propose <dir> [--modules-dir <path>] [--json]',
   '  module approve <id>[@<version>] [--future] [--modules-dir <path>] [--json]',
@@ -360,15 +365,24 @@ interface ModuleCommandValues {
   'modules-dir'?: string
 }
 
-function modulesDirectory(
-  values: ModuleCommandValues,
-  io: CliIO,
-): string {
-  const env = io.env ?? process.env
-  return values['modules-dir'] ?? env['Z1_MODULES_DIR'] ?? join(homedir(), '.z1', 'modules')
-}
-
-function openModuleStore(directory: string, io: CliIO): ModuleStore | undefined {
+/**
+ * Module commands resolve their store through the same config as `run`, so
+ * `--modules-dir`, `Z1_MODULES_DIR`, `z1.config.json` and the built-in default
+ * have exactly one definition (in `@z1/bootstrap`), not a second copy here.
+ */
+function openModuleStore(values: ModuleCommandValues, io: CliIO): ModuleStore | undefined {
+  let directory: string
+  try {
+    directory = loadRuntimeConfig({
+      cwd: process.cwd(),
+      env: io.env ?? process.env,
+      overrides:
+        values['modules-dir'] === undefined ? {} : { modulesPath: values['modules-dir'] },
+    }).modulesPath
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return undefined
+  }
   try {
     return new ModuleStore(directory)
   } catch (error) {
@@ -452,7 +466,7 @@ function moduleListCommand(args: readonly string[], io: CliIO): number {
   if (parsed === undefined) return 2
   if (parsed.positionals.length > 0) return usage(io)
 
-  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  const store = openModuleStore(parsed.values, io)
   if (store === undefined) return 1
 
   let modules: ReturnType<ModuleStore['list']>
@@ -498,7 +512,7 @@ async function moduleProposeCommand(args: readonly string[], io: CliIO): Promise
   const directory = parsed.positionals[0]
   if (directory === undefined || parsed.positionals.length > 1) return usage(io)
 
-  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  const store = openModuleStore(parsed.values, io)
   if (store === undefined) return 1
 
   let proposed: ReturnType<ModuleStore['propose']>
@@ -532,7 +546,7 @@ function moduleApproveCommand(args: readonly string[], io: CliIO): number {
   const spec = parsed.positionals[0]
   if (spec === undefined || parsed.positionals.length > 1) return usage(io)
 
-  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  const store = openModuleStore(parsed.values, io)
   if (store === undefined) return 1
 
   const { moduleId, version } = splitModuleSpec(spec)
@@ -599,7 +613,7 @@ function moduleRollbackCommand(args: readonly string[], io: CliIO): number {
   const moduleId = parsed.positionals[0]
   if (moduleId === undefined || parsed.positionals.length > 1) return usage(io)
 
-  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  const store = openModuleStore(parsed.values, io)
   if (store === undefined) return 1
 
   let rolledBack: ReturnType<ModuleStore['rollback']>
@@ -634,7 +648,7 @@ function moduleAuditCommand(args: readonly string[], io: CliIO): number {
   if (parsed === undefined) return 2
   if (parsed.positionals.length > 0) return usage(io)
 
-  const store = openModuleStore(modulesDirectory(parsed.values, io), io)
+  const store = openModuleStore(parsed.values, io)
   if (store === undefined) return 1
 
   let entries: ReturnType<ModuleStore['audit']>
@@ -668,6 +682,107 @@ function nodeApprovalService(behavior: MockApprovalBehavior): ApprovalService {
   }
 }
 
+/** `parseArgs` hands back strings, so a numeric flag is validated as a string. */
+function positiveInt(value: string, flag: string): number {
+  if (!/^\d+$/.test(value) || Number(value) < 1) {
+    throw new UsageError(`${flag} must be a positive integer, got "${value}"`)
+  }
+  return Number(value)
+}
+
+/**
+ * `--model provider/model` splits on the first `/`, `--provider <id>` names the
+ * provider alone, and either may omit the provider (then `mock`). With neither
+ * flag the template keeps its own default model.
+ */
+function templateModel(values: { model?: string; provider?: string }): ModelHandle | undefined {
+  if (values.model === undefined && values.provider === undefined) return undefined
+
+  let provider = values.provider
+  if (provider === '') throw new UsageError('--provider must not be empty')
+
+  let model = 'mock-1'
+  const spec = values.model
+  if (spec !== undefined) {
+    const slash = spec.indexOf('/')
+    if (slash >= 0) {
+      const named = spec.slice(0, slash)
+      model = spec.slice(slash + 1)
+      if (named === '' || model === '') {
+        throw new UsageError(`invalid --model "${spec}"; expected <provider>/<model>`)
+      }
+      provider ??= named
+    } else {
+      if (spec === '') throw new UsageError('--model must not be empty')
+      model = spec
+    }
+  }
+
+  return { provider: provider ?? 'mock', model }
+}
+
+function templateListCommand(args: readonly string[], io: CliIO): number {
+  let values: { json?: boolean; 'templates-dir'?: string }
+  let positionals: string[]
+  try {
+    const parsed = parseArgs({
+      args: [...args],
+      options: { json: { type: 'boolean' }, 'templates-dir': { type: 'string' } },
+      allowPositionals: true,
+      strict: true,
+    })
+    values = parsed.values
+    positionals = [...parsed.positionals]
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return usage(io)
+  }
+  if (positionals.length > 0) return usage(io)
+
+  let config: RuntimeConfig
+  try {
+    config = loadRuntimeConfig({
+      cwd: process.cwd(),
+      env: io.env ?? process.env,
+      overrides:
+        values['templates-dir'] === undefined
+          ? {}
+          : { templatesPath: values['templates-dir'] },
+    })
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+
+  let templates
+  try {
+    templates = createTemplateRegistry(config).list()
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 1
+  }
+
+  if (values.json === true) {
+    io.stdout(`${JSON.stringify(templates)}\n`)
+    return 0
+  }
+  if (templates.length === 0) {
+    io.stdout('no templates\n')
+    return 0
+  }
+  for (const template of templates) {
+    io.stdout(`${template.id}@${template.version}  ${template.title}\n`)
+  }
+  return 0
+}
+
+function templateCommand(args: readonly string[], io: CliIO): number {
+  const [subcommand, ...rest] = args
+  if (subcommand === 'list') return templateListCommand(rest, io)
+  io.stderr(`template requires: list\n`)
+  return usage(io)
+}
+
 async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   let values: {
     input?: string
@@ -684,6 +799,14 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     'modules-dir'?: string
     'no-modules'?: boolean
     'no-memory'?: boolean
+    template?: string
+    model?: string
+    provider?: string
+    role?: string
+    'max-steps'?: string
+    system?: string
+    'budget-tokens'?: string
+    'templates-dir'?: string
   }
   let positionals: string[]
   try {
@@ -704,6 +827,14 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         'modules-dir': { type: 'string' },
         'no-modules': { type: 'boolean' },
         'no-memory': { type: 'boolean' },
+        template: { type: 'string' },
+        model: { type: 'string' },
+        provider: { type: 'string' },
+        role: { type: 'string' },
+        'max-steps': { type: 'string' },
+        system: { type: 'string' },
+        'budget-tokens': { type: 'string' },
+        'templates-dir': { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -715,8 +846,17 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     return usage(io)
   }
 
+  const templateId = values.template
   const path = positionals[0]
-  if (path === undefined || positionals.length > 1) return usage(io)
+  if (positionals.length > 1) return usage(io)
+  if (templateId !== undefined) {
+    if (path !== undefined) {
+      io.stderr('a graph file and --template are mutually exclusive\n')
+      return 2
+    }
+  } else if (path === undefined) {
+    return usage(io)
+  }
 
   const approve = values.approve ?? 'auto'
   if (!isApproveMode(approve)) {
@@ -745,8 +885,24 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     return usage(io)
   }
 
+  let model: ModelHandle | undefined
+  let maxSteps: number | undefined
+  let budgetTokens: number | undefined
+  try {
+    if (values['max-steps'] !== undefined) {
+      maxSteps = positiveInt(values['max-steps'], '--max-steps')
+    }
+    if (values['budget-tokens'] !== undefined) {
+      budgetTokens = positiveInt(values['budget-tokens'], '--budget-tokens')
+    }
+    if (templateId !== undefined) model = templateModel(values)
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return usage(io)
+  }
+
   let input: Json = null
-  let graph: GraphDocument
+  let graph: GraphDocument | undefined
   try {
     if (values.message !== undefined) {
       // Plain text, never parsed: `--message '{"a":1}'` is the string itself.
@@ -759,7 +915,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         `--input-file "${values['input-file']}"`,
       )
     }
-    graph = await loadGraph(path)
+    if (path !== undefined) graph = await loadGraph(path)
   } catch (error) {
     io.stderr(`${errorMessage(error)}\n`)
     return 2
@@ -775,6 +931,9 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
       overrides: {
         ...(values.db === undefined ? {} : { dbPath: values.db }),
         ...(values['modules-dir'] === undefined ? {} : { modulesPath: values['modules-dir'] }),
+        ...(values['templates-dir'] === undefined
+          ? {}
+          : { templatesPath: values['templates-dir'] }),
         ...(values.live === undefined ? {} : { live: values.live }),
         ...(values['no-modules'] === true ? { useModules: false } : {}),
         ...(values['no-memory'] === true ? { useMemory: false } : {}),
@@ -794,6 +953,26 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   }
 
   try {
+    if (graph === undefined) {
+      if (templateId === undefined) {
+        io.stderr('a graph file or --template is required\n')
+        return usage(io)
+      }
+      const context: TemplateContext = {
+        ...(model === undefined ? {} : { model }),
+        ...(values.role === undefined ? {} : { role: values.role }),
+        ...(maxSteps === undefined ? {} : { maxSteps }),
+        ...(values.system === undefined ? {} : { system: values.system }),
+        ...(budgetTokens === undefined ? {} : { budgetTokens }),
+      }
+      try {
+        graph = runtime.templates.build(templateId, context)
+      } catch (error) {
+        io.stderr(`${errorMessage(error)}\n`)
+        return 1
+      }
+    }
+
     const issues = validateGraphTree(graph, runtime.registry)
     if (issues.length > 0) {
       for (const issue of issues) io.stderr(`${issueLine(issue)}\n`)
@@ -1045,30 +1224,18 @@ function isNodeStartedEvent(value: unknown): value is { type: 'node.started'; pa
 }
 
 /**
- * Sequence number of a `node.started` event inside the run's own numbering.
- * `SqliteJournal.read` merges the fork chain and drops sequence numbers, so a
- * read-only connection is used to find the exact index `fork` needs.
+ * Sequence number of the first `node.started` event for `path` in the run's own
+ * numbering. `SqliteJournal.read` merges the fork chain and drops sequence
+ * numbers, so the journal exposes `ownedEvents` for exactly this lookup.
  */
-function nodeStartedSeq(dbPath: string, runId: string, path: string): number | undefined {
-  let db: DatabaseSync
-  try {
-    db = new DatabaseSync(dbPath, { readOnly: true })
-  } catch (error) {
-    throw new Error(`cannot read events from "${dbPath}": ${errorMessage(error)}`)
+function nodeStartedSeq(
+  events: readonly SequencedEvent[],
+  path: string,
+): number | undefined {
+  for (const { seq, event } of events) {
+    if (isNodeStartedEvent(event) && event.path === path) return seq
   }
-  try {
-    const rows = db.prepare('SELECT seq, data FROM events WHERE run_id = ? ORDER BY seq').all(runId)
-    for (const row of rows) {
-      const seq = row['seq']
-      const data = row['data']
-      if (typeof seq !== 'number' || typeof data !== 'string') continue
-      const event: unknown = JSON.parse(data)
-      if (isNodeStartedEvent(event) && event.path === path) return seq
-    }
-    return undefined
-  } finally {
-    db.close()
-  }
+  return undefined
 }
 
 async function forkCommand(args: readonly string[], io: CliIO): Promise<number> {
@@ -1106,7 +1273,6 @@ async function forkCommand(args: readonly string[], io: CliIO): Promise<number> 
     useModules: false,
   })
   if (runtime === undefined) return 1
-  const dbPath = runtime.config.dbPath
   const journal = runtime.journal
 
   try {
@@ -1119,13 +1285,7 @@ async function forkCommand(args: readonly string[], io: CliIO): Promise<number> 
     if (/^\d+$/.test(at)) {
       atSeq = Number(at)
     } else {
-      let seq: number | undefined
-      try {
-        seq = nodeStartedSeq(dbPath, sourceId, at)
-      } catch (error) {
-        io.stderr(`${errorMessage(error)}\n`)
-        return 1
-      }
+      const seq = nodeStartedSeq(journal.ownedEvents(sourceId), at)
       if (seq === undefined) {
         io.stderr(`no node.started event with path "${at}" in run "${sourceId}"\n`)
         return 1
@@ -1190,6 +1350,7 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
     token?: string
     live?: boolean
     json?: boolean
+    'templates-dir'?: string
   }
   let positionals: string[]
   try {
@@ -1202,6 +1363,7 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
         token: { type: 'string' },
         live: { type: 'boolean' },
         json: { type: 'boolean' },
+        'templates-dir': { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -1232,13 +1394,18 @@ async function serveCommand(args: readonly string[], io: CliIO): Promise<number>
 
   const host = values.host ?? DEFAULT_SERVE_HOST
   const token = values.token
+  const baseEnv = io.env ?? process.env
+  const env =
+    values['templates-dir'] === undefined
+      ? baseEnv
+      : { ...baseEnv, Z1_TEMPLATES_DIR: values['templates-dir'] }
 
   let server: Z1Server
   try {
     server = await startServer({
       host,
       port,
-      env: io.env ?? process.env,
+      env,
       // Omitted paths fall back to `z1.config.json`, the environment, defaults.
       ...(values.db === undefined ? {} : { dbPath: values.db }),
       // Omitting `token` keeps the server's own random generation.
@@ -1304,6 +1471,7 @@ async function studioCommand(args: readonly string[], io: CliIO): Promise<number
     db?: string
     'graphs-dir'?: string
     'modules-dir'?: string
+    'templates-dir'?: string
     token?: string
     live?: boolean
     'no-open'?: boolean
@@ -1319,6 +1487,7 @@ async function studioCommand(args: readonly string[], io: CliIO): Promise<number
         db: { type: 'string' },
         'graphs-dir': { type: 'string' },
         'modules-dir': { type: 'string' },
+        'templates-dir': { type: 'string' },
         token: { type: 'string' },
         live: { type: 'boolean' },
         'no-open': { type: 'boolean' },
@@ -1357,12 +1526,17 @@ async function studioCommand(args: readonly string[], io: CliIO): Promise<number
 
   const host = values.host ?? DEFAULT_SERVE_HOST
   const token = values.token
+  const baseEnv = io.env ?? process.env
+  const env =
+    values['templates-dir'] === undefined
+      ? baseEnv
+      : { ...baseEnv, Z1_TEMPLATES_DIR: values['templates-dir'] }
   let server: Z1Server
   try {
     server = await startServer({
       host,
       port,
-      env: io.env ?? process.env,
+      env,
       staticDir,
       // Omitted paths fall back to `z1.config.json`, the environment, defaults.
       ...(values.db === undefined ? {} : { dbPath: values.db }),
@@ -1415,6 +1589,8 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return await studioCommand(rest, io)
     case 'module':
       return await moduleCommand(rest, io)
+    case 'template':
+      return templateCommand(rest, io)
     default:
       io.stderr(`unknown command "${command}"\n`)
       return usage(io)

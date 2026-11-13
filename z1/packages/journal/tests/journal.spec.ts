@@ -127,6 +127,55 @@ test('fork replays the parent prefix, including nested forks', () => {
   journal.close()
 })
 
+test('ownedEvents returns only this run’s rows, with its own sequence numbers', () => {
+  const journal = new SqliteJournal(':memory:')
+  journal.createRun(run('parent'))
+  const parentEvents: RunEvent[] = [started('parent', 1), node('parent', 2), node('parent', 3)]
+  for (const event of parentEvents) journal.append(event)
+
+  expect(journal.ownedEvents('parent')).toEqual([
+    { seq: 1, event: parentEvents[0] },
+    { seq: 2, event: parentEvents[1] },
+    { seq: 3, event: parentEvents[2] },
+  ])
+  expect(journal.ownedEvents('nobody')).toEqual([])
+
+  const child = journal.fork('parent', 2, 'child')
+  expect(child.parentRunId).toBe('parent')
+  // A fresh fork owns nothing yet; the parent's prefix lives in `read`.
+  expect(journal.ownedEvents('child')).toEqual([])
+  expect(seqOf(journal.read('child'), () => true)).toEqual([1, 2])
+
+  journal.append(node('child', 100))
+  journal.append(node('child', 101))
+  expect(journal.ownedEvents('child')).toEqual([
+    { seq: 1, event: node('child', 100) },
+    { seq: 2, event: node('child', 101) },
+  ])
+  // read still replays the parent prefix, the fork point included.
+  expect(seqOf(journal.read('child'), () => true)).toEqual([1, 2, 100, 101])
+  // The parent is untouched by the child's numbering.
+  expect(seqOf(journal.read('parent'), () => true)).toEqual([1, 2, 3])
+  journal.close()
+})
+
+test('ownedEvents keeps nested fork numbering local to each run', () => {
+  const journal = new SqliteJournal(':memory:')
+  journal.createRun(run('root'))
+  journal.append(node('root', 1))
+  journal.fork('root', 1, 'mid')
+  journal.append(node('mid', 10))
+  journal.fork('mid', 1, 'leaf')
+  journal.append(node('leaf', 20))
+
+  expect(journal.ownedEvents('root').map((entry) => entry.seq)).toEqual([1])
+  expect(journal.ownedEvents('mid').map((entry) => entry.seq)).toEqual([1])
+  expect(journal.ownedEvents('leaf').map((entry) => entry.seq)).toEqual([1])
+  expect(journal.ownedEvents('leaf')[0]?.event).toEqual(node('leaf', 20))
+  expect(seqOf(journal.read('leaf'), () => true)).toEqual([1, 10, 20])
+  journal.close()
+})
+
 test('a corrupt parent cycle is refused instead of looping', () => {
   const journal = new SqliteJournal(':memory:')
   journal.createRun(run('a', { parentRunId: 'b', forkSeq: 1 }))
