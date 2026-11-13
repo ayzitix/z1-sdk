@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { dirname, isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -51,6 +51,15 @@ export interface CliIO {
   isTTY: boolean
   /** Credential source; the bin passes `process.env`, tests pass a stub. */
   env?: Record<string, string | undefined>
+  /**
+   * Project directory the command treats as its workspace, i.e. the directory
+   * the caller invoked the CLI from. Defaults to `process.cwd()`.
+   *
+   * The bin supplies it because `pnpm` runs a workspace script with the
+   * package root as `process.cwd()`, so the caller's directory only survives
+   * as `INIT_CWD`. Tests set it directly to stay independent of how they run.
+   */
+  cwd?: string
 }
 
 const USAGE = [
@@ -63,6 +72,7 @@ const USAGE = [
   '      [--approve auto|ask|deny] [--module-approve auto|ask|deny] [--db <path>]',
   '      [--suspend] [--resume <runId>] [--live]',
   '      [--modules-dir <path>] [--no-modules] [--no-service-modules] [--no-memory]',
+  '      [--cwd <path>]',
   '  run --template <id> [--model <provider/model>] [--provider <id>] [--role <id>]',
   '      [--max-steps <n>] [--system <text>] [--budget-tokens <n>] [--json] [--db <path>]',
   '  template list [--templates-dir <path>] [--json]',
@@ -98,6 +108,16 @@ class UsageError extends Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The project directory a command roots its runtime config in: the caller's
+ * directory, not the package root `pnpm` runs the script from. `--cwd` wins
+ * over the inherited value, so a scripted run can name its workspace outright.
+ */
+function projectDirectory(io: CliIO, flag?: string): string {
+  if (flag !== undefined) return resolve(flag)
+  return io.cwd ?? process.cwd()
 }
 
 function usage(io: CliIO): number {
@@ -380,7 +400,7 @@ function openModuleStore(values: ModuleCommandValues, io: CliIO): ModuleStore | 
   let directory: string
   try {
     directory = loadRuntimeConfig({
-      cwd: process.cwd(),
+      cwd: projectDirectory(io),
       env: io.env ?? process.env,
       overrides:
         values['modules-dir'] === undefined ? {} : { modulesPath: values['modules-dir'] },
@@ -792,7 +812,7 @@ function templateListCommand(args: readonly string[], io: CliIO): number {
   let config: RuntimeConfig
   try {
     config = loadRuntimeConfig({
-      cwd: process.cwd(),
+      cwd: projectDirectory(io),
       env: io.env ?? process.env,
       overrides:
         values['templates-dir'] === undefined
@@ -858,6 +878,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     system?: string
     'budget-tokens'?: string
     'templates-dir'?: string
+    cwd?: string
   }
   let positionals: string[]
   try {
@@ -887,6 +908,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         system: { type: 'string' },
         'budget-tokens': { type: 'string' },
         'templates-dir': { type: 'string' },
+        cwd: { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -921,6 +943,11 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     io.stderr(
       `invalid --module-approve "${moduleApprove}"; expected auto, ask or deny\n`,
     )
+    return usage(io)
+  }
+
+  if (values.cwd === '') {
+    io.stderr('--cwd must not be empty\n')
     return usage(io)
   }
 
@@ -1000,7 +1027,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   let config: RuntimeConfig
   try {
     config = loadRuntimeConfig({
-      cwd: process.cwd(),
+      cwd: projectDirectory(io, values.cwd),
       env,
       overrides: {
         ...(values.db === undefined ? {} : { dbPath: values.db }),
@@ -1196,7 +1223,11 @@ async function openRuntime(
 ): Promise<Runtime | undefined> {
   try {
     return await createRuntime(
-      loadRuntimeConfig({ cwd: process.cwd(), env: io.env ?? process.env, overrides }),
+      loadRuntimeConfig({
+        cwd: projectDirectory(io),
+        env: io.env ?? process.env,
+        overrides,
+      }),
     )
   } catch (error) {
     io.stderr(`${errorMessage(error)}\n`)

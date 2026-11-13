@@ -1,10 +1,11 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { ChatDelta, ChatRequest } from '@z1/node'
 import type { ApprovalService, FsService, LlmService, ToolService } from '@z1/runtime'
 import {
+  DEFAULT_SERVICE_CALL_TIMEOUT_MS,
   ModuleWorker,
   type WorkerHostOptions,
   type WorkerHostServices,
@@ -194,6 +195,35 @@ describe('service RPC', () => {
     await expect(worker.serviceCall('pid', 'get', [])).resolves.toEqual({
       pid: expect.any(Number),
     })
+  }, 20_000)
+
+  test('the default timeout is the 300 s tool budget, not 120 s', async () => {
+    expect(DEFAULT_SERVICE_CALL_TIMEOUT_MS).toBe(300_000)
+    const worker = createWorker()
+    await worker.startAll()
+
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    try {
+      let settled = false
+      const outcome = worker.serviceCall('slow', 'wait', []).then(
+        () => {
+          settled = true
+          return 'resolved'
+        },
+        (error: unknown) => {
+          settled = true
+          return error instanceof Error ? error.message : String(error)
+        },
+      )
+      // The pending timer is registered only after `#awaitReady` settles.
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(DEFAULT_SERVICE_CALL_TIMEOUT_MS - 1)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await outcome).toMatch(/exceeded its 300000ms timeout/)
+    } finally {
+      vi.useRealTimers()
+    }
   }, 20_000)
 
   test('dispose rejects a pending service call', async () => {

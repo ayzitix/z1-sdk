@@ -43,6 +43,23 @@ export interface FsListResult {
   entries: FsListEntry[]
 }
 
+/**
+ * Result of the brokered `fs.stat`.
+ *
+ * The type is read with `lstat`, so a symlink reports `symlink` even when its
+ * target is a file or a directory; `size` and `mtimeMs` then describe the link
+ * itself, never the target.
+ */
+export interface FsStatResult {
+  /** Absolute path of the inspected entry. */
+  path: string
+  type: 'file' | 'dir' | 'symlink'
+  /** Byte size as reported by `lstat`; a directory reports the platform's own value. */
+  size: number
+  /** Modification time in milliseconds since the epoch. */
+  mtimeMs: number
+}
+
 /** Request accepted by the brokered `process.run` (never a shell string). */
 export interface ProcessRunRequest {
   command: string

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,6 +7,7 @@ import type { FsService, LlmService, ToolService } from '@z1/runtime'
 import {
   ModuleWorker,
   type FsListEntry,
+  type FsStatResult,
   type ProcessRunResult,
   type WorkerCapabilityDenial,
   type WorkerHostOptions,
@@ -14,8 +15,9 @@ import {
 } from '../src/index.ts'
 
 const MODULE_DIR = fileURLToPath(new URL('./fixtures/capabilities', import.meta.url))
-const NODE_IDS = ['com.example.caps.list', 'com.example.caps.run']
+const NODE_IDS = ['com.example.caps.list', 'com.example.caps.stat', 'com.example.caps.run']
 const LIST_NODE = 'com.example.caps.list'
+const STAT_NODE = 'com.example.caps.stat'
 const RUN_NODE = 'com.example.caps.run'
 
 const workers: ModuleWorker[] = []
@@ -144,6 +146,74 @@ describe('fs.list', () => {
     await expect(
       worker.execute(LIST_NODE, {}, { path: join(root, 'missing') }, null),
     ).rejects.toThrow(/ENOENT/)
+  }, 20_000)
+})
+
+describe('fs.stat', () => {
+  test('reports a regular file with its size and mtime', async () => {
+    const worker = createWorker()
+    await worker.start()
+
+    const st = (await worker.execute(
+      STAT_NODE,
+      {},
+      { path: join(root, 'a.txt') },
+      null,
+    )) as unknown as FsStatResult
+
+    expect(st).toEqual({
+      path: join(root, 'a.txt'),
+      type: 'file',
+      size: 3,
+      mtimeMs: (await lstat(join(root, 'a.txt'))).mtimeMs,
+    })
+  }, 20_000)
+
+  test('reports a directory without following symlinks', async () => {
+    const worker = createWorker()
+    await worker.start()
+
+    const directory = (await worker.execute(
+      STAT_NODE,
+      {},
+      { path: root },
+      null,
+    )) as unknown as FsStatResult
+    expect(directory.type).toBe('dir')
+    expect(directory.path).toBe(root)
+    expect(typeof directory.size).toBe('number')
+    expect(typeof directory.mtimeMs).toBe('number')
+
+    const link = (await worker.execute(
+      STAT_NODE,
+      {},
+      { path: join(root, 'link.txt') },
+      null,
+    )) as unknown as FsStatResult
+    // A symlink to a file is still a symlink: stat never follows the link.
+    expect(link).toMatchObject({ path: join(root, 'link.txt'), type: 'symlink' })
+    expect(typeof link.size).toBe('number')
+    expect(typeof link.mtimeMs).toBe('number')
+  }, 20_000)
+
+  test('propagates a missing path with the name the module asked for', async () => {
+    const worker = createWorker()
+    await worker.start()
+
+    await expect(
+      worker.execute(STAT_NODE, {}, { path: join(root, 'missing') }, null),
+    ).rejects.toThrow(/cannot stat .*missing.*ENOENT/)
+  }, 20_000)
+
+  test('denies a path outside the granted read patterns', async () => {
+    const denials: WorkerCapabilityDenial[] = []
+    const worker = createWorker(denials)
+    await worker.start()
+
+    await expect(worker.execute(STAT_NODE, {}, { path: '/etc/passwd' }, null)).rejects.toThrow(
+      /capability denied for fs\.stat/,
+    )
+    expect(denials.map((denial) => denial.kind)).toContain('fs.stat')
   }, 20_000)
 })
 

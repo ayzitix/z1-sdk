@@ -1,6 +1,16 @@
 import { describe, expect, test } from 'vitest'
 import { createMockRuntimeServices } from '@z1/runtime'
+import { builtinNodes } from '../src/index.ts'
 import { dataEdge, flowEdge, graphNode, makeGraph, runBuiltins } from './helpers.ts'
+
+describe('z1.tool.call definition', () => {
+  test('carries the 300 s tool budget instead of the executor default', () => {
+    const definition = builtinNodes.find((node) => node.id === 'z1.tool.call')
+    if (definition === undefined) throw new Error('z1.tool.call is not a builtin')
+
+    expect(definition.timeoutMs).toBe(300_000)
+  })
+})
 
 function toolGraph(config: unknown = {}) {
   return makeGraph(

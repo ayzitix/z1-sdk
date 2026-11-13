@@ -23,6 +23,7 @@ import type {
 import type { DeclaredPort } from '@z1/module'
 import type {
   FsListResult,
+  FsStatResult,
   HostToWorker,
   ProcessRunRequest,
   ProcessRunResult,
@@ -72,6 +73,7 @@ interface ModuleContext {
     read(path: string): Promise<string>
     write(path: string, data: string): Promise<void>
     list(path: string): Promise<FsListResult>
+    stat(path: string): Promise<FsStatResult>
   }
   process: { run(request: ProcessRunRequest): Promise<ProcessRunResult> }
   net: { request(request: NetRequest): Promise<NetResponse> }
@@ -104,6 +106,7 @@ interface ModuleServiceContext {
     read(path: string): Promise<string>
     write(path: string, data: string): Promise<void>
     list(path: string): Promise<FsListResult>
+    stat(path: string): Promise<FsStatResult>
   }
   process: { run(request: ProcessRunRequest): Promise<ProcessRunResult> }
   net: { request(request: NetRequest): Promise<NetResponse> }
@@ -442,6 +445,7 @@ function serviceContext(
       read: (path) => invoke('fs.read', { path }) as Promise<string>,
       write: (path, data) => invoke('fs.write', { path, data }) as Promise<void>,
       list: (path) => invoke('fs.list', { path }) as Promise<FsListResult>,
+      stat: (path) => invoke('fs.stat', { path }) as Promise<FsStatResult>,
     },
     process: {
       run: (runRequest) =>
@@ -584,6 +588,7 @@ function createContext(
       read: (path) => invoke('fs.read', { path }) as Promise<string>,
       write: (path, data) => invoke('fs.write', { path, data }) as Promise<void>,
       list: (path) => invoke('fs.list', { path }) as Promise<FsListResult>,
+      stat: (path) => invoke('fs.stat', { path }) as Promise<FsStatResult>,
     },
     process: {
       run: (runRequest) =>

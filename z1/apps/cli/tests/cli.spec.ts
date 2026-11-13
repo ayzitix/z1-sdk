@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -665,5 +666,77 @@ describe('z1 cli', () => {
     expect(code).toBe(0)
     expect(err).toMatch(/"type"\s*:\s*"run\.started"/)
     expect(err).toMatch(/"type"\s*:\s*"run\.completed"/)
+  })
+})
+
+/**
+ * The runtime must be rooted where the caller invoked the CLI, not where the
+ * script happens to run. Each case proves it by where the config file's
+ * relative `dbPath` lands.
+ */
+describe('z1 cli workspace', () => {
+  const directories: string[] = []
+
+  async function project(config: Record<string, string>): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), 'z1-cli-cwd-'))
+    directories.push(directory)
+    await writeFile(join(directory, 'z1.config.json'), JSON.stringify(config), 'utf8')
+    return directory
+  }
+
+  afterAll(async () => {
+    for (const directory of directories.splice(0)) {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('io.cwd roots the runtime in the caller directory', async () => {
+    const directory = await project({ dbPath: 'custom.db' })
+    const io = capture(false, {})
+
+    const code = await runCli(['run', HELLO, '--message', 'x', '--json'], {
+      ...io.io,
+      cwd: directory,
+    })
+
+    expect(code).toBe(0)
+    expect(existsSync(join(directory, 'custom.db'))).toBe(true)
+  })
+
+  test('--cwd wins over io.cwd', async () => {
+    const inherited = await project({ dbPath: 'inherited.db' })
+    const named = await project({ dbPath: 'named.db' })
+    const io = capture(false, {})
+
+    const code = await runCli(
+      ['run', HELLO, '--message', 'x', '--json', '--cwd', named],
+      { ...io.io, cwd: inherited },
+    )
+
+    expect(code).toBe(0)
+    expect(existsSync(join(named, 'named.db'))).toBe(true)
+    expect(existsSync(join(inherited, 'inherited.db'))).toBe(false)
+  })
+
+  test('without either, the runtime uses process.cwd()', async () => {
+    const directory = await project({ dbPath: 'default.db' })
+    const original = process.cwd()
+    const io = capture(false, {})
+    process.chdir(directory)
+    try {
+      const code = await runCli(['run', HELLO, '--message', 'x', '--json'], io.io)
+
+      expect(code).toBe(0)
+      expect(existsSync(join(directory, 'default.db'))).toBe(true)
+    } finally {
+      process.chdir(original)
+    }
+  })
+
+  test('an empty --cwd is a usage error', async () => {
+    const { code, err } = await run(['run', HELLO, '--message', 'x', '--cwd'])
+
+    expect(code).not.toBe(0)
+    expect(err).toContain('--cwd')
   })
 })

@@ -35,6 +35,9 @@ const call = defineNode({
     dataPort('args', jsonValue),
   ],
   outputs: [dataPort('result', jsonValue), dataPort('isError', z.boolean()), flowPort('out')],
+  // A tool may be a shell command with a 300 s budget; the node must outlive
+  // the 120 s default so the tool, not the executor, decides when it is done.
+  timeoutMs: 300_000,
   execute: async (ctx) => {
     const values = inputValues(ctx.input)
     // A connected `name` port is authoritative: a bad value there is an error,

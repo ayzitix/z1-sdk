@@ -16,6 +16,22 @@ export const nodes = [
     },
   },
   {
+    id: 'com.example.caps.stat',
+    version: '1.0.0',
+    title: 'Stat',
+    category: 'example',
+    inputs: [{ kind: 'data', id: 'path', schema: { type: 'string' }, required: true }],
+    outputs: [
+      { kind: 'data', id: 'path', schema: { type: 'string' } },
+      { kind: 'data', id: 'type', schema: { type: 'string' } },
+      { kind: 'data', id: 'size', schema: { type: 'number' } },
+      { kind: 'data', id: 'mtimeMs', schema: { type: 'number' } },
+    ],
+    async execute(ctx) {
+      return await ctx.fs.stat(String(ctx.inputs.path))
+    },
+  },
+  {
     id: 'com.example.caps.run',
     version: '1.0.0',
     title: 'Run',

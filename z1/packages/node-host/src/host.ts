@@ -32,6 +32,7 @@ import {
 import type {
   FsListEntry,
   FsListResult,
+  FsStatResult,
   HostToWorker,
   ProcessRunResult,
   WorkerLogLevel,
@@ -46,6 +47,11 @@ const KILL_GRACE_MS = 2_000
 /** How long `dispose()` waits for the child's `disposed` handshake. */
 const DISPOSE_GRACE_MS = 2_000
 const DEFAULT_TIMEOUT_MS = 120_000
+/**
+ * How long a `serviceCall` waits by default. A service may front a tool with
+ * the process budget (300 s), so the worker must not cut it off at 120 s.
+ */
+export const DEFAULT_SERVICE_CALL_TIMEOUT_MS = 300_000
 const MAX_NET_BODY_BYTES = 1024 * 1024
 const FETCH_TIMEOUT_MS = 30_000
 
@@ -146,7 +152,7 @@ export interface StartedWorker {
 /** Streaming and timeout knobs for {@link ModuleWorker.serviceCall}. */
 export interface ServiceCallOptions {
   onDelta?: (delta: unknown) => void
-  /** Defaults to 120_000 ms. */
+  /** Defaults to {@link DEFAULT_SERVICE_CALL_TIMEOUT_MS} (300_000 ms). */
   timeoutMs?: number
   /**
    * Run this call belongs to. The child receives it as the call context, so
@@ -676,7 +682,7 @@ export class ModuleWorker {
       return Promise.reject(error instanceof Error ? error : new Error(String(error)))
     }
 
-    const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    const timeoutMs = options.timeoutMs ?? DEFAULT_SERVICE_CALL_TIMEOUT_MS
     const id = ++this.#serviceSequence
 
     return new Promise<unknown>((resolveValue, rejectValue) => {
@@ -1365,6 +1371,14 @@ export class ModuleWorker {
         if (!check.ok) throw this.#denied(nodeId, 'fs.list', path, check.reason)
         return this.#listDirectory(path)
       }
+      case 'fs.stat': {
+        const path = this.#requirePath(args, 'fs.stat')
+        // Metadata is a read: the same grant that lets a module read a file
+        // lets it ask whether the file exists and how large it is.
+        const check = checkFs(this.#capabilities, 'read', path, this.#moduleDir)
+        if (!check.ok) throw this.#denied(nodeId, 'fs.stat', path, check.reason)
+        return this.#statEntry(path)
+      }
       case 'process.run': {
         const request = parseProcessRun(args)
         const allowed = checkProcess(this.#capabilities, request.command)
@@ -1421,6 +1435,27 @@ export class ModuleWorker {
         this.#reportDenied('unsupported', `unknown capability call "${method}"`)
         throw new Error(`unknown capability call "${method}"`)
     }
+  }
+
+  /** Stat one entry without following a symlink; capability checked by caller. */
+  async #statEntry(requested: string): Promise<FsStatResult> {
+    const path = resolve(this.#moduleDir, requested)
+    const info = await lstat(path).catch((error: unknown) => {
+      throw new Error(
+        `cannot stat "${requested}": ${error instanceof Error ? error.message : String(error)}`,
+      )
+    })
+    const type = info.isSymbolicLink()
+      ? 'symlink'
+      : info.isDirectory()
+        ? 'dir'
+        : info.isFile()
+          ? 'file'
+          : undefined
+    if (type === undefined) {
+      throw new Error(`cannot stat "${requested}": not a file, directory or symlink`)
+    }
+    return { path, type, size: info.size, mtimeMs: info.mtimeMs }
   }
 
   /** List one directory level; capability was checked by the caller. */

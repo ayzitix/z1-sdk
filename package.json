@@ -53,7 +53,7 @@
     "change-scope": "tsx scripts/change-scope.ts",
     "typecheck": "tsx scripts/build.ts --scope typecheck",
     "typecheck:contracts-ready": "tsc -b tsconfig.client.json",
-    "z1": "pnpm -C z1 z1",
+    "z1": "tsx z1/apps/cli/src/bin.ts",
     "z1:build": "pnpm -C z1 build",
     "z1:test": "pnpm -C z1 test",
     "z1:canvas": "pnpm -C z1 canvas:dev",

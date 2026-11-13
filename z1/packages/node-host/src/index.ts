@@ -11,6 +11,7 @@ export type {
   WorkerStreamEvent,
 } from './host.ts'
 export { ModuleWorker, bootstrapPackageRoot, resolveWorkerBootstrap } from './host.ts'
+export { DEFAULT_SERVICE_CALL_TIMEOUT_MS } from './host.ts'
 export {
   cloneRegistry,
   declarationRegistry,
@@ -31,6 +32,7 @@ export { ModuleServiceRuntime, StartedServiceRegistry } from './services.ts'
 export type {
   FsListEntry,
   FsListResult,
+  FsStatResult,
   ProcessRunRequest,
   ProcessRunResult,
   WorkerNodeInfo,
