@@ -8,7 +8,6 @@
 <p align="center">
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-MIT-0b0b0b?style=flat-square"></a>
   <img alt="node" src="https://img.shields.io/badge/node-%E2%89%A524.9-0b0b0b?style=flat-square">
-  <img alt="tests" src="https://img.shields.io/badge/tests-690-0b0b0b?style=flat-square">
   <img alt="status" src="https://img.shields.io/badge/status-early-0b0b0b?style=flat-square">
 </p>
 
