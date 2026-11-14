@@ -94,6 +94,10 @@ export class SqliteJournal implements Journal, RunJournal {
     db.exec('PRAGMA journal_mode = WAL')
     db.exec('PRAGMA foreign_keys = ON')
     db.exec('PRAGMA synchronous = NORMAL')
+    // Two processes share the journal (a CLI while `z1 serve` runs, a fork from
+    // the canvas while a run appends). Without a busy handler SQLite fails
+    // `BEGIN IMMEDIATE` instantly instead of waiting for the writer.
+    db.exec('PRAGMA busy_timeout = 5000')
     db.exec(SCHEMA)
     this.#db = db
   }
