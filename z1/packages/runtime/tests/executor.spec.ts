@@ -220,24 +220,30 @@ describe('executor', () => {
   })
 
   test('reports a deadlock with idle nodes and missing ports', async () => {
+    // The `then` branch is not taken, so the gate downstream of it never gets a
+    // token. A node that returns no true flow is a different failure now.
     const graph = makeGraph(
       'deadlock',
       [
         graphNode('const1', 'test.const', { value: 'x' }),
-        graphNode('start', 'test.start', { pass: false }),
+        graphNode('start', 'test.start', { pass: true }),
+        graphNode('branch', 'test.if', {}),
         graphNode('gate', 'test.gate', { pass: true }),
         graphNode('out1', 'z1.core.output', {}),
       ],
       [
-        flowEdge('e1', 'start', 'out', 'gate', 'in'),
-        flowEdge('e2', 'gate', 'out', 'out1', 'in'),
-        dataEdge('e3', 'const1', 'value', 'out1', 'value'),
+        flowEdge('e1', 'start', 'out', 'branch', 'in'),
+        flowEdge('e2', 'branch', 'then', 'gate', 'in'),
+        // out1 has an incoming flow edge, so it is not a root and needs a token.
+        flowEdge('e5', 'gate', 'out', 'out1', 'in'),
+        dataEdge('e3', 'const1', 'value', 'branch', 'condition'),
+        dataEdge('e4', 'const1', 'value', 'out1', 'value'),
       ],
     )
     const journal = new MemoryJournal()
     const result = await runGraph({
       graph,
-      registry: makeRegistry(constNode, flowStartNode, flowGateNode, outputNode),
+      registry: makeRegistry(constNode, flowStartNode, branchNode, flowGateNode, outputNode),
       services: createMockRuntimeServices(),
       journal,
     })
@@ -245,7 +251,6 @@ describe('executor', () => {
     expect(result.status).toBe('failed')
     expect(result.error).toContain('DEADLOCK')
     expect(result.error).toContain('gate')
-    expect(result.error).toContain('out1')
     expect(journal.read(result.runId).some((event) => event.type === 'run.failed')).toBe(true)
   })
 
@@ -858,21 +863,24 @@ describe('executor', () => {
     const graph = makeGraph(
       'deadlock-ports',
       [
-        graphNode('start', 'test.start', { pass: false }),
-        graphNode('gate', 'test.gate', { pass: true }),
+        graphNode('start', 'test.start', { pass: true }),
+        graphNode('branch', 'test.if', {}),
+        graphNode('cond', 'test.const', { value: false }),
         graphNode('producer', 'test.flowSource', {}),
         graphNode('out1', 'z1.core.output', {}),
       ],
       [
-        flowEdge('f1', 'start', 'out', 'gate', 'in'),
-        flowEdge('f2', 'gate', 'out', 'producer', 'in'),
-        flowEdge('f3', 'gate', 'out', 'out1', 'in'),
+        flowEdge('f1', 'start', 'out', 'branch', 'in'),
+        // `then` is not taken, so `producer` never runs and `out1` waits for it.
+        flowEdge('f2', 'branch', 'then', 'producer', 'in'),
+        flowEdge('f3', 'branch', 'else', 'out1', 'in'),
         dataEdge('d1', 'producer', 'value', 'out1', 'value'),
+        dataEdge('d2', 'cond', 'value', 'branch', 'condition'),
       ],
     )
     const result = await runGraph({
       graph,
-      registry: makeRegistry(flowStartNode, flowGateNode, flowSourceNode, outputNode),
+      registry: makeRegistry(flowStartNode, branchNode, constNode, flowSourceNode, outputNode),
       services: createMockRuntimeServices(),
     })
 
@@ -922,6 +930,73 @@ describe('executor', () => {
 
     expect(result.status).toBe('completed')
     expect(calls).toBe(2)
+  })
+
+  test('a node that declares flow outputs must continue along one', async () => {
+    const terminal = defineNode<unknown>({
+      id: 'test.terminal',
+      version: '1.0.0',
+      title: 'terminal',
+      category: 'test',
+      config: configOf(z.object({})),
+      inputs: [flowPort('in')],
+      outputs: [],
+      execute: async () => ({}),
+    })
+    const stuck = defineNode<unknown>({
+      id: 'test.stuck',
+      version: '1.0.0',
+      title: 'stuck',
+      category: 'test',
+      config: configOf(z.object({})),
+      inputs: [flowPort('in')],
+      outputs: [flowPort('then'), flowPort('else')],
+      // A buggy node: neither branch is taken. The run must not look complete.
+      execute: async () => ({ then: false, else: false }),
+    })
+    const graph = makeGraph(
+      'no-flow-token',
+      [
+        graphNode('start', 'test.start', { pass: true }),
+        graphNode('stuck', 'test.stuck', {}),
+        graphNode('src', 'test.const', { value: 'v' }),
+        graphNode('out1', 'z1.core.output', {}),
+        graphNode('terminal', 'test.terminal', {}),
+      ],
+      [
+        flowEdge('f1', 'start', 'out', 'stuck', 'in'),
+        flowEdge('f2', 'stuck', 'then', 'terminal', 'in'),
+        dataEdge('d1', 'src', 'value', 'out1', 'value'),
+      ],
+    )
+    const result = await runGraph({
+      graph,
+      registry: makeRegistry(flowStartNode, stuck, constNode, outputNode, terminal),
+      services: createMockRuntimeServices(),
+    })
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('no true flow output')
+  })
+
+  test('a journal failure returns a failed result instead of rejecting', async () => {
+    class FailingJournal extends MemoryJournal {
+      private appends = 0
+      override async append(event: Parameters<MemoryJournal['append']>[0]): Promise<void> {
+        this.appends += 1
+        if (this.appends > 2) throw new Error('disk full')
+        await super.append(event)
+      }
+    }
+    const journal = new FailingJournal()
+    const result = await runGraph({
+      graph: linearGraph(),
+      registry: makeRegistry(...LINEAR_DEFS),
+      services: createMockRuntimeServices(),
+      journal,
+      runId: 'run_disk',
+    })
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('disk full')
   })
 
   test('an output node still advances its outgoing flow edges', async () => {

@@ -322,6 +322,18 @@ function validateOutputs(
       `node "${definition.id}" returned ${trueFlows} true flow outputs; at most one may run`,
     )
   }
+  // SPEC §6.3: a node with flow outputs must continue along exactly one of them.
+  // A silent zero used to stop the spine while the run still reported
+  // `completed` because some sibling output node had run.
+  const flowPorts = definition.outputs.filter((port) => port.kind === 'flow')
+  if (flowPorts.length > 0 && trueFlows === 0) {
+    throw new RunFailure(
+      'INVALID_OUTPUT',
+      `node "${definition.id}" returned no true flow output; exactly one of ${flowPorts
+        .map((port) => `"${port.id}"`)
+        .join(', ')} must run`,
+    )
+  }
 
   return outputs
 }
@@ -997,5 +1009,20 @@ export async function runGraph(options: RunOptions): Promise<RunResult> {
     cache: new Map(),
     resume,
   }
-  return executeRun(effective, context)
+  try {
+    return await executeRun(effective, context)
+  } catch (error) {
+    // A rejected promise here would lose the result shape a caller relies on
+    // (CLI, server, eval) and leave the run row `running`. A journal failure is
+    // exactly such a throw, so the fallback append is best-effort.
+    const message = errorMessage(error)
+    const event: RunEvent = { type: 'run.failed', runId, at: Date.now(), error: message }
+    try {
+      await journal.append(event)
+    } catch {
+      // The journal is the thing that failed; the caller still gets a result.
+    }
+    options.services.onEvent?.(event)
+    return { runId, status: 'failed', outputs: {}, error: message }
+  }
 }
