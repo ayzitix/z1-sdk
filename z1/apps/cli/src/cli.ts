@@ -82,7 +82,7 @@ const USAGE = [
   '  template list [--templates-dir <path>] [--json]',
   '  tree [--db <path>] [--json]',
   '  cassette export <runId> [-o <file>] [--db <path>]',
-  '  models [provider] [--json] [--db <path>] [--live]',
+  '  models [provider] [--json] [--db <path>]',
   '      discover models live from the provider (GET {baseURL}/models); nothing is stored',
   '  eval <case.json|dir> [--live] [--cassette <file>] [--json] [--jobs N] [--max-steps N]',
   '      [--workspace <dir>] [--keep] [--no-memory]',
@@ -1383,7 +1383,7 @@ function nodeStartedSeq(
  * answered.
  */
 async function modelsCommand(args: readonly string[], io: CliIO): Promise<number> {
-  let values: { json?: boolean; db?: string; live?: boolean }
+  let values: { json?: boolean; db?: string }
   let positionals: string[]
   try {
     const parsed = parseArgs({
@@ -1391,7 +1391,6 @@ async function modelsCommand(args: readonly string[], io: CliIO): Promise<number
       options: {
         json: { type: 'boolean' },
         db: { type: 'string' },
-        live: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -1404,15 +1403,17 @@ async function modelsCommand(args: readonly string[], io: CliIO): Promise<number
   }
 
   if (positionals.length > 1) {
-    io.stderr('usage: z1 models [provider] [--json] [--db <path>] [--live]\n')
+    io.stderr('usage: z1 models [provider] [--json] [--db <path>]\n')
     return 2
   }
 
+  // Listing is read-only and inherently live: asking a provider what it serves
+  // must not be routed through the deterministic mock.
   const runtime = await openRuntime(io, {
     ...(values.db === undefined ? {} : { dbPath: values.db }),
     useMemory: false,
     useModules: false,
-    ...(values.live === undefined ? {} : { live: values.live }),
+    live: true,
   })
   if (runtime === undefined) return 1
 
