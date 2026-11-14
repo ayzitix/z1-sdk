@@ -81,6 +81,28 @@ export const nodes = [
     },
   },
   {
+    id: 'com.example.echo.tasker',
+    version: '1.0.0',
+    title: 'Tasker',
+    category: 'example',
+    inputs: [],
+    outputs: [{ kind: 'data', id: 'value', schema: { type: 'string' } }],
+    async execute(ctx) {
+      const task = await ctx.process.start({
+        command: process.execPath,
+        args: ['-e', "console.log('task-output')"],
+      })
+      let snapshot = await ctx.process.poll({ id: task.id })
+      const deadline = Date.now() + 5000
+      while (snapshot.status === 'running' && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        snapshot = await ctx.process.poll({ id: task.id, cursor: snapshot.cursor })
+      }
+      const tasks = await ctx.process.list()
+      return { value: `${snapshot.status}|${snapshot.output.trim()}|${tasks.length}` }
+    },
+  },
+  {
     id: 'com.example.echo.modeller',
     version: '1.0.0',
     title: 'Modeller',

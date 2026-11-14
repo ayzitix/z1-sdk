@@ -36,6 +36,7 @@ import {
   clampProcessOption,
   runProcess,
 } from './process-run.ts'
+import { ProcessTaskError, ProcessTasks } from './process-tasks.ts'
 import type {
   FsListEntry,
   FsListResult,
@@ -535,6 +536,8 @@ export class ModuleWorker {
   readonly #bootstrap: string
   readonly #bootstrapPackage: string
   readonly #executions = new Map<number, PendingExecution>()
+  /** Host-owned long-running children; they die with this worker. */
+  readonly #tasks = new ProcessTasks()
   readonly #serviceCalls = new Map<number, PendingServiceCall>()
   #child: ChildProcess | undefined
   #state: 'idle' | 'starting' | 'ready' | 'dead' | 'disposed' = 'idle'
@@ -786,6 +789,9 @@ export class ModuleWorker {
       this.#settleServiceCall(pending, { ok: false, error: failure })
     }
     this.#state = 'disposed'
+    // Every background task belongs to this worker: a disposed worker must not
+    // leave a dev server running with no way to reach it.
+    this.#tasks.dispose()
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       // A started service may hold resources; let it release them. Node-only
       // workers never instantiated services, so they skip the round trip.
@@ -1492,6 +1498,71 @@ export class ModuleWorker {
         }
         return this.#runProcess(request)
       }
+      case 'process.start': {
+        if (!isRecord(args)) throw new Error('process.start requires { command }')
+        const command = args['command']
+        if (typeof command !== 'string' || command.trim().length === 0) {
+          throw new Error('process.start requires a non-empty command')
+        }
+        const allowed = checkProcess(this.#capabilities, command)
+        if (!allowed.ok) {
+          throw this.#denied(nodeId, 'process.start', command, allowed.reason)
+        }
+        const rawArgs = args['args']
+        const taskArgs = Array.isArray(rawArgs)
+          ? rawArgs.filter((entry): entry is string => typeof entry === 'string')
+          : []
+        const rawCwd = args['cwd']
+        const requestCwd = typeof rawCwd === 'string' ? rawCwd : this.#moduleDir
+        // Same rule as `process.run`: the module directory is its own working
+        // directory by default; a requested one must be inside the grant.
+        if (typeof rawCwd === 'string') {
+          const cwdCheck = checkFsReal(this.#capabilities, 'read', rawCwd, this.#moduleDir)
+          if (!cwdCheck.ok) {
+            throw this.#denied(nodeId, 'process.start', `cwd ${rawCwd}`, cwdCheck.reason)
+          }
+        }
+        const env: Record<string, string> = {}
+        if (isRecord(args['env'])) {
+          for (const [key, value] of Object.entries(args['env'])) {
+            if (typeof value === 'string') env[key] = value
+          }
+        }
+        return this.#tasks.start({
+          command,
+          args: taskArgs,
+          cwd: resolve(this.#moduleDir, requestCwd),
+          ...(Object.keys(env).length === 0 ? {} : { env }),
+        })
+      }
+      case 'process.poll': {
+        if (!isRecord(args) || typeof args['id'] !== 'string') {
+          throw new Error('process.poll requires { id }')
+        }
+        const cursor = typeof args['cursor'] === 'number' ? args['cursor'] : undefined
+        const limit = typeof args['limit'] === 'number' ? args['limit'] : undefined
+        return this.#taskCall(() =>
+          this.#tasks.poll({
+            id: args['id'] as string,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(limit === undefined ? {} : { limit }),
+          }),
+        )
+      }
+      case 'process.kill': {
+        if (!isRecord(args) || typeof args['id'] !== 'string') {
+          throw new Error('process.kill requires { id }')
+        }
+        const signal = typeof args['signal'] === 'string' ? args['signal'] : undefined
+        return this.#taskCall(() =>
+          this.#tasks.kill({
+            id: args['id'] as string,
+            ...(signal === undefined ? {} : { signal: signal as NodeJS.Signals }),
+          }),
+        )
+      }
+      case 'process.list':
+        return this.#tasks.list()
       case 'net.request':
         return this.#netRequest(nodeId, args)
       case 'approval.request': {
@@ -1528,6 +1599,16 @@ export class ModuleWorker {
       default:
         this.#reportDenied('unsupported', `unknown capability call "${method}"`)
         throw new Error(`unknown capability call "${method}"`)
+    }
+  }
+
+  /** A task id from a previous call is the only authority `poll`/`kill` need. */
+  #taskCall<T>(call: () => T): T {
+    try {
+      return call()
+    } catch (error) {
+      if (error instanceof ProcessTaskError) throw new Error(error.message)
+      throw error as Error
     }
   }
 

@@ -12,6 +12,7 @@ export type {
 } from './host.ts'
 export { ModuleWorker, bootstrapPackageRoot, resolveWorkerBootstrap } from './host.ts'
 export { DEFAULT_SERVICE_CALL_TIMEOUT_MS } from './host.ts'
+export { DEFAULT_TASK_OUTPUT_BYTES, ProcessTaskError, ProcessTasks } from './process-tasks.ts'
 export {
   cloneRegistry,
   declarationRegistry,
@@ -30,6 +31,10 @@ export type {
 } from './services.ts'
 export { ModuleServiceRuntime, StartedServiceRegistry } from './services.ts'
 export type {
+  BackgroundTaskPollRequest,
+  BackgroundTaskSnapshot,
+  BackgroundTaskStartRequest,
+  BackgroundTaskStatus,
   FsListEntry,
   FsListResult,
   FsStatResult,

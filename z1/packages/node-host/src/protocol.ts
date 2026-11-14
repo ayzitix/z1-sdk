@@ -85,6 +85,44 @@ export interface ProcessRunResult {
   durationMs: number
 }
 
+export type BackgroundTaskStatus = 'running' | 'exited' | 'killed'
+
+/** `process.start`: a child the host keeps running across capability calls. */
+export interface BackgroundTaskStartRequest {
+  command: string
+  args?: string[]
+  /** Must be inside the granted `fs.read` patterns; defaults to the module dir. */
+  cwd?: string
+  /** Added to the minimal `{ PATH }` environment. */
+  env?: Record<string, string>
+}
+
+/** `process.poll`: everything the caller has not seen yet. */
+export interface BackgroundTaskPollRequest {
+  id: string
+  /** Byte offset returned by a previous call; defaults to 0. */
+  cursor?: number
+  /** Cap on the bytes returned, keeping the tail. */
+  limit?: number
+}
+
+export interface BackgroundTaskSnapshot {
+  id: string
+  pid?: number
+  command: string
+  args: string[]
+  status: BackgroundTaskStatus
+  exitCode: number | null
+  signal: string | null
+  startedAt: number
+  endedAt: number | null
+  cursor: number
+  size: number
+  output: string
+  /** True when the requested cursor predates the retained buffer. */
+  truncated: boolean
+}
+
 export type WorkerToHost =
   | { t: 'ready'; nodes: WorkerNodeInfo[]; services: WorkerServiceInfo[] }
   | { t: 'fatal'; message: string }

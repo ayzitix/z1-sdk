@@ -185,6 +185,18 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] `contextWindow`/`reserveTokens` reach `agent.loop` through the template and
       `--context-window`/`--reserve-tokens`.
 
+## M14 — background tasks
+
+- [x] `process.start/poll/kill/list` capabilities: the host owns the child, one
+      combined output stream with a byte cursor, a 256 KiB retained tail, own
+      process group, SIGTERM then SIGKILL, and a sweep on worker dispose.
+- [x] The same `process.spawn` grant covers them; a task id is the authority for
+      poll and kill.
+- [x] `z1-tools` exposes `process.start/output/kill/list`; the default working
+      directory is the workspace, like `shell`.
+- Known: there is no completion notification (the model polls), and a task does
+      not survive the runtime — `z1 run` kills it at exit.
+
 ## M13 — context hygiene, step 1-2
 
 - [x] `z1.ctx.budget`: observe-only token estimate (ASCII / `charsPerToken`, one

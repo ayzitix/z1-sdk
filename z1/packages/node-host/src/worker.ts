@@ -26,6 +26,9 @@ import type {
   FsListResult,
   FsStatResult,
   HostToWorker,
+  BackgroundTaskPollRequest,
+  BackgroundTaskSnapshot,
+  BackgroundTaskStartRequest,
   ProcessRunRequest,
   ProcessRunResult,
   WorkerLogLevel,
@@ -82,10 +85,23 @@ interface ModuleContext {
     list(path: string): Promise<FsListResult>
     stat(path: string): Promise<FsStatResult>
   }
-  process: { run(request: ProcessRunRequest): Promise<ProcessRunResult> }
+  process: ProcessApi
   net: { request(request: NetRequest): Promise<NetResponse> }
   approval: { request(request: ApprovalRequest): Promise<ApprovalDecision> }
   runSubgraph(): never
+}
+
+/**
+ * `process.run` blocks; `start`/`poll`/`kill`/`list` manage a child the host
+ * keeps. The methods share one grant (`process.spawn`) because a long-running
+ * task is the same authority as a one-shot command.
+ */
+interface ProcessApi {
+  run(request: ProcessRunRequest): Promise<ProcessRunResult>
+  start(request: BackgroundTaskStartRequest): Promise<BackgroundTaskSnapshot>
+  poll(request: BackgroundTaskPollRequest): Promise<BackgroundTaskSnapshot>
+  kill(request: { id: string; signal?: string }): Promise<BackgroundTaskSnapshot>
+  list(): Promise<readonly BackgroundTaskSnapshot[]>
 }
 
 interface ModuleNode {
@@ -115,7 +131,7 @@ interface ModuleServiceContext {
     list(path: string): Promise<FsListResult>
     stat(path: string): Promise<FsStatResult>
   }
-  process: { run(request: ProcessRunRequest): Promise<ProcessRunResult> }
+  process: ProcessApi
   net: { request(request: NetRequest): Promise<NetResponse> }
   llm: {
     chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult>
@@ -463,6 +479,13 @@ function serviceContext(
     process: {
       run: (runRequest) =>
         invoke('process.run', runRequest) as Promise<ProcessRunResult>,
+      start: (startRequest) =>
+        invoke('process.start', startRequest) as Promise<BackgroundTaskSnapshot>,
+      poll: (pollRequest) =>
+        invoke('process.poll', pollRequest) as Promise<BackgroundTaskSnapshot>,
+      kill: (killRequest) =>
+        invoke('process.kill', killRequest) as Promise<BackgroundTaskSnapshot>,
+      list: () => invoke('process.list', null) as Promise<readonly BackgroundTaskSnapshot[]>,
     },
     net: {
       request: (netRequest) => invoke('net.request', netRequest) as Promise<NetResponse>,
@@ -618,6 +641,13 @@ function createContext(
     process: {
       run: (runRequest) =>
         invoke('process.run', runRequest) as Promise<ProcessRunResult>,
+      start: (startRequest) =>
+        invoke('process.start', startRequest) as Promise<BackgroundTaskSnapshot>,
+      poll: (pollRequest) =>
+        invoke('process.poll', pollRequest) as Promise<BackgroundTaskSnapshot>,
+      kill: (killRequest) =>
+        invoke('process.kill', killRequest) as Promise<BackgroundTaskSnapshot>,
+      list: () => invoke('process.list', null) as Promise<readonly BackgroundTaskSnapshot[]>,
     },
     net: {
       request: (netRequest) => invoke('net.request', netRequest) as Promise<NetResponse>,

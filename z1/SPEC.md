@@ -437,6 +437,17 @@ export type RunEvent =
   | { type: 'run.cancelled'; runId: string; at: number }
 ```
 
+A module may also own **background tasks**. `ctx.process.start` returns
+`{id, pid, status}` immediately; `ctx.process.poll({id, cursor, limit})` returns
+the output written since that byte cursor plus the status and exit code;
+`ctx.process.kill` signals the whole process group (SIGTERM, then SIGKILL);
+`ctx.process.list` reports this worker's tasks. The host owns the child — a
+worker cannot spawn one — retains its tail (256 KiB by default, the head is
+dropped and `truncated` says so), and kills every task when the worker is
+disposed, so `runtime.close()` leaves no server behind. The same
+`process.spawn` grant covers `run`, `start`, `poll` and `kill`; a task id from a
+previous call is the only authority `poll` and `kill` need.
+
 `LlmService.get({ provider, path, query })` is an authenticated metadata read:
 the path is appended to that provider's base URL, the credential is injected by
 the host, retries apply, and the raw body is returned. It is GET-only and

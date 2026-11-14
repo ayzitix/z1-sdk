@@ -47,6 +47,12 @@ boundary legible rather than absolute.
   binary by basename allows everything that binary can do; for example
   `git -c alias.x='!sh' x` runs a shell. Grant exact argv patterns, not `*`, and
   treat a `git`/`node`/`sh` grant as full local code execution.
+- **Background tasks are host-owned and die with the worker.** A module calls
+  `ctx.process.start/poll/kill/list`; the child is spawned by the host under the
+  same `process.spawn` grant as `process.run`, in its own process group, with the
+  tail of its output retained in memory and the full stream never written to
+  disk by the host. Disposing the worker (or closing the runtime) sends SIGTERM
+  and then SIGKILL to every group, so a dev server does not outlive the session.
 - **Tools are not shipped here.** The SDK keeps the tools service contract and
   brokered capabilities; concrete tools live in a separate repository.
 - **Secrets** are resolved by the host and are never passed into a worker. Keep

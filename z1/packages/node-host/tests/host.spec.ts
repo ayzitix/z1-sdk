@@ -32,6 +32,7 @@ const NODE_IDS = [
   'com.example.echo.sleeper',
   'com.example.echo.llmer',
   'com.example.echo.modeller',
+  'com.example.echo.tasker',
   'com.example.echo.denied',
   'com.example.echo.fetcher',
   'com.example.echo.subgrapher',
@@ -244,6 +245,22 @@ test('a redirect between allowlisted hosts is followed', async () => {
   } finally {
     await new Promise<void>((settle) => server.close(() => settle()))
   }
+}, 20_000)
+
+test('process.start is gated by process.spawn and owns a real task', async () => {
+  const denied = createWorker(freshProbes())
+  await denied.start()
+  await expect(
+    denied.execute('com.example.echo.tasker', {}, {}, null),
+  ).rejects.toThrow(/capability denied for process\.start .*no process\.spawn capability granted/)
+
+  const probes = freshProbes()
+  const allowed = createWorker(probes, {
+    capabilities: { fs: { read: ['${moduleDir}/**'] }, process: { spawn: ['node'] } },
+  })
+  await allowed.start()
+  const outputs = await allowed.execute('com.example.echo.tasker', {}, {}, null)
+  expect(outputs['value']).toMatch(/^exited\|task-output\|\d+$/)
 }, 20_000)
 
 test('llm.get is gated by the same grant as llm.chat', async () => {
