@@ -13,6 +13,7 @@ import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 
 import { providersFromEnv, type ProviderConfig, type ProviderProtocol } from '@z1/provider'
+import type { RecordLlmMode } from '@z1/runtime'
 
 /** Where `ctx.fs` of a run reads and writes. */
 export type FsMode = 'local' | 'memory'
@@ -40,6 +41,17 @@ export interface RuntimeConfig {
   useServiceModules: boolean
   /** Give runs branch memory over the journal. */
   useMemory: boolean
+  /**
+   * How much model traffic is journaled: `full` stores request/response blobs,
+   * `hashes` stores only the events and their hashes, `off` records nothing.
+   * `Z1_RECORD_LLM`; defaults to `full`.
+   */
+  recordLlm: RecordLlmMode
+  /**
+   * Recorded model traffic to replay from (`--cassette`, `Z1_CASSETTE`). When set
+   * it replaces the provider registry entirely: no network call is made.
+   */
+  cassette?: string
   providers: readonly ProviderConfig[]
   env: Record<string, string | undefined>
 }
@@ -64,6 +76,7 @@ export const DEFAULT_CONFIG = {
   useModules: true,
   useServiceModules: true,
   useMemory: true,
+  recordLlm: 'full' as RecordLlmMode,
 } as const
 
 const FILE_KEYS = [
@@ -76,6 +89,8 @@ const FILE_KEYS = [
   'useModules',
   'useServiceModules',
   'useMemory',
+  'recordLlm',
+  'cassette',
   'providers',
 ] as const
 
@@ -91,6 +106,8 @@ interface RuntimeConfigFile {
   useModules?: boolean
   useServiceModules?: boolean
   useMemory?: boolean
+  recordLlm?: RecordLlmMode
+  cassette?: string
   providers?: readonly ProviderConfig[]
 }
 
@@ -188,7 +205,7 @@ function readConfigFile(file: string): RuntimeConfigFile {
   }
 
   const config: RuntimeConfigFile = {}
-  for (const key of ['dbPath', 'graphsPath', 'modulesPath', 'templatesPath'] as const) {
+  for (const key of ['dbPath', 'graphsPath', 'modulesPath', 'templatesPath', 'cassette'] as const) {
     const value = raw[key]
     if (value !== undefined) {
       if (typeof value !== 'string' || value === '') {
@@ -209,6 +226,11 @@ function readConfigFile(file: string): RuntimeConfigFile {
 
   const fsMode = raw['fsMode']
   if (fsMode !== undefined) config.fsMode = readFsMode(fsMode, `"${file}": fsMode`)
+
+  const recordLlm = raw['recordLlm']
+  if (recordLlm !== undefined) {
+    config.recordLlm = readRecordLlm(recordLlm, `"${file}": recordLlm`)
+  }
 
   const providers = raw['providers']
   if (providers !== undefined) {
@@ -286,6 +308,22 @@ function envFlag(name: string, env: Record<string, string | undefined>): boolean
   throw new Error(`${name} must be 1, 0, true or false, got "${raw}"`)
 }
 
+/** Only the three recording modes; a typo must not silently record nothing. */
+function readRecordLlm(value: unknown, label: string): RecordLlmMode {
+  if (value === 'full' || value === 'hashes' || value === 'off') return value
+  throw new Error(`${label} must be "full", "hashes" or "off"`)
+}
+
+/** `Z1_RECORD_LLM`, same three values as the file key. */
+function envRecordLlm(
+  name: string,
+  env: Record<string, string | undefined>,
+): RecordLlmMode | undefined {
+  const raw = env[name]
+  if (raw === undefined || raw === '') return undefined
+  return readRecordLlm(raw.toLowerCase(), name)
+}
+
 /** `local` or `memory`; anything else is a configuration error. */
 function envFsMode(
   name: string,
@@ -324,6 +362,7 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
     env['Z1_TEMPLATES_DIR'] ??
     fromFile.templatesPath ??
     DEFAULT_CONFIG.templatesPath
+  const cassette = overrides.cassette ?? env['Z1_CASSETTE'] ?? fromFile.cassette
   const live =
     overrides.live ?? envBoolean('Z1_LIVE', env) ?? fromFile.live ?? DEFAULT_CONFIG.live
 
@@ -335,6 +374,7 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
     graphsPath: expandPath(graphsPath, cwd),
     modulesPath: expandPath(modulesPath, cwd),
     templatesPath: expandPath(templatesPath, cwd),
+    ...(cassette === undefined || cassette === '' ? {} : { cassette: expandPath(cassette, cwd) }),
     live,
     useModules:
       overrides.useModules ??
@@ -351,6 +391,12 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
       envFlag('Z1_USE_MEMORY', env) ??
       fromFile.useMemory ??
       DEFAULT_CONFIG.useMemory,
+    recordLlm:
+      overrides.recordLlm ??
+      envRecordLlm('Z1_RECORD_LLM', env) ??
+      fromFile.recordLlm ??
+      DEFAULT_CONFIG.recordLlm,
+    ...(cassette === undefined ? {} : { cassette }),
     providers,
     env: { ...env },
   }

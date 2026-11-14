@@ -11,5 +11,6 @@ export {
 export type { LoadRuntimeConfigOptions, FsMode, RuntimeConfig } from './config.ts'
 export { createLocalFsService } from './fs-local.ts'
 export { createTemplateRegistry } from './templates.ts'
+export { CassetteExportError, exportCassette, loadCassette } from './cassette.ts'
 export { builtinRegistry, createRuntime } from './runtime.ts'
 export type { RunHandle, RunOverrides, Runtime } from './runtime.ts'

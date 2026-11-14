@@ -21,6 +21,7 @@ import {
 } from '@z1/node'
 import { RunFailure } from './errors.ts'
 import { MemoryJournal } from './journal.ts'
+import { withLlmCallContext, type LlmCallContext } from './llm-context.ts'
 import type { Journal, RunEvent, RunOptions, RunResult, RuntimeServices } from './types.ts'
 
 /** State replayed from the journal when `RunOptions.resume` is set. */
@@ -176,6 +177,7 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
 function executeAttempt(
   definition: NodeDefinition<unknown>,
   ctx: NodeContext<unknown>,
+  scope: LlmCallContext,
   controller: AbortController,
   signal: AbortSignal,
   timeoutMs: number,
@@ -201,7 +203,11 @@ function executeAttempt(
     }
     signal.addEventListener('abort', () => finish({ kind: 'cancelled' }), { once: true })
 
-    const execution = Promise.resolve().then(() => definition.execute(ctx))
+    // The recording decorator lives on the ambient service, so the path and
+    // attempt reach it as an async-local scope instead of a node argument.
+    const execution = Promise.resolve().then(() =>
+      withLlmCallContext(scope, () => definition.execute(ctx)),
+    )
     void execution.then(
       (outputs) => finish({ kind: 'ok', outputs }),
       (error: unknown) => finish({ kind: 'error', error }),
@@ -575,6 +581,7 @@ async function runNode(input: NodeRunInput): Promise<NodeOutcome> {
     const outcome = await executeAttempt(
       definition,
       ctx,
+      { runId: context.runId, nodeId: input.node.id, path, attempt },
       controller,
       signal,
       definition.timeoutMs ?? DEFAULT_TIMEOUT_MS,

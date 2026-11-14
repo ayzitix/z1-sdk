@@ -5,6 +5,7 @@ import type {
   ChatDelta,
   ChatRequest,
   ChatResult,
+  ChatUsage,
   Json,
   MemoryService,
   NodeRegistry,
@@ -117,6 +118,36 @@ export type RunEvent =
       nodeId: string
       path: string
       decision: ApprovalDecision
+    }
+  | {
+      type: 'llm.request'
+      runId: string
+      /** Execution path of the calling node, or `(ambient)` outside one. */
+      path: string
+      provider: string
+      model: string
+      attempt: number
+      /** sha256 of the canonical, redacted request; also the blob hash. */
+      requestHash: string
+      /** Present only when `Z1_RECORD_LLM=full`. */
+      requestBlob?: string
+      at: number
+    }
+  | {
+      type: 'llm.response'
+      runId: string
+      path: string
+      provider: string
+      model: string
+      attempt: number
+      /** sha256 of the canonical, redacted response; also the blob hash. */
+      responseHash: string
+      /** Present only when `Z1_RECORD_LLM=full`. */
+      responseBlob?: string
+      usage?: ChatUsage
+      latencyMs: number
+      stopReason: ChatResult['stopReason']
+      at: number
     }
   | { type: 'run.suspended'; runId: string; at: number; path: string }
   | { type: 'run.completed'; runId: string; at: number; outputs: Record<string, Json> }

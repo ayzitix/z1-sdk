@@ -419,10 +419,25 @@ export type RunEvent =
   | { type: 'node.cached'; runId: string; nodeId: string; path: string; at: number }
   | { type: 'node.completed'; runId: string; nodeId: string; path: string; attempt: number; durationMs: number; at: number }
   | { type: 'node.failed'; runId: string; nodeId: string; path: string; attempt: number; error: string; at: number }
+  | { type: 'llm.request'; runId: string; path: string; provider: string; model: string;
+      attempt: number; requestHash: string; requestBlob?: string; at: number }
+  | { type: 'llm.response'; runId: string; path: string; provider: string; model: string;
+      attempt: number; responseHash: string; responseBlob?: string;
+      usage?: ChatUsage; latencyMs: number; stopReason: string; at: number }
   | { type: 'run.completed'; runId: string; at: number; outputs: Record<string, Json> }
   | { type: 'run.failed'; runId: string; at: number; error: string }
   | { type: 'run.cancelled'; runId: string; at: number }
 ```
+
+`llm.request` / `llm.response` wrap every resolved `LlmService.chat`, including a
+module adapter and a cassette replay. The payload goes to the `blobs` table and
+the event keeps the sha256 only, so a row stays small and identical prompts
+dedupe; the hash is also the cassette's matching key. Credential-shaped fields
+(`authorization`, `*_key`, `secret`, `token`, `password`) are replaced with
+`[redacted]` before hashing, so the hash covers exactly what may be stored.
+`Z1_RECORD_LLM=full|hashes|off` (default `full`) selects blobs, events only, or
+nothing. The path and attempt arrive through an `AsyncLocalStorage` scope set by
+the executor around `definition.execute`, so the node contract is unchanged.
 
 `node.stream` is delivered to `services.onEvent` but never appended to the
 journal. Nested runs (`pathPrefix` non-empty) emit node-level events only; the
@@ -482,6 +497,34 @@ z1 run <graph.json> [--message <text> | --input <json> | --input-file <path>] [-
 - `--trace` prints every run event as one JSON line to stderr.
 - Exit codes: 0 completed, 1 failed, 2 invalid graph/usage, 3 cancelled,
   4 suspended (M1).
+
+### 8.1 Recording, replay and measurement
+
+```
+z1 cassette export <runId> [-o <file>] [--db <path>]
+z1 run ... --cassette <file>
+z1 eval <case.json|dir> [--live] [--cassette <file>] [--json] [--jobs N]
+        [--max-steps N] [--workspace <dir>] [--keep] [--no-memory]
+```
+
+- A **cassette** is JSONL, one turn per line:
+  `{version, path, provider, model, attempt, requestHash, request, response}`.
+  `export` pairs each `llm.request` with the `llm.response` at the same path and
+  attempt and resolves both blobs; a run recorded with `hashes` or `off` cannot
+  be exported and says so.
+- A cassette **replaces the transport**: no provider registry, no network, no
+  mock fallback. Matching is by `requestHash`; a miss throws
+  `cassette miss for <provider>/<model> at <path>: no recorded request with
+  hash …`. Replayed calls are journaled like live ones, so an eval over a
+  cassette produces its own measurements.
+- `eval` runs every case through the real `run` path in a fresh directory
+  (fixture copied, own DB) and asserts mechanical properties only:
+  `outputContains`, `outputMatches` (regexp), `files[].contains`,
+  `command.exitCode`, `maxSteps`, `maxToolErrors`. Metrics come from the case's
+  journal: loop steps (`node.started` on `*/chat`), tool calls and errors
+  (`node.completed` on `*/toolMap/*/mapCall`), and token usage from
+  `llm.response`. Exit 0 only when every case passes; `--json` prints
+  `{cases, summary}`.
 
 ## 9. Journal (M1)
 

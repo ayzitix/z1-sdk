@@ -32,6 +32,8 @@ import { ProviderRegistry } from '@z1/provider'
 import type { TemplateRegistry } from '@z1/template'
 import {
   createMockRuntimeServices,
+  createCassetteLlmService,
+  createRecordingLlmService,
   type ApprovalService,
   type ArtifactService,
   type FsService,
@@ -41,6 +43,7 @@ import {
   type ToolService,
 } from '@z1/runtime'
 
+import { loadCassette } from './cassette.ts'
 import type { RuntimeConfig } from './config.ts'
 import { createLocalFsService } from './fs-local.ts'
 import { createAgentTemplateRegistry, createTemplateRegistry } from './templates.ts'
@@ -186,7 +189,14 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     env: config.env,
     mock: mock.llm,
   })
-  const llm = config.live ? providers.create() : mock.llm
+  // A cassette replaces the transport outright: replay must never reach the
+  // network, and `--live` is irrelevant to it.
+  const llm =
+    config.cassette === undefined
+      ? config.live
+        ? providers.create()
+        : mock.llm
+      : createCassetteLlmService({ turns: loadCassette(config.cassette) })
   const builtins = builtinRegistry()
   // The builder template is registered eagerly (no file I/O); static files are
   // read on first access, never at construction: one broken `*.json` must not
@@ -532,7 +542,16 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         const provided = useServiceModules ? await selectServices(overrides.runId) : {}
 
         services = {
-          llm: overrides.llm ?? (provided.llm?.instance as LlmService | undefined) ?? llm,
+          // Recording wraps whichever transport won, so a provider, a module
+          // adapter or a cassette replay is journaled identically.
+          llm: createRecordingLlmService({
+            inner:
+              overrides.llm ?? (provided.llm?.instance as LlmService | undefined) ?? llm,
+            journal,
+            mode: config.recordLlm,
+            ...(overrides.runId === undefined ? {} : { runId: overrides.runId }),
+            ...(overrides.onEvent === undefined ? {} : { onEvent: overrides.onEvent }),
+          }),
           tools:
             overrides.tools ?? (provided.tools?.instance as ToolService | undefined) ?? mock.tools,
           fs: overrides.fs ?? (provided.fs?.instance as FsService | undefined) ?? fs,

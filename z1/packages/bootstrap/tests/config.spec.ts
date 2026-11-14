@@ -38,6 +38,7 @@ test('defaults resolve the relative paths against cwd', () => {
     useModules: true,
     useServiceModules: true,
     useMemory: true,
+    recordLlm: 'full',
     providers: [
       {
         id: 'river',
