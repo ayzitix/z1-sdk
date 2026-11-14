@@ -596,9 +596,12 @@ export async function evalCommand(args: readonly string[], io: CliIO, run: RunFn
       keep: values.keep === true,
       noMemory: values['no-memory'] === true,
       ...(values.cassette === undefined ? {} : { cassette: resolve(values.cassette) }),
-      ...(values['max-steps'] === undefined
-        ? {}
-        : { maxSteps: positiveInt(values['max-steps'], '--max-steps') }),
+      // A suite has no human to press Ctrl-C: keep a per-case cap unless the
+      // caller asked for something else, so one stuck case cannot burn the run.
+      maxSteps:
+        values['max-steps'] === undefined
+          ? 40
+          : positiveInt(values['max-steps'], '--max-steps'),
       ...(values.workspace === undefined ? {} : { workspace: resolve(values.workspace) }),
     }
   } catch (error) {

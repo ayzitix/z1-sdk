@@ -19,7 +19,11 @@ export interface AgentGraphOptions {
   role?: RoleId
   /** Extra instructions, rendered as the last (custom) section. */
   system?: string
-  /** Iteration cap of the `z1.flow.loop` body. Defaults to 12. */
+  /**
+   * Iteration cap of the `z1.flow.loop` body. Defaults to the schema ceiling
+   * (10 000), which behaves as "no limit" for one turn; automated callers such
+   * as `z1 eval` pass their own smaller cap.
+   */
   maxSteps?: number
   tools?: readonly ToolSchema[]
   /** Token ceiling of the prompt stack. Defaults to the prompt package's own. */
@@ -380,7 +384,7 @@ function promptChain(options: AgentGraphOptions): PromptChain {
  * is hidden behind a custom node.
  */
 export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
-  const maxSteps = options.maxSteps ?? 12
+  const maxSteps = options.maxSteps ?? 10_000
   // `maxSteps` also feeds the loop's `maxIterations` schema (integer, min 1);
   // failing here names the option instead of surfacing a graph validation code.
   if (!Number.isInteger(maxSteps) || maxSteps < 1) {
