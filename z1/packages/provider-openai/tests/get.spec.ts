@@ -82,16 +82,65 @@ test('a non-2xx answer is returned, not thrown, so the caller can explain it', a
 })
 
 test('the caller cannot leave the configured base URL', async () => {
-  await expect(
-    service().get({ provider: 'x', path: 'https://evil.test/v1/models' }),
-  ).rejects.toThrow(/must start with a single/)
-  await expect(service().get({ provider: 'x', path: '//evil.test/models' })).rejects.toThrow(
-    /must start with a single/,
-  )
-  await expect(service().get({ provider: 'x', path: '/../admin' })).rejects.toThrow(
-    /must not contain/,
-  )
+  const rejected = [
+    'https://evil.test/v1/models',
+    '//evil.test/models',
+    '/../admin/keys',
+    '/%2e%2e/admin/keys',
+    '/..%2fadmin/keys',
+    '/..\\admin\\keys',
+    '/\t..\t/admin/keys',
+    '/models%00',
+  ]
+  for (const path of rejected) {
+    await expect(service().get({ provider: 'x', path }), path).rejects.toThrow(
+      /must start with a single|must not contain|escapes the configured/,
+    )
+  }
   expect(captured).toEqual([], 'a rejected path must never reach the network')
+})
+
+test('a query is not a second path', async () => {
+  // `?` in the path is a separator; the check must not treat the rest as path.
+  await service().get({ provider: 'x', path: '/models', query: { a: '../../etc' } })
+  expect(captured[0]?.url).toBe('/v1/models?a=..%2F..%2Fetc')
+})
+
+test('a redirect is returned as-is, never followed', async () => {
+  // The host part is the security boundary for the injected credential; a
+  // followed redirect would leave it.
+  let followed = 0
+  const elsewhere = createServer((_request, response) => {
+    followed += 1
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end('{"data":[{"id":"stolen"}]}')
+  })
+  await new Promise<void>((resolve) => elsewhere.listen(0, '127.0.0.1', resolve))
+  const other = elsewhere.address()
+  if (other === null || typeof other === 'string') throw new Error('no port')
+
+  status = 302
+  body = ''
+  server.removeAllListeners('request')
+  server.on('request', (request, response) => {
+    captured.push({
+      method: request.method,
+      url: request.url ?? '',
+      authorization: request.headers.authorization,
+    })
+    response.writeHead(302, { location: `http://127.0.0.1:${other.port}/models` })
+    response.end()
+  })
+
+  try {
+    const response = await service().get({ provider: 'x', path: '/models' })
+    expect(response.status).toBe(302)
+    expect(response.ok).toBe(false)
+    expect(followed).toBe(0)
+    expect(captured).toHaveLength(1)
+  } finally {
+    await new Promise<void>((resolve) => elsewhere.close(() => resolve()))
+  }
 })
 
 test('a slow provider is retried once before the answer is returned', async () => {

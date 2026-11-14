@@ -130,7 +130,14 @@ export class OpenAiLlmService implements LlmService {
     if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
       throw new Error(`provider path must start with a single "/": ${String(path)}`)
     }
-    if (path.includes('\u0000') || path.split('/').includes('..')) {
+    // A lexical `..` check is not enough: `%2e%2e`, a backslash and a tab are
+    // all normalised by the URL parser into a traversal, and the credentialed
+    // request would then reach another path on the provider host. Refuse the
+    // encodings and verify the resolved path is still under the base path.
+    if (path.includes('%') || path.includes('\\') || /[\u0000-\u001f\u007f]/.test(path)) {
+      throw new Error(`provider path must not contain "%", "\\" or control characters: ${path}`)
+    }
+    if (path.split('/').includes('..')) {
       throw new Error(`provider path must not contain "..": ${path}`)
     }
 
@@ -142,9 +149,19 @@ export class OpenAiLlmService implements LlmService {
       if (encoded.length > 0) suffix += `${suffix.includes('?') ? '&' : '?'}${encoded}`
     }
 
+    // Metadata never follows a redirect: the host part is the boundary that
+    // makes the injected credential safe, and `fetch` would leave it.
+    const base = new URL(this.endpoint)
+    const target = new URL(`${this.endpoint}${suffix}`)
+    const basePath = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`
+    if (target.origin !== base.origin || !target.pathname.startsWith(basePath)) {
+      throw new Error(`provider path escapes the configured base URL: ${path}`)
+    }
+
     const response = await this.request(suffix, {
       method: 'GET',
       headers: this.headers(),
+      redirect: 'manual',
       ...(signal === undefined ? {} : { signal }),
     })
     const { text, truncated } = await readBodyCapped(response)
@@ -215,7 +232,13 @@ export class OpenAiLlmService implements LlmService {
   /** One URL path, with the shared retry policy. */
   private async request(path: string, init: RequestInit): Promise<Response> {
     const url = `${this.endpoint}${path}`
-    const signal = this.signal ?? (init.signal as AbortSignal | null | undefined) ?? undefined
+    const caller = (init.signal ?? undefined) as AbortSignal | undefined
+    // A caller abort must not be ignored just because the service has its own
+    // signal: combine them instead of preferring one.
+    const signal =
+      this.signal !== undefined && caller !== undefined
+        ? AbortSignal.any([this.signal, caller])
+        : (this.signal ?? caller)
     for (let attempt = 1; ; attempt += 1) {
       if (isAborted(signal)) throw abortError()
       let response: Response
@@ -505,12 +528,38 @@ function initFor(headers: Record<string, string>, body: string, signal: AbortSig
 /** Metadata bodies are small; anything larger is cut rather than buffered. */
 const MAX_METADATA_BYTES = 2 * 1024 * 1024
 
+/**
+ * Read at most {@link MAX_METADATA_BYTES} of a body.
+ *
+ * Streaming rather than `response.text()`, so a provider that answers with a
+ * multi-gigabyte page cannot be buffered in full before the cap applies.
+ */
 async function readBodyCapped(
   response: Response,
 ): Promise<{ text: string; truncated: boolean }> {
-  const raw = await response.text()
-  if (raw.length <= MAX_METADATA_BYTES) return { text: raw, truncated: false }
-  return { text: raw.slice(0, MAX_METADATA_BYTES), truncated: true }
+  if (response.body === null) return { text: '', truncated: false }
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let bytes = 0
+  let truncated = false
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value === undefined) continue
+      chunks.push(value)
+      bytes += value.length
+      if (bytes > MAX_METADATA_BYTES) {
+        truncated = true
+        break
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined)
+  }
+  const buffer = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))
+  const kept = truncated ? buffer.subarray(0, MAX_METADATA_BYTES) : buffer
+  return { text: kept.toString('utf8'), truncated }
 }
 
 /** Releases a response we are about to retry so the socket can be reused. */
