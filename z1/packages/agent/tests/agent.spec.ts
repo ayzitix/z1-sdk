@@ -335,6 +335,20 @@ describe('buildAgentGraph', () => {
     expect(checkpointed).toBeDefined()
   })
 
+  test('the caller can set the window the budget measures against', async () => {
+    const { result, journal } = await run({ model: MODEL, contextWindow: 200_000 }, 'hello')
+    expect(result.status).toBe('completed')
+    const event = journal
+      .read(result.runId)
+      .find((entry) => entry.type === 'node.completed' && entry.nodeId === 'budget')
+    expect(event?.type).toBe('node.completed')
+    if (event?.type !== 'node.completed') throw new Error('budget did not complete')
+    expect(event.outputs['window']).toBe(200_000)
+    expect(event.outputs['triggerAt']).toBe(
+      Math.max(1, Math.floor((200_000 - 16_384) * 0.85)),
+    )
+  })
+
   test('the budget node reports the transcript size without changing it', async () => {
     const { result, journal } = await run({ model: MODEL }, 'hello')
     expect(result.status).toBe('completed')

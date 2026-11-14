@@ -24,6 +24,14 @@ export interface AgentGraphOptions {
   tools?: readonly ToolSchema[]
   /** Token ceiling of the prompt stack. Defaults to the prompt package's own. */
   budgetTokens?: number
+  /**
+   * Context window of the routed model, in tokens. Providers rarely publish it
+   * (`/models` carries id and owner only for most OpenAI-compatible endpoints),
+   * so the caller sets it; the budget defaults to 128k and says so.
+   */
+  contextWindow?: number
+  /** Room kept for the answer when the budget decides it is time to compact. */
+  reserveTokens?: number
   /** Autonomy policy exposed to the prompt as `{{autonomy}}`. Defaults to `auto`. */
   autonomyPolicy?: string
 }
@@ -183,7 +191,10 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       node('messages', 'z1.core.get', 220, 0, { path: 'value' }),
       // Observe-only: reports the transcript size, drops nothing, so the
       // journal records how close a turn came to the window.
-      node('budget', 'z1.ctx.budget', 330, 0),
+      node('budget', 'z1.ctx.budget', 330, 0, {
+        ...(options.contextWindow === undefined ? {} : { contextWindow: options.contextWindow }),
+        ...(options.reserveTokens === undefined ? {} : { reserveTokens: options.reserveTokens }),
+      }),
       // Compaction is flow-gated on the budget, so a transcript that fits is
       // passed through byte-identical and no summary call is made.
       node('ctxGate', 'z1.flow.if', 440, -360),
