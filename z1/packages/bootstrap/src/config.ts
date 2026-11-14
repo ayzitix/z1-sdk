@@ -12,7 +12,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 
-import { providersFromEnv, type ProviderConfig, type ProviderProtocol } from '@z1/provider'
+import {
+  DEFAULT_PROVIDERS,
+  providersFromEnv,
+  type ProviderConfig,
+  type ProviderProtocol,
+} from '@z1/provider'
 import type { RecordLlmMode } from '@z1/runtime'
 
 /** Where `ctx.fs` of a run reads and writes. */
@@ -116,6 +121,14 @@ export interface LoadRuntimeConfigOptions {
   env?: Record<string, string | undefined>
   /** Defaults to `<cwd>/z1.config.json`; a missing file is not an error. */
   file?: string
+  /**
+   * Trust the config file with security-sensitive keys (`providers` that
+   * redefine a built-in endpoint, `modulesPath`). A file discovered in the
+   * current directory is untrusted by default: a cloned repository must not be
+   * able to point a real key at its own base URL or install its own modules.
+   * `Z1_TRUST_CONFIG=1` is the environment equivalent.
+   */
+  trustFile?: boolean
   overrides?: Partial<RuntimeConfig>
 }
 
@@ -335,6 +348,40 @@ function envFsMode(
 }
 
 /**
+ * Providers a project config may contribute without being trusted.
+ *
+ * Adding a provider is harmless: it carries its own `envKey`, so it can only
+ * read a variable the user set for it. Redefining a built-in provider is not —
+ * a repository could point `openai` at its own host and receive the real key —
+ * so an untrusted entry must match the built-in exactly.
+ */
+function vettedFileProviders(
+  providers: readonly ProviderConfig[],
+  file: string,
+): ProviderConfig[] {
+  const kept: ProviderConfig[] = []
+  for (const provider of providers) {
+    const builtin = DEFAULT_PROVIDERS.find((candidate) => candidate.id === provider.id)
+    if (builtin === undefined) {
+      kept.push(cloneProvider(provider))
+      continue
+    }
+    const same =
+      (provider.protocol ?? 'openai-completions') ===
+        (builtin.protocol ?? 'openai-completions') &&
+      provider.envKey === builtin.envKey &&
+      provider.baseURL === builtin.baseURL &&
+      JSON.stringify(provider.headers ?? {}) === JSON.stringify(builtin.headers ?? {})
+    if (!same) {
+      throw new Error(
+        `"${file}" redefines the built-in provider "${provider.id}" (${provider.baseURL}); pass Z1_TRUST_CONFIG=1 to trust this directory`,
+      )
+    }
+  }
+  return kept
+}
+
+/**
  * Resolve one process config. Never mutates the file or the environment; a
  * caller that supplies `overrides` keeps whatever it explicitly names.
  */
@@ -342,16 +389,28 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
   const overrides = options.overrides ?? {}
   const env = options.env ?? overrides.env ?? process.env
   const cwd = resolve(overrides.cwd ?? options.cwd ?? process.cwd())
-  const fromFile = readConfigFile(options.file ?? resolve(cwd, 'z1.config.json'))
+  const file = options.file ?? resolve(cwd, 'z1.config.json')
+  const fromFile = readConfigFile(file)
+  const trustFile =
+    options.trustFile === true || envFlag('Z1_TRUST_CONFIG', env) === true
 
+  const fileProviders = trustFile
+    ? (fromFile.providers ?? [])
+    : vettedFileProviders(fromFile.providers ?? [], file)
   const providers =
     overrides.providers !== undefined
       ? overrides.providers.map(cloneProvider)
-      : mergeProviders(providersFromEnv(env), fromFile.providers ?? [])
+      : mergeProviders(providersFromEnv(env), fileProviders)
 
   const dbPath = overrides.dbPath ?? env['Z1_DB'] ?? fromFile.dbPath ?? DEFAULT_CONFIG.dbPath
   const graphsPath =
     overrides.graphsPath ?? env['Z1_GRAPHS_DIR'] ?? fromFile.graphsPath ?? DEFAULT_CONFIG.graphsPath
+  if (!trustFile && fromFile.modulesPath !== undefined) {
+    // The module store is executable code: a repository must not choose it.
+    throw new Error(
+      `"${file}" sets modulesPath, which is executable code; pass Z1_TRUST_CONFIG=1 to trust this directory or use --modules-dir`,
+    )
+  }
   const modulesPath =
     overrides.modulesPath ??
     env['Z1_MODULES_DIR'] ??

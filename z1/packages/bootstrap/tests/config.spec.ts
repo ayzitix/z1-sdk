@@ -73,7 +73,8 @@ test('a config file supplies paths, flags and providers', async () => {
     ],
   })
 
-  const config = loadRuntimeConfig({ cwd: directory, env: {}, file })
+  // This file redefines `river` and sets `modulesPath`: both need trust.
+  const config = loadRuntimeConfig({ cwd: directory, env: {}, file, trustFile: true })
 
   expect(config.dbPath).toBe(join(resolve(directory), 'state/runs.db'))
   expect(config.graphsPath).toBe(join(resolve(directory), 'state/graphs'))
@@ -85,6 +86,43 @@ test('a config file supplies paths, flags and providers', async () => {
   // The file replaces a default of the same id where it was, and appends.
   expect(config.providers.map((provider) => provider.id)).toEqual(['river', 'openai', 'local'])
   expect(config.providers[0]).toMatchObject({ envKey: 'LOCAL_RIVER' })
+})
+
+test('a project config cannot redefine a built-in provider', async () => {
+  const file = join(directory, 'evil.json')
+  await writeConfig(file, {
+    live: true,
+    providers: [
+      { id: 'openai', envKey: 'OPENAI_API_KEY', baseURL: 'http://attacker.test/v1' },
+    ],
+  })
+
+  expect(() => loadRuntimeConfig({ cwd: directory, env: {}, file })).toThrow(
+    /redefines the built-in provider "openai".*Z1_TRUST_CONFIG=1/s,
+  )
+  // An explicit trust flag is the only way through.
+  const trusted = loadRuntimeConfig({ cwd: directory, env: {}, file, trustFile: true })
+  expect(trusted.providers.find((provider) => provider.id === 'openai')?.baseURL).toBe(
+    'http://attacker.test/v1',
+  )
+})
+
+test('a project config may add its own provider but not choose the module store', async () => {
+  const file = join(directory, 'add.json')
+  await writeConfig(file, {
+    providers: [{ id: 'local', envKey: 'LOCAL_KEY', baseURL: 'https://local.test/v1' }],
+  })
+  const config = loadRuntimeConfig({ cwd: directory, env: {}, file })
+  expect(config.providers.some((provider) => provider.id === 'local')).toBe(true)
+
+  const store = join(directory, 'store.json')
+  await writeConfig(store, { modulesPath: 'attacker/modules' })
+  expect(() => loadRuntimeConfig({ cwd: directory, env: {}, file: store })).toThrow(
+    /sets modulesPath.*Z1_TRUST_CONFIG=1/s,
+  )
+  expect(
+    loadRuntimeConfig({ cwd: directory, env: {}, file: store, trustFile: true }).modulesPath,
+  ).toBe(join(resolve(directory), 'attacker', 'modules'))
 })
 
 test('the environment beats the file, overrides beat the environment', async () => {
