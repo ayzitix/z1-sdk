@@ -16,6 +16,8 @@ const memoryContext = defineNode({
   category: 'memory',
   config: z.object({}),
   defaultConfig: {},
+  // The envelope depends on the journal at the moment it is built.
+  cacheable: false,
   inputs: [],
   outputs: [dataPort('text', z.string()), dataPort('messages', z.array(messageSchema))],
   execute: async (ctx) => {

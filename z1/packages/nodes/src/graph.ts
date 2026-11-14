@@ -17,6 +17,8 @@ const subgraph = defineNode({
   defaultConfig: {
     graph: { schemaVersion: 1, id: 'subgraph', nodes: [], edges: [] },
   },
+  // A nested graph may write files or call tools.
+  cacheable: false,
   inputs: [flowPort('in'), dataPort('input', jsonValue, false)],
   outputs: [flowPort('out'), dataPort('output', jsonValue)],
   execute: async (ctx) => {

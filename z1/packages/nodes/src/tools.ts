@@ -35,6 +35,9 @@ const call = defineNode({
     dataPort('args', jsonValue),
   ],
   outputs: [dataPort('result', jsonValue), dataPort('isError', z.boolean()), flowPort('out')],
+  // A tool call is a side effect: identical arguments in two places are two
+  // calls, never one cached result.
+  cacheable: false,
   // A tool may be a shell command with a 300 s budget; the node must outlive
   // the 120 s default so the tool, not the executor, decides when it is done.
   timeoutMs: 300_000,
@@ -83,6 +86,8 @@ const list = defineNode({
   category: 'tool',
   config: z.object({}),
   defaultConfig: {},
+  // The installed set can change between steps of one run.
+  cacheable: false,
   inputs: [],
   outputs: [dataPort('tools', z.array(toolSchema))],
   execute: async (ctx) => ({ tools: asJson([...(await ctx.tools.list())]) }),

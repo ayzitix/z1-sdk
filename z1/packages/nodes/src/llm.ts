@@ -146,6 +146,8 @@ const chat = defineNode({
     maxTokens: z.number().int().positive().optional(),
   }),
   defaultConfig: {},
+  // A model turn costs money and may differ every time; never reuse it.
+  cacheable: false,
   inputs: [
     flowPort('in'),
     dataPort('model', modelHandleSchema, false),

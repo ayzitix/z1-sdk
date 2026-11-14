@@ -38,3 +38,21 @@ test('registers every SPEC §7 node at 1.0.0', () => {
   expect(builtinNodes).toHaveLength(ids.length)
   for (const id of ids) expect(registry.has(id, '1.0.0')).toBe(true)
 })
+
+test('nodes with side effects are never cached', () => {
+  // The per-run cache keys on type, config, inputs and path. A node that talks
+  // to the outside world must opt out, or two identical calls collapse into one.
+  const effectful = [
+    'z1.llm.chat',
+    'z1.tool.call',
+    'z1.tools.list',
+    'z1.graph.subgraph',
+    'z1.flow.loop',
+    'z1.flow.map',
+    'z1.memory.context',
+  ]
+  const byId = new Map(builtinNodes.map((definition) => [definition.id, definition]))
+  for (const id of effectful) {
+    expect(byId.get(id)?.cacheable, id).toBe(false)
+  }
+})

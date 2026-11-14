@@ -285,7 +285,8 @@ export interface ValidationIssue {
 
 /**
  * Stable hash of a graph's semantic content: id, type, version, config and
- * autonomy, plus edges. Display-only fields (`position`, `label`) do not count.
+ * autonomy, plus edges. Display-only fields (`title`, `position`, `label`) do
+ * not count.
  */
 export function graphDigest(graph: GraphDocument): string
 ```
@@ -385,10 +386,15 @@ export async function runGraph(options: RunOptions): Promise<RunResult>
    execution; parse failure fails the node, never the whole run silently.
 8. Every output value is parsed against its port schema; failure fails the node.
 9. Per-run cache: key = sha256 of canonical JSON `{type, version, config,
-   inputs, input}` where `input` is `NodeContext.input` (the run seed). Cache
-   hits emit `node.cached` and reuse outputs. Disabled when
-   `cacheable === false`. Policy is resolved **before** the cache lookup, so a
-   `deny` node can never be satisfied by another instance's cached output.
+   inputs, input, path}` where `input` is `NodeContext.input` (the run seed) and
+   `path` is the execution path. The same node at two paths is two executions:
+   identical `flow.map` items and two tool nodes with equal arguments must not
+   collapse into one side effect. Cache hits emit `node.cached` and reuse
+   outputs. Disabled when `cacheable === false`; every node with a side effect
+   (`tool.call`, `llm.chat`, `tools.list`, `graph.subgraph`, `flow.loop`,
+   `flow.map`, `memory.context`) sets it. Policy is resolved **before** the
+   cache lookup, so a `deny` node can never be satisfied by another instance's
+   cached output.
 10. Timeout: `definition.timeoutMs` (default 120_000) aborts the node.
 11. Retry: `definition.retry` retries on thrown errors with linear backoff.
 12. Approval: effective policy = node instance `autonomy` ?? definition

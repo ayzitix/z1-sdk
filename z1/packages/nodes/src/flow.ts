@@ -53,6 +53,8 @@ const loop = defineNode({
     body: z.unknown(),
     maxIterations: z.number().int().min(1).max(10_000),
   }),
+  // The body may contain side effects; two runs of it are two executions.
+  cacheable: false,
   // A loop body starts as an empty graph: it is still a valid graph, and the
   // caps stay inside the schema's own bounds.
   defaultConfig: {
@@ -116,6 +118,8 @@ const map = defineNode({
   defaultConfig: {
     body: { schemaVersion: 1, id: 'body', title: 'map body', nodes: [], edges: [] },
   },
+  // Same as the loop: each item may have a side effect.
+  cacheable: false,
   inputs: [flowPort('in'), dataPort('items', z.array(jsonValue))],
   outputs: [flowPort('out'), dataPort('results', z.array(jsonValue))],
   execute: async (ctx) => {

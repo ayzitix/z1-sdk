@@ -264,6 +264,7 @@ function requestApproval(
 
 function cacheKey(
   node: GraphNode,
+  path: string,
   config: unknown,
   inputs: Record<string, Json>,
   input: Json,
@@ -271,12 +272,17 @@ function cacheKey(
   // `input` is `ctx.input`: root nodes (e.g. `z1.core.input` inside a loop
   // body) receive their value there rather than through connected ports, so it
   // must be part of the key or iterations would collide.
+  //
+  // `path` is part of the key because identical arguments at different
+  // positions are different executions: two `flow.map` items, or two tool
+  // nodes with the same arguments, must not collapse into one side effect.
   const payload = {
     type: node.type,
     version: node.version,
     config,
     inputs,
     input,
+    path,
   }
   return createHash('sha256').update(canonicalJson(payload)).digest('hex')
 }
@@ -440,7 +446,7 @@ async function runNode(input: NodeRunInput): Promise<NodeOutcome> {
   }
 
   const cacheable = definition.cacheable !== false
-  const key = cacheable ? cacheKey(input.node, config, inputs, nodeInput) : undefined
+  const key = cacheable ? cacheKey(input.node, path, config, inputs, nodeInput) : undefined
   if (key !== undefined) {
     const cached = context.cache.get(key)
     // `ask` intentionally skips re-approval on a hit: the cached output was
@@ -761,10 +767,11 @@ async function executeRun(options: RunOptions, context: RunContext): Promise<Run
     definition: NodeDefinition<unknown>,
     result: Record<string, Json>,
   ): void => {
-    // A terminal output has no outgoing edges by contract, and must not branch.
-    if (node.type === 'z1.core.output') return
-    const flowPorts = declaredFlowPorts(definition)
+    // SPEC §6.3: a node that declares no flow outputs propagates along every
+    // outgoing flow edge. There is no exception for `core.output` — a custom
+    // definition of it may declare a flow port and sit mid-spine.
     const edges = outgoingFlow.get(node.id) ?? []
+    const flowPorts = declaredFlowPorts(definition)
 
     if (flowPorts.length === 0) {
       for (const edge of edges) pendingFlow.add(edge.to.node)
@@ -885,9 +892,10 @@ async function executeRun(options: RunOptions, context: RunContext): Promise<Run
         const port = typeof config['port'] === 'string' ? config['port'] : 'output'
         const value = resolved.values['value']
         if (value !== undefined) outputs[port] = value
-      } else {
-        propagateFlow(node, definition, restored)
       }
+      // Replay must advance the flow exactly like the first execution did,
+      // including an output node that sits in the middle of a spine.
+      propagateFlow(node, definition, restored)
       continue
     }
 
@@ -940,9 +948,8 @@ async function executeRun(options: RunOptions, context: RunContext): Promise<Run
       const port = typeof config['port'] === 'string' ? config['port'] : 'output'
       const value = resolved.values['value']
       if (value !== undefined) outputs[port] = value
-    } else {
-      propagateFlow(node, definition, outcome.outputs)
     }
+    propagateFlow(node, definition, outcome.outputs)
   }
 }
 

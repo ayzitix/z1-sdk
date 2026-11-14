@@ -881,6 +881,100 @@ describe('executor', () => {
     expect(result.error).toContain('missing data ports: out1.value')
     expect(result.error).toContain('missing flow tokens:')
   })
+  test('identical arguments at different paths are not collapsed by the cache', async () => {
+    let calls = 0
+    const sideEffectNode = defineNode<unknown>({
+      id: 'test.effect',
+      version: '1.0.0',
+      title: 'effect',
+      category: 'test',
+      config: configOf(z.object({})),
+      inputs: [dataPort('value')],
+      outputs: [dataPort('value')],
+      execute: async (ctx) => {
+        calls += 1
+        const inputs = isRecord(ctx.input) ? ctx.input : {}
+        return { value: (inputs['value'] ?? null) as Json }
+      },
+    })
+
+    const graph = makeGraph(
+      'cache-identity',
+      [
+        graphNode('src', 'test.const', { value: 'same' }),
+        graphNode('first', 'test.effect', {}),
+        graphNode('second', 'test.effect', {}),
+        graphNode('out1', 'z1.core.output', { port: 'a' }),
+        graphNode('out2', 'z1.core.output', { port: 'b' }),
+      ],
+      [
+        dataEdge('e1', 'src', 'value', 'first', 'value'),
+        dataEdge('e2', 'src', 'value', 'second', 'value'),
+        dataEdge('e3', 'first', 'value', 'out1', 'value'),
+        dataEdge('e4', 'second', 'value', 'out2', 'value'),
+      ],
+    )
+    const result = await runGraph({
+      graph,
+      registry: makeRegistry(constNode, sideEffectNode, outputNode),
+      services: createMockRuntimeServices(),
+    })
+
+    expect(result.status).toBe('completed')
+    expect(calls).toBe(2)
+  })
+
+  test('an output node still advances its outgoing flow edges', async () => {
+    let ran = false
+    // A custom `core.output` with a declared flow port: the builtin one has no
+    // output ports, so the validator would reject an outgoing edge.
+    const chainedOutputNode = defineNode<unknown>({
+      id: 'z1.core.output',
+      version: '1.0.0',
+      title: 'output',
+      category: 'core',
+      config: configOf(z.object({ port: z.string().optional() })),
+      inputs: [flowPort('in'), dataPort('value')],
+      outputs: [flowPort('out')],
+      execute: async () => ({ out: true }),
+    })
+    const boomNode = defineNode<unknown>({
+      id: 'test.boom',
+      version: '1.0.0',
+      title: 'boom',
+      category: 'test',
+      config: configOf(z.object({})),
+      inputs: [flowPort('in')],
+      outputs: [],
+      execute: async () => {
+        ran = true
+        throw new Error('boom ran')
+      },
+    })
+
+    const graph = makeGraph(
+      'output-flow',
+      [
+        graphNode('start', 'test.start', { pass: true }),
+        graphNode('src', 'test.const', { value: 'v' }),
+        graphNode('out1', 'z1.core.output', {}),
+        graphNode('boom', 'test.boom', {}),
+      ],
+      [
+        flowEdge('f1', 'start', 'out', 'out1', 'in'),
+        flowEdge('f2', 'out1', 'out', 'boom', 'in'),
+        dataEdge('d1', 'src', 'value', 'out1', 'value'),
+      ],
+    )
+    const result = await runGraph({
+      graph,
+      registry: makeRegistry(flowStartNode, constNode, chainedOutputNode, boomNode),
+      services: createMockRuntimeServices(),
+    })
+
+    expect(ran).toBe(true)
+    expect(result.status).toBe('failed')
+  })
 })
 
 async function runBranchGraph(condition: boolean) {
