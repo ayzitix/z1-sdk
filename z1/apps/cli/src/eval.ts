@@ -279,8 +279,9 @@ function metricsOf(journal: SqliteJournal, runId: string): CaseMetrics {
   for (const event of journal.read(runId)) {
     // One `llm.request` is one model turn, whatever the node is called. A path
     // suffix (`*/chat`) only works for the builtin node and silently reports 0
-    // for a provider node.
-    if (event.type === 'llm.request') steps += 1
+    // for a provider node. The compaction summary is an internal turn: its
+    // tokens are real cost, but it is not a step of the task.
+    if (event.type === 'llm.request' && !/\/ctxSummary$/.test(event.path)) steps += 1
     if (event.type === 'node.completed' && MAP_CALL_PATH.test(event.path)) {
       toolCalls += 1
       const outputs = event.outputs as Record<string, unknown>

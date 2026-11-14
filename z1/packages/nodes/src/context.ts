@@ -362,7 +362,10 @@ const CHECKPOINT_PREAMBLE =
 function messageText(message: Json): string {
   if (!isRecord(message)) return ''
   const content = message['content']
-  return typeof content === 'string' ? content : ''
+  if (typeof content === 'string') return content
+  // A tool result can be an object (`clip` passes a short one through as-is);
+  // treating it as empty would silently exempt the largest results.
+  return content === undefined ? '' : (JSON.stringify(content) ?? '')
 }
 
 function isToolResult(message: Json): boolean {
@@ -393,7 +396,7 @@ const compact = defineNode({
     /** How many of the most recent tool results to keep verbatim. */
     keepToolResults: z.number().int().nonnegative().default(3),
     /** Results shorter than this are not worth a marker. */
-    minChars: z.number().int().nonnegative().default(400),
+    minChars: z.number().int().min(64).default(400),
   }),
   defaultConfig: {},
   cacheable: false,
@@ -414,13 +417,15 @@ const compact = defineNode({
     }
     const messages = raw as readonly Json[]
     const toolIndexes: number[] = []
+    let lastAssistant = -1
     messages.forEach((message, index) => {
       if (isToolResult(message)) toolIndexes.push(index)
+      if (isRecord(message) && message['role'] === 'assistant') lastAssistant = index
     })
-    const clearable = toolIndexes.slice(
-      0,
-      Math.max(0, toolIndexes.length - ctx.config.keepToolResults),
-    )
+    // A result produced after the last assistant turn has not been sent to the
+    // model yet. Clearing it first would hide a tool output the model never saw.
+    const seen = toolIndexes.filter((index) => index < lastAssistant)
+    const clearable = seen.slice(0, Math.max(0, seen.length - ctx.config.keepToolResults))
 
     let cleared = 0
     const next = messages.map((message, index) => {
@@ -430,7 +435,7 @@ const compact = defineNode({
       cleared += 1
       return {
         ...(message as Record<string, Json>),
-        content: `[cleared: earlier tool result, ${String(text.length)} chars · re-run the tool if it is needed again]`,
+        content: `\u2063[cleared: earlier tool result, ${String(text.length)} chars · re-run the tool if it is needed again]`,
       }
     })
 
@@ -466,6 +471,10 @@ const summarize = defineNode({
     maxSummaryTokens: z.number().int().positive().default(2_000),
     /** A checkpoint that does not save at least this share is discarded. */
     minimumReduction: z.number().min(0).lt(1).default(0.1),
+    /** How many checkpoints a transcript may already contain before we stop. */
+    maxCompactions: z.number().int().positive().default(3),
+    /** Do not pay for a summary of a span smaller than this. */
+    minDroppedTokens: z.number().int().nonnegative().default(256),
   }),
   defaultConfig: {},
   cacheable: false,
@@ -504,21 +513,43 @@ const summarize = defineNode({
       out: true,
     }
 
+    const checkpoints = messages.filter(
+      (message) => isRecord(message) && messageText(message).includes(SUMMARY_OPEN),
+    ).length
+    if (checkpoints >= ctx.config.maxCompactions) {
+      // Without a cap a transcript that stays over budget re-summarises on every
+      // iteration, paying for a call that cannot help.
+      ctx.log(
+        'warn',
+        `z1.ctx.summarize: already ${String(checkpoints)} checkpoints; not compacting again`,
+      )
+      return noop
+    }
+
     const cut = safeCut(messages, ctx.config.keepRecentTurns)
     // The first message is the system prompt; it is never summarised and never
     // dropped, because the checkpoint replaces the middle, not the rules.
     const head = isRecord(messages[0]) && messages[0]['role'] === 'system' ? messages[0] : undefined
-    const from = head === undefined ? 0 : 1
+    let from = head === undefined ? 0 : 1
+    // A transcript that starts with an orphan tool result (custom graph) would
+    // produce a summary request a provider rejects; skip such a message.
+    while (from < cut && isToolResult(messages[from] as Json)) from += 1
     if (cut <= from) return noop
 
     const dropped = messages.slice(from, cut)
     const tail = messages.slice(cut)
     if (dropped.length === 0) return noop
+    if (estimateMessages(dropped, 4) < ctx.config.minDroppedTokens) {
+      ctx.log('debug', 'z1.ctx.summarize: the droppable span is too small to summarise')
+      return noop
+    }
 
     const handle = ctx.config.model ?? values['model']
+    // Keep the whole handle: `params` carries stream/temperature and would be
+    // lost by copying only provider and model.
     const model =
       isRecord(handle) && typeof handle['provider'] === 'string' && typeof handle['model'] === 'string'
-        ? { provider: handle['provider'], model: handle['model'] }
+        ? (handle as { provider: string; model: string })
         : undefined
     if (model === undefined) {
       ctx.log('warn', 'z1.ctx.summarize: no model handle; returning the transcript unchanged')
@@ -531,6 +562,10 @@ const summarize = defineNode({
       reply = await ctx.llm.chat({
         model,
         messages: [
+          // The real request is system + transcript + tools; replaying the same
+          // head keeps this call a prefix of it (warm prompt cache) and keeps a
+          // tool-leading span valid.
+          ...(head === undefined ? [] : [head]),
           ...(dropped as never[]),
           { role: 'user', content: COMPACTION_INSTRUCTION },
         ] as never,
@@ -538,9 +573,16 @@ const summarize = defineNode({
         maxTokens: ctx.config.maxSummaryTokens,
       })
     } catch (error) {
-      // A failed summary must not fail the run: the caller still has a
-      // transcript that fits, or a compaction result from the tier below.
-      ctx.log('warn', `z1.ctx.summarize: summary call failed: ${errorMessage(error)}`)
+      const message = errorMessage(error)
+      // A cassette miss means the recording is not valid for this transcript:
+      // swallowing it would turn a broken replay into a silent full-price run.
+      // An auth/4xx error is a configuration problem, not a transient one.
+      if (/cassette miss|unauthori[sz]ed|forbidden|\b40[13]\b/i.test(message)) {
+        throw error
+      }
+      // Any other failure must not fail the run: the caller still has the
+      // tier-0 result, which is a valid transcript.
+      ctx.log('warn', `z1.ctx.summarize: summary call failed: ${message}`)
       return noop
     }
 

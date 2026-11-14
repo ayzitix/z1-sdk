@@ -193,10 +193,19 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
       call or when the checkpoint saves too little.
 - [x] `agent.loop` gates both on `budget.over`, so a transcript that fits is
       untouched and no summary call is made.
+- Review fixes: tier 0 only clears results the model has already seen (a result
+  produced after the last assistant turn is left alone) and treats an object
+  result as text; the marker carries a sentinel; tier 1 caps checkpoints
+  (`maxCompactions`), skips a span too small to pay for, replays the system
+  message in the summarization call (prefix cache, valid tool-leading span), and
+  rethrows a cassette miss or an auth error instead of swallowing it.
 - Known: the budget estimates; it does not tokenise, and `usage` is not wired in
   the loop body, so in the default template `over` is estimate-only. The window
   is a config value with no provider lookup yet. Read ledger, notes file and repo
   map are the next steps.
+- Known: adding the context nodes changed the graph digest, so runs journaled
+  before this commit fail `RESUME_MISMATCH`. Resuming an old run needs the old
+  graph, which is the intended behaviour of the digest check.
 
 ## M12 — recorded model traffic and eval
 

@@ -551,7 +551,11 @@ z1 eval <case.json|dir> [--live] [--cassette <file>] [--json] [--jobs N]
 `agent.loop` gates compaction on `z1.ctx.budget.over`: below the threshold the
 transcript reaches `chat` unchanged (and no summary call is made); above it,
 `z1.ctx.compact` clears old tool results and `z1.ctx.summarize` replaces the
-older span with a checkpoint. The cut is taken at the start of a body iteration,
+older span with a checkpoint. Tier 0 only touches results that appeared before
+the last assistant turn, so a result the model has not been shown yet is never
+hidden. Tier 1 stops after `maxCompactions` checkpoints and skips a span below
+`minDroppedTokens`; a cassette miss or an auth error fails the turn instead of
+silently running without the summary. The cut is taken at the start of a body iteration,
 where the transcript is either an assistant message without `toolCalls` or an
 assistant message followed by every matching tool message, so a cut can never
 separate a tool call from its result. The summary turn is an ordinary

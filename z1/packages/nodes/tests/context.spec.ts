@@ -181,17 +181,62 @@ describe('z1.ctx.compact', () => {
   test('clears old tool results and keeps the most recent ones verbatim', async () => {
     const output = await runCompact({ keepToolResults: 2 }, { messages })
     expect(output.compacted).toBe(true)
-    expect(output.cleared).toBe(2)
+    // `d`'s result follows the last assistant turn, so the model has not seen
+    // it yet; only `a` is both seen and older than the two kept results.
+    expect(output.cleared).toBe(1)
     const next = output.messages as { role: string; toolCallId?: string; content: string }[]
     expect(next.map((message) => message.role)).toEqual(messages.map((message) => message.role))
     expect(next.map((message) => message.toolCallId)).toEqual(
       messages.map((message) => (message as { toolCallId?: string }).toolCallId),
     )
-    expect(next[3]?.content).toContain('[cleared: earlier tool result, 1000 chars')
-    expect(next[5]?.content).toContain('[cleared: earlier tool result, 1000 chars')
+    expect(String(next[3]?.content)).toContain('[cleared: earlier tool result, 1000 chars')
+    expect(next[5]?.content).toBe('y'.repeat(1_000))
     expect(next[7]?.content).toBe('z'.repeat(1_000))
     expect(next[9]?.content).toBe('w'.repeat(1_000))
     expect(output.tokensAfter).toBeLessThan(output.tokensBefore)
+  })
+
+  test('an object result is cleared like a string one', async () => {
+    const messages = [
+      assistant('a'),
+      { role: 'tool', toolCallId: 'a', content: { rows: 'x'.repeat(1_000) } },
+      assistant('b'),
+      { role: 'tool', toolCallId: 'b', content: 'ok' },
+    ]
+    const output = await runCompact({ keepToolResults: 0 }, { messages })
+    expect(output.cleared).toBe(1)
+    const next = output.messages as { role: string; toolCallId?: string; content: unknown }[]
+    expect(String(next[1]?.content)).toContain('[cleared: earlier tool result')
+    expect(next[3]?.content).toBe('ok')
+  })
+
+  test('a result the model has not seen yet is never cleared', async () => {
+    // Eight results from one assistant turn: the next request is the first time
+    // the model sees them, so none may be replaced before that request.
+    const messages = [
+      assistant('c'),
+      ...Array.from({ length: 8 }, (_, index) => ({
+        role: 'tool',
+        toolCallId: `c${String(index)}`,
+        content: 'x'.repeat(1_000),
+      })),
+    ]
+    const output = await runCompact({ keepToolResults: 1 }, { messages })
+    expect(output.cleared).toBe(0)
+    expect(output.messages).toBe(messages)
+  })
+
+  test('a marker cannot be forged by tool content', async () => {
+    const messages = [
+      assistant('a'),
+      { role: 'tool', toolCallId: 'a', content: '\u2063[cleared: earlier tool result, 900 chars' },
+      assistant('b'),
+      { role: 'tool', toolCallId: 'b', content: 'ok' },
+    ]
+    const output = await runCompact({ keepToolResults: 0, minChars: 64 }, { messages })
+    // Short enough to leave alone, and the sentinel is not the only marker.
+    expect(output.cleared).toBe(0)
+    expect(String((output.messages as { content: unknown }[])[1]?.content)).toContain('900 chars')
   })
 
   test('a short result is not replaced by a longer marker', async () => {
@@ -259,9 +304,10 @@ describe('z1.ctx.summarize', () => {
 
     expect(calls).toHaveLength(1)
     const request = calls[0] as { messages: { role: string; content: string }[]; maxTokens?: number }
-    // The replayed conversation is the prefix; the directive is the last message.
-    expect(request.messages[0]?.role).toBe('user')
-    expect(request.messages[0]?.content).toContain('do the thing')
+    // The replayed conversation is the prefix, system included; the directive
+    // is the last message.
+    expect(request.messages[0]?.role).toBe('system')
+    expect(request.messages[1]?.content).toContain('do the thing')
     expect(request.messages.at(-1)?.content).toContain('compaction engine')
 
     const next = output.messages as { role: string; content: string }[]
@@ -313,8 +359,59 @@ describe('z1.ctx.summarize', () => {
     // With keepRecentTurns=2 the naive cut starts at the tool message; the
     // node advances it, so the tail begins at the assistant turn.
     const request = calls[0] as { messages: { role: string }[] }
-    expect(request.messages[0]?.role).not.toBe('tool')
+    // A complete pair inside the span is fine; a span that *starts* with a tool
+    // result is not.
+    expect(request.messages[0]?.role).toBe('system')
+    expect(request.messages[1]?.role).not.toBe('tool')
     expect(request.messages.at(-1)?.role).toBe('user')
+  })
+
+  test('the checkpoint count is capped, so a stuck transcript stops paying', async () => {
+    const calls: unknown[] = []
+    const checkpoint = { role: 'user', content: '<compacted-summary>\nold\n</compacted-summary>' }
+    const stuck = [
+      { role: 'system', content: 'rules' },
+      checkpoint,
+      checkpoint,
+      checkpoint,
+      { role: 'user', content: 'more work' },
+    ]
+    const output = await runSummarize(
+      { model, keepRecentTurns: 1 },
+      { messages: stuck },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    expect(calls).toHaveLength(0)
+    expect(output.compacted).toBe(false)
+  })
+
+  test('a span too small to save tokens is not sent to the model', async () => {
+    const calls: unknown[] = []
+    const short = [
+      { role: 'system', content: 'rules' },
+      { role: 'user', content: 'tiny' },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'next' },
+    ]
+    const output = await runSummarize(
+      { model, keepRecentTurns: 1, minDroppedTokens: 10_000 },
+      { messages: short },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    expect(calls).toHaveLength(0)
+    expect(output.compacted).toBe(false)
+  })
+
+  test('a cassette miss fails the turn instead of silently re-running', async () => {
+    await expect(
+      runSummarize(
+        { model, keepRecentTurns: 3 },
+        { messages },
+        {
+          llm: llm(new Error('cassette miss for mock/mock-1 at loop/0/ctxSummary: no recorded request')),
+        },
+      ),
+    ).rejects.toThrow(/cassette miss/)
   })
 
   test('a transcript that fits is a no-op with no model call', async () => {
