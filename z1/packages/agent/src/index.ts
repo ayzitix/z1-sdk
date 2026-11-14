@@ -244,13 +244,15 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       data('d5', 'chat', 'text', 'assistantMsg', 'content'),
       data('d6', 'chat', 'toolCalls', 'assistantMsg', 'toolCalls'),
       data('d7', 'chat', 'toolCalls', 'toolMap', 'items'),
-      data('d8', 'messages', 'value', 'thenConcat', 'a'),
+      // The compacted transcript is the loop state: without this the checkpoint
+      // only reaches `chat` and the next iteration starts from the raw history.
+      data('d8', 'ctxMerge', 'value', 'thenConcat', 'a'),
       data('d9', 'assistantMsg', 'message', 'thenConcat', 'b'),
       data('d10', 'thenConcat', 'value', 'thenMsgs', 'a'),
       data('d11', 'toolMap', 'results', 'thenMsgs', 'b'),
       data('d12', 'thenMsgs', 'value', 'messagesMerge', 'a'),
       data('d13', 'body', 'value', 'elseMessages', 'value'),
-      data('d14', 'elseMessages', 'value', 'elseMsgs', 'a'),
+      data('d14', 'ctxMerge', 'value', 'elseMsgs', 'a'),
       data('d15', 'chat', 'message', 'elseMsgs', 'b'),
       data('d16', 'elseMsgs', 'value', 'messagesMerge', 'b'),
       data('d17', 'thenDone', 'value', 'doneMerge', 'a'),

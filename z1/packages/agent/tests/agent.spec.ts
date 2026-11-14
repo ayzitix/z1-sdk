@@ -333,6 +333,16 @@ describe('buildAgentGraph', () => {
       ),
     )
     expect(checkpointed).toBeDefined()
+
+    // The compacted transcript is the loop state, so the checkpoint survives
+    // into the next iteration and into the run's final messages.
+    const merged = journal
+      .read(result.runId)
+      .filter((entry) => entry.type === 'node.completed' && entry.nodeId === 'messagesMerge')
+    const last = merged.at(-1)
+    if (last?.type !== 'node.completed') throw new Error('no messagesMerge event')
+    const state = JSON.stringify(last.outputs['value'])
+    expect(state).toContain('<compacted-summary>')
   })
 
   test('the caller can set the window the budget measures against', async () => {
