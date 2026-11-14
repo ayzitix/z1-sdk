@@ -63,6 +63,12 @@ describe('graphDigest', () => {
     expect(graphDigest(renamed)).toBe(graphDigest(left))
   })
 
+  test('ignores the graph title', () => {
+    const left = makeGraph({ nodes: [node('a', 'test.source')] })
+    const renamed = { ...makeGraph({ nodes: [node('a', 'test.source')] }), title: 'Renamed' }
+    expect(graphDigest(renamed)).toBe(graphDigest(left))
+  })
+
   test('changes when autonomy changes', () => {
     const left = makeGraph({ nodes: [node('a', 'test.source')] })
     const right = makeGraph({

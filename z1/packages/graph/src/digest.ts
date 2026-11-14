@@ -34,14 +34,14 @@ function compareByPayload(left: Record<string, unknown>, right: Record<string, u
 
 /**
  * Stable semantic hash: node and edge order does not matter, nested
- * `config.graph` does (it is part of `config`). `metadata`, `position` and
- * `label` are excluded because they are presentation-only.
+ * `config.graph` does (it is part of `config`). `metadata`, `title`,
+ * `position` and `label` are excluded because they are presentation-only:
+ * renaming a graph or moving a node must not invalidate a resume.
  */
 export function graphDigest(graph: GraphDocument): string {
   const payload = {
     schemaVersion: graph.schemaVersion,
     id: graph.id,
-    ...(graph.title !== undefined ? { title: graph.title } : {}),
     nodes: graph.nodes.map(nodePayload).sort(compareByPayload),
     edges: graph.edges.map(edgePayload).sort(compareByPayload),
   }
