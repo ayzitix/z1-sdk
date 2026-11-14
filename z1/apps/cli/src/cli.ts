@@ -77,7 +77,8 @@ const USAGE = [
   '      [--modules-dir <path>] [--no-modules] [--no-service-modules] [--no-memory]',
   '      [--cwd <path>]',
   '  run --template <id> [--model <provider/model>] [--provider <id>] [--role <id>]',
-  '      [--max-steps <n>] [--system <text>] [--budget-tokens <n>] [--json] [--db <path>]',
+  '      [--max-steps <n>] [--system <text>] [--budget-tokens <n>]',
+  '      [--context-window <n>] [--reserve-tokens <n>] [--json] [--db <path>]',
   '  template list [--templates-dir <path>] [--json]',
   '  tree [--db <path>] [--json]',
   '  cassette export <runId> [-o <file>] [--db <path>]',
@@ -883,6 +884,8 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     'max-steps'?: string
     system?: string
     'budget-tokens'?: string
+    'context-window'?: string
+    'reserve-tokens'?: string
     'templates-dir'?: string
     cwd?: string
     cassette?: string
@@ -914,6 +917,8 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         'max-steps': { type: 'string' },
         system: { type: 'string' },
         'budget-tokens': { type: 'string' },
+        'context-window': { type: 'string' },
+        'reserve-tokens': { type: 'string' },
         'templates-dir': { type: 'string' },
         cwd: { type: 'string' },
         cassette: { type: 'string' },
@@ -982,6 +987,8 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
       'max-steps',
       'system',
       'budget-tokens',
+      'context-window',
+      'reserve-tokens',
     ] as const
     const used = templateOnly.filter((name) => values[name] !== undefined)
     if (used.length > 0) {
@@ -995,12 +1002,20 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
   let model: ModelHandle | undefined
   let maxSteps: number | undefined
   let budgetTokens: number | undefined
+  let contextWindow: number | undefined
+  let reserveTokens: number | undefined
   try {
     if (values['max-steps'] !== undefined) {
       maxSteps = positiveInt(values['max-steps'], '--max-steps')
     }
     if (values['budget-tokens'] !== undefined) {
       budgetTokens = positiveInt(values['budget-tokens'], '--budget-tokens')
+    }
+    if (values['context-window'] !== undefined) {
+      contextWindow = positiveInt(values['context-window'], '--context-window')
+    }
+    if (values['reserve-tokens'] !== undefined) {
+      reserveTokens = positiveInt(values['reserve-tokens'], '--reserve-tokens')
     }
     if (templateId !== undefined) model = templateModel(values)
   } catch (error) {
@@ -1088,6 +1103,8 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         ...(maxSteps === undefined ? {} : { maxSteps }),
         ...(values.system === undefined ? {} : { system: values.system }),
         ...(budgetTokens === undefined ? {} : { budgetTokens }),
+        ...(contextWindow === undefined ? {} : { contextWindow }),
+        ...(reserveTokens === undefined ? {} : { reserveTokens }),
       }
       try {
         graph = runtime.templates.build(templateId, context)

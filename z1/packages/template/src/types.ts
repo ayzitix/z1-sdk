@@ -25,6 +25,10 @@ export interface TemplateContext {
   system?: string
   /** Token ceiling of the prompt stack. */
   budgetTokens?: number
+  /** Context window of the routed model, in tokens (budget/compaction). */
+  contextWindow?: number
+  /** Room kept for the answer when the budget decides to compact. */
+  reserveTokens?: number
 }
 
 /** What `template list` and `registry.list()` expose; the graph stays hidden. */

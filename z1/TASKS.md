@@ -171,6 +171,20 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] `graphDigest` ignores the display-only `title`.
 - [x] `checkFsReal` resolves symlinks; `ctx.net` re-checks every redirect hop.
 
+## Post-M13 — audit fixes
+
+- [x] A flow output that is not `true` on any port is an `INVALID_OUTPUT`, not a
+      silent spine stop that a sibling output reports as `completed`.
+- [x] A journal append failure returns a failed `RunResult` instead of rejecting.
+- [x] A module version with no grant is not active and is never loaded.
+- [x] A project `z1.config.json` cannot redefine a built-in provider or choose
+      `modulesPath` without `Z1_TRUST_CONFIG=1`.
+- [x] `fs.stat` resolves intermediate symlinks (`followFinal: false`).
+- [x] The compacted transcript is the loop state, so a checkpoint survives into
+      the next iteration and `maxCompactions` can bind.
+- [x] `contextWindow`/`reserveTokens` reach `agent.loop` through the template and
+      `--context-window`/`--reserve-tokens`.
+
 ## M13 — context hygiene, step 1-2
 
 - [x] `z1.ctx.budget`: observe-only token estimate (ASCII / `charsPerToken`, one

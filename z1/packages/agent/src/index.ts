@@ -493,6 +493,8 @@ export const agentTemplate: GraphTemplate = {
       ...(context.maxSteps === undefined ? {} : { maxSteps: context.maxSteps }),
       ...(context.system === undefined ? {} : { system: context.system }),
       ...(context.budgetTokens === undefined ? {} : { budgetTokens: context.budgetTokens }),
+      ...(context.contextWindow === undefined ? {} : { contextWindow: context.contextWindow }),
+      ...(context.reserveTokens === undefined ? {} : { reserveTokens: context.reserveTokens }),
     })
   },
 }

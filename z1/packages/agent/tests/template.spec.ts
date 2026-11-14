@@ -31,6 +31,22 @@ describe('agentTemplate', () => {
     expect(loop?.config).toMatchObject({ maxIterations: 3 })
   })
 
+  test('build passes the context window and reserve to the budget', () => {
+    const registry = new TemplateRegistry()
+    registerAgentTemplates(registry)
+
+    const graph = registry.build('agent.loop', { contextWindow: 200_000, reserveTokens: 8_000 })
+    const loop = graph.nodes.find((node) => node.id === 'loop')
+    const body = (loop?.config as { body?: { nodes: { id: string; config: unknown }[] } }).body
+    const budget = body?.nodes.find((node) => node.id === 'budget')
+    expect(budget?.config).toMatchObject({ contextWindow: 200_000, reserveTokens: 8_000 })
+    // The default stays a documented assumption, not a guess at the model.
+    const fallback = registry.build('agent.loop', {})
+    const fallbackLoop = fallback.nodes.find((node) => node.id === 'loop')
+    const fallbackBody = (fallbackLoop?.config as { body?: { nodes: { id: string; config: unknown }[] } }).body
+    expect(fallbackBody?.nodes.find((node) => node.id === 'budget')?.config).toEqual({})
+  })
+
   test('build defaults the model to the mock provider', () => {
     const graph = agentTemplate.build?.({})
     const loop = graph?.nodes.find((node) => node.id === 'loop')

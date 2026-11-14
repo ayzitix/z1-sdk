@@ -21,6 +21,14 @@ boundary legible rather than absolute.
   (`fs` read/write flags, no child processes by default). Every capability call
   (`ctx.fs`, `ctx.net`, `ctx.process`, `ctx.llm`, `ctx.tools`, approval) is
   brokered by the host, checked against the module grant, and audited.
+- **A project `z1.config.json` is untrusted.** It may add a provider (which can
+  only read its own environment variable), but redefining a built-in provider's
+  endpoint, env key or headers, or setting `modulesPath`, requires
+  `Z1_TRUST_CONFIG=1`. Otherwise a cloned repository could point `openai` at its
+  own host and receive the real key, or install its own executable modules.
+- **A version without a grant is not runnable.** `state.json` alone cannot make
+  a module active: an installed version the user never approved is listed by
+  `module list` but never loaded, whatever the store says.
 - **Service modules** are worker-hosted by default. A service may declare
   `mode: "host"` only with `trusted: true`; host services run in-process and have
   the host's reach. Approving one is a statement that you trust its code.
