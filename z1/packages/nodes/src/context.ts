@@ -30,25 +30,38 @@ const DEFAULT_RESERVE = 16_384
 const DEFAULT_THRESHOLD = 0.85
 const DEFAULT_CHARS_PER_TOKEN = 4
 
-function messageChars(message: Json): number {
-  if (!isRecord(message)) return JSON.stringify(message).length
-  let chars = 0
-  const content = message['content']
-  if (typeof content === 'string') chars += content.length
-  else if (content !== undefined) chars += JSON.stringify(content).length
-  const toolCalls = message['toolCalls']
-  if (toolCalls !== undefined) chars += JSON.stringify(toolCalls).length
-  return chars
+/**
+ * Rough token estimate for a transcript.
+ *
+ * ASCII is divided by `charsPerToken` (4 is a common approximation). A
+ * non-ASCII code unit counts as a full token: CJK and emoji tokenise at roughly
+ * one token per character, so dividing them by four understates the window by
+ * up to 4x, which is the direction that silently overflows.
+ */
+export function estimateText(text: string, charsPerToken: number): number {
+  let ascii = 0
+  let wide = 0
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) < 0x80) ascii += 1
+    else wide += 1
+  }
+  return Math.ceil(ascii / charsPerToken) + wide
 }
 
-/** Rough token estimate for a transcript; deliberately cheap and monotonic. */
 export function estimateMessages(
   messages: readonly Json[],
   charsPerToken: number,
 ): number {
-  let chars = 0
-  for (const message of messages) chars += messageChars(message)
-  return Math.ceil(chars / charsPerToken)
+  let ascii = 0
+  let wide = 0
+  for (const message of messages) {
+    const text = JSON.stringify(message) ?? ''
+    for (let index = 0; index < text.length; index += 1) {
+      if (text.charCodeAt(index) < 0x80) ascii += 1
+      else wide += 1
+    }
+  }
+  return Math.ceil(ascii / charsPerToken) + wide
 }
 
 function usageTokens(value: Json | undefined): number | undefined {
@@ -74,8 +87,9 @@ const budget = defineNode({
     charsPerToken: z.number().positive().default(DEFAULT_CHARS_PER_TOKEN),
   }),
   defaultConfig: {},
-  // Pure arithmetic over its inputs; no side effect and nothing time-dependent.
-  cacheable: true,
+  // Cheap and pure, but its output is the whole transcript: caching it would
+  // key on a growing array (no hits) and keep another copy per iteration.
+  cacheable: false,
   inputs: [
     dataPort('messages', z.array(jsonValue), false),
     /**
@@ -95,11 +109,18 @@ const budget = defineNode({
   execute: async (ctx) => {
     const values = inputValues(ctx.input)
     const raw = values['messages']
-    const messages = Array.isArray(raw) ? raw : []
+    // Silently treating a malformed transcript as empty would make the one
+    // observe-only node change what the model sees.
+    if (raw !== undefined && !Array.isArray(raw)) {
+      throw new Error('z1.ctx.budget: the "messages" input must be an array')
+    }
+    const messages = raw ?? []
     const window = ctx.config.contextWindow
     const reserve = Math.min(ctx.config.reserveTokens, window)
     const usable = Math.max(1, window - reserve)
-    const triggerAt = Math.floor(usable * ctx.config.threshold)
+    // A reserve that covers the window must not produce a threshold of zero:
+    // that would warn on an empty transcript on every iteration.
+    const triggerAt = Math.max(1, Math.floor(usable * ctx.config.threshold))
 
     const estimated = estimateMessages(messages, ctx.config.charsPerToken)
     // A transcript can include tool schemas the estimate cannot see, so a
@@ -136,7 +157,33 @@ const budget = defineNode({
 /** Keep a spill path printable and filesystem-safe. */
 function safeSegment(value: string, fallback: string): string {
   const cleaned = value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
-  return cleaned.length === 0 ? fallback : cleaned.slice(0, 80)
+  // `.` and `..` survive the character filter and would navigate the path.
+  if (cleaned.length === 0 || cleaned === '.' || cleaned === '..') return fallback
+  return cleaned.slice(0, 80)
+}
+
+/**
+ * Sentinel in front of the marker.
+ *
+ * A tool result can contain the marker text itself; the invisible separator
+ * makes an accidentally identical prefix unlikely without hiding the notice
+ * from the model.
+ */
+const MARKER_SENTINEL = '\u2063'
+
+/** Cut at a code-point boundary, so a surrogate pair is never split. */
+function headEnd(text: string, index: number): number {
+  if (index <= 0) return 0
+  const code = text.charCodeAt(index - 1)
+  // High surrogate at the end of the head: keep the pair for the tail.
+  return code >= 0xd800 && code <= 0xdbff ? index - 1 : index
+}
+
+function tailStart(text: string, index: number): number {
+  if (index >= text.length) return text.length
+  const code = text.charCodeAt(index)
+  // Low surrogate at the start of the tail: drop it, the head kept the pair.
+  return code >= 0xdc00 && code <= 0xdfff ? index + 1 : index
 }
 
 const clip = defineNode({
@@ -151,7 +198,22 @@ const clip = defineNode({
     /** Share of `maxChars` kept from the start; the rest is the tail. */
     headRatio: z.number().gt(0).lt(1).default(0.5),
     spill: z.boolean().default(true),
-    directory: z.string().default('.z1/out'),
+    /**
+     * Workspace-relative spill directory. An absolute path or a `..` segment is
+     * rejected: the fs service would honour it, which would let a graph write
+     * outside the workspace.
+     */
+    directory: z
+      .string()
+      .default('.z1/out')
+      .refine(
+        (value) =>
+          value.length > 0 &&
+          !value.startsWith('/') &&
+          !/^[a-zA-Z]:/.test(value) &&
+          !value.split(/[\\/]+/).includes('..'),
+        { message: 'directory must be a relative path without ".."' },
+      ),
   }),
   defaultConfig: {},
   // Writes the spill file, so it can never be reused from the run cache.
@@ -183,9 +245,25 @@ const clip = defineNode({
       }
     }
 
-    const headChars = Math.max(1, Math.floor(ctx.config.maxChars * ctx.config.headRatio))
-    const tailChars = Math.max(0, ctx.config.maxChars - headChars)
-    const omitted = text.length - headChars - tailChars
+    // Space for the marker itself, so the result really is at most `maxChars`.
+    // A small cap needs a smaller reserve, or nothing but the marker would fit;
+    // the second pass below trims any remaining overflow.
+    const markerReserve = Math.min(140, Math.max(16, Math.floor(ctx.config.maxChars / 3)))
+    const keepBudget = Math.max(2, ctx.config.maxChars - markerReserve)
+    // Clipping a barely-too-long result would make it longer; leave it alone.
+    if (text.length - ctx.config.maxChars <= markerReserve) {
+      return {
+        value: asJson(raw ?? null),
+        truncated: false,
+        originalChars: text.length,
+        spillPath: '',
+        out: true,
+      }
+    }
+
+    let headChars = Math.max(1, Math.floor(keepBudget * ctx.config.headRatio))
+    let tailChars = Math.max(1, keepBudget - headChars)
+    let omitted = text.length - headChars - tailChars
 
     let spillPath = ''
     if (ctx.config.spill) {
@@ -204,11 +282,20 @@ const clip = defineNode({
     }
 
     const where = spillPath === '' ? '' : `; full output at ${spillPath}`
-    const marker = `\n… [z1: clipped ${String(text.length)} chars, ${String(omitted)} omitted${where}] …\n`
-    const clipped =
-      tailChars === 0
-        ? text.slice(0, headChars) + marker
-        : text.slice(0, headChars) + marker + text.slice(-tailChars)
+    const marker = `\n${MARKER_SENTINEL}… [z1: clipped ${String(text.length)} chars, ${String(omitted)} omitted${where}] …${MARKER_SENTINEL}\n`
+
+    // The marker length depends on the numbers it prints, so trim the kept text
+    // by the difference and rebuild once. Never let clipping inflate the value.
+    const overflow = headChars + tailChars + marker.length - ctx.config.maxChars
+    if (overflow > 0) {
+      headChars = Math.max(1, headChars - Math.ceil(overflow / 2))
+      tailChars = Math.max(1, tailChars - Math.floor(overflow / 2))
+      omitted = text.length - headChars - tailChars
+    }
+    const headCut = headEnd(text, headChars)
+    const tailCut = tailStart(text, text.length - tailChars)
+    const finalMarker = `\n${MARKER_SENTINEL}… [z1: clipped ${String(text.length)} chars, ${String(text.length - headCut - (text.length - tailCut))} omitted${where}] …${MARKER_SENTINEL}\n`
+    const clipped = text.slice(0, headCut) + finalMarker + text.slice(tailCut)
 
     return {
       value: clipped,

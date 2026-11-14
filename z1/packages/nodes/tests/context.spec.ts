@@ -79,8 +79,9 @@ describe('z1.ctx.budget', () => {
       { contextWindow: 10_000, reserveTokens: 0, threshold: 0.8 },
       { messages },
     )
-    expect(estimateMessages(messages as never, 4)).toBe(200)
-    expect(output.tokens).toBe(200)
+    const estimate = estimateMessages(messages as never, 4)
+    expect(estimate).toBeGreaterThan(200)
+    expect(output.tokens).toBe(estimate)
     expect(output.window).toBe(10_000)
     expect(output.triggerAt).toBe(8_000)
     expect(output.over).toBe(false)
@@ -117,10 +118,26 @@ describe('z1.ctx.budget', () => {
     expect(warning?.message).toContain('~120000 of 128000 tokens')
   })
 
-  test('an empty or missing transcript is zero, not an error', async () => {
+  test('an empty transcript is zero, not a permanent warning', async () => {
     const output = await runBudget({}, {})
     expect(output.tokens).toBe(0)
     expect(output.messages).toEqual([])
+    // A reserve that covers the window must not collapse the threshold to 0.
+    const tiny = await runBudget({ contextWindow: 8_192 }, { messages: [] })
+    expect(tiny.triggerAt).toBeGreaterThanOrEqual(1)
+    expect(tiny.over).toBe(false)
+  })
+
+  test('a malformed transcript is an error, not an empty one', async () => {
+    await expect(runBudget({}, { messages: 'not an array' })).rejects.toThrow(
+      /"messages" input must be an array/,
+    )
+  })
+
+  test('non-ASCII text is not divided by four', () => {
+    // 4000 CJK characters tokenise at roughly one token each, not 1000.
+    const estimate = estimateMessages([{ role: 'user', content: '漢'.repeat(4000) }] as never, 4)
+    expect(estimate).toBeGreaterThan(3_500)
   })
 })
 
@@ -147,20 +164,50 @@ describe('z1.ctx.clip', () => {
     expect(output.truncated).toBe(true)
     expect(output.originalChars).toBe(long.length)
     const text = String(output.value)
-    expect(text.startsWith('A'.repeat(100))).toBe(true)
-    expect(text.endsWith('C'.repeat(100))).toBe(true)
-    expect(text).toContain('z1: clipped 1200 chars, 1000 omitted')
+    // Head and tail are kept, the middle is gone, and the value stays in budget.
+    expect(text.startsWith('AAA')).toBe(true)
+    expect(text.endsWith('CCC')).toBe(true)
+    expect(text).toContain('z1: clipped 1200 chars,')
+    expect(text).toContain('omitted')
     expect(text).toContain('full output at .z1/out/run_test/loop-0-toolMap-0-mapClip-read.txt')
+    expect(text.length).toBeLessThanOrEqual(200)
     expect(writes).toEqual([
       { path: '.z1/out/run_test/loop-0-toolMap-0-mapClip-read.txt', data: long },
     ])
   })
 
+  test('a barely-too-long value is not inflated by the marker', async () => {
+    const output = await runClip({ maxChars: 100 }, { value: 'x'.repeat(120) })
+    expect(output.truncated).toBe(false)
+    expect(String(output.value)).toHaveLength(120)
+  })
+
+  test('a surrogate pair is never split by the cut', async () => {
+    // Emoji either side of the cut: a split would leave a lone surrogate that
+    // becomes U+FFFD on the UTF-8 round trip to the provider.
+    const value = `${'a'.repeat(50)}😀😀😀😀${'b'.repeat(500)}`
+    const output = await runClip({ maxChars: 200 }, { value })
+    const text = String(output.value)
+    expect(text).not.toContain('\uFFFD')
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(text)).toBe(false)
+    expect(/[\uDC00-\uDFFF]/.test(text.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''))).toBe(false)
+  })
+
+  test('a spill directory cannot leave the workspace', () => {
+    expect(() => contextClip.config.parse({ directory: '../escape' })).toThrow(/relative path/)
+    expect(() => contextClip.config.parse({ directory: '/tmp/escape' })).toThrow(/relative path/)
+    expect(() => contextClip.config.parse({ directory: 'C:\\escape' })).toThrow(/relative path/)
+    expect(contextClip.config.parse({ directory: '.z1/out' })).toMatchObject({
+      directory: '.z1/out',
+    })
+  })
+
   test('an object result is serialized before clipping', async () => {
     const value = { rows: Array.from({ length: 100 }, (_, index) => ({ index })) }
-    const output = await runClip({ maxChars: 120 }, { value })
+    const output = await runClip({ maxChars: 400 }, { value })
     expect(output.truncated).toBe(true)
     expect(String(output.value)).toContain('"rows"')
+    expect(String(output.value).length).toBeLessThanOrEqual(400)
   })
 
   test('a failed spill still returns a clipped value and says so', async () => {
