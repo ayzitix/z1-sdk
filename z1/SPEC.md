@@ -456,7 +456,9 @@ journal never shows a request without an outcome.
 A module node is attributed too: the adapter captures the executor's scope and
 the host stores it on the pending execution, then re-enters it around the
 capability call. The child supplies nothing authoritative — a worker cannot
-choose which run its traffic lands in. `ctx.llm.get` is journaled as `llm.meta`
+choose which run its traffic lands in. This requires the caller of `beginRun` to
+supply the `runId` (the CLI, `z1 eval` and the HTTP server do); without one the
+runtime files the call under `(ambient)`. `ctx.llm.get` is journaled as `llm.meta`
 (the path, query, status and body hash, with the body as a blob in `full` mode),
 because a cassette cannot replay a provider node's discovery without it.
 
@@ -476,7 +478,7 @@ All ids are namespaced `z1.<name>`.
 | --- | --- | --- | --- |
 | `z1.core.input` | — | `value` (data Json), `out` (flow) | root; value = `ctx.input` |
 | `z1.ctx.budget` | `messages` (data Json[]), `usage` (data Json) | `messages`, `tokens`, `window`, `triggerAt`, `ratio`, `over` (data) | observe-only: estimates the transcript, drops nothing; config `{ contextWindow, reserveTokens, threshold, charsPerToken }` |
-| `z1.ctx.clip` | `in` (flow), `value` (data Json), `name` (data string) | `value`, `truncated`, `originalChars`, `spillPath` (data), `out` (flow) | keeps head+tail, writes the full text under `.z1/out/<runId>/`, marks the cut; config `{ maxChars, headRatio, spill, directory }` |
+| `z1.ctx.clip` | `in` (flow), `value` (data Json), `name` (data string) | `value`, `truncated`, `originalChars`, `spillPath` (data), `out` (flow) | keeps head+tail within `maxChars`, writes the full text under `.z1/out/<runId>/`, marks the cut with a sentinel; `directory` must be relative and without `..`; a result that is barely over the cap is left alone rather than inflated by the marker |
 | `z1.core.output` | `in` (flow), `value` (data Json) | — | config `{ port?: string }` |
 | `z1.core.const` | — | `value` (data Json) | root; config `{ value: Json }` |
 | `z1.core.template` | `vars` (data Json, optional) | `text` (data string) | `{{a.b}}` lookup |

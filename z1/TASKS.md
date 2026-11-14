@@ -173,13 +173,16 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 
 ## M13 — context hygiene, step 1-2
 
-- [x] `z1.ctx.budget`: observe-only token estimate (characters / `charsPerToken`,
-      or a larger reported `usage.inputTokens`), window and a trigger threshold
-      that reserves room for the answer. It is in `agent.loop` between the
+- [x] `z1.ctx.budget`: observe-only token estimate (ASCII / `charsPerToken`, one
+      token per non-ASCII character, or a larger reported `usage.inputTokens`),
+      window and a trigger threshold that reserves room for the answer; the
+      threshold never drops below 1. It is in `agent.loop` between the
       transcript and `chat`, so every iteration journals how full the window was
       and nothing is dropped.
-- [x] `z1.ctx.clip`: head+tail clipping of a tool result with a visible marker,
-      the full text spilled to `.z1/out/<runId>/<path>-<tool>.txt`. It sits
+- [x] `z1.ctx.clip`: head+tail clipping of a tool result within `maxChars` with a
+      visible sentinel marker, the full text spilled to
+      `.z1/out/<runId>/<path>-<tool>.txt`; the spill directory must be relative
+      and without `..`, and a surrogate pair is never split. It sits
       between `mapCall` and `mapMessage` in the tool map, so a 50 KB result reaches
       the model as ~12 KB plus a path.
 - Known: the budget estimates; it does not tokenise, and `usage` is only wired
@@ -205,13 +208,16 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - Known: no cost accounting (tokens only); replay matching is by request hash, so
   any change to the prompt or model handle is a miss by design; `eval` has no
   model-based judge.
-- [x] Module nodes are attributed: the adapter captures the executor's scope,
+- [x] Module nodes are attributed when `beginRun` receives a `runId` (CLI, eval
+      and the HTTP server do; the server was missing it until a review caught
+      it): the adapter captures the executor's scope,
       the host stores it on the execution and re-enters it around a capability
       call, and bootstrap registers each run's decorated `llm` for the bridge.
-      A module node's `chat` and `get` now reach the journal under their own run,
       path and attempt, so eval token counts and cassettes include them.
 - [x] `llm.meta` records metadata reads, and a cassette replays them by
       provider + path + query, so a provider-node graph can be replayed offline.
 - Known: worker *services* (not nodes) still call back without a run path, so
-      their model traffic lands on the ambient service; and module-node
-      approvals still resolve to the latest live run.
+      their model traffic lands on the ambient service. Module-node approvals now
+      resolve through the run id the bridge carries, so they no longer cross runs.
+- Known: a metadata GET that throws records no `llm.meta` row; the node failure
+      is visible, the attempted URL is not.

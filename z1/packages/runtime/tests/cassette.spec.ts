@@ -86,6 +86,54 @@ test('replay serves metadata and never falls back on a miss', async () => {
   await expect(service.get?.({ provider: 'other', path: '/models' })).rejects.toThrow(CassetteError)
 })
 
+test('a query value cannot forge another query', () => {
+  expect(metaKey('x', '/m', { a: '1&b=2' })).not.toBe(metaKey('x', '/m', { a: '1', b: '2' }))
+  expect(metaKey('x', '/m', { a: '=' })).not.toBe(metaKey('x', '/m', { a: '', '=': '' }))
+})
+
+test('a cassette with two different answers for one key is rejected', () => {
+  const other: CassetteTurn = { ...metaTurn, body: '{"data":[]}' }
+  expect(() => createCassetteLlmService({ turns: [metaTurn, other] })).toThrow(
+    /two different metadata reads for GET \/models/,
+  )
+  // The same answer twice is the same recording, not a conflict.
+  expect(() => createCassetteLlmService({ turns: [metaTurn, metaTurn] })).not.toThrow()
+})
+
+test('a non-string query value is rejected, not silently dropped', () => {
+  const line = JSON.stringify({
+    version: 1,
+    kind: 'meta',
+    path: 'p',
+    provider: 'x',
+    urlPath: '/m',
+    query: { page: 2 },
+    status: 200,
+    body: '',
+  })
+  expect(() => parseCassette(`${line}\n`)).toThrow(/query\.page must be a string/)
+})
+
+test('a missing ok is derived from the status', () => {
+  const base = {
+    version: 1,
+    kind: 'meta',
+    path: 'p',
+    provider: 'x',
+    urlPath: '/m',
+    body: '',
+  }
+  const ok = parseCassette(`${JSON.stringify({ ...base, status: 200 })}\n`)[0]
+  const failed = parseCassette(`${JSON.stringify({ ...base, status: 500 })}\n`)[0]
+  expect(ok?.kind === 'meta' ? ok.ok : undefined).toBe(true)
+  expect(failed?.kind === 'meta' ? failed.ok : undefined).toBe(false)
+})
+
+test('an unknown kind is an error, not a chat turn', () => {
+  const line = JSON.stringify({ version: 1, kind: 'video', path: 'p', provider: 'x' })
+  expect(() => parseCassette(`${line}\n`)).toThrow(/unknown kind "video"/)
+})
+
 test('a malformed meta line names itself', () => {
   const broken = JSON.stringify({ version: 1, kind: 'meta', path: 'p', provider: 'x', urlPath: '/m', status: '200', body: '' })
   expect(() => parseCassette(`${broken}\n`)).toThrow(/line 1: "status" must be a number/)

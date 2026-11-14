@@ -63,19 +63,21 @@ export function isMetaCassetteTurn(turn: CassetteTurn): turn is CassetteMetaTurn
   return turn.kind === 'meta'
 }
 
-/** Replay key for a metadata read: provider + path + a stable query order. */
+/**
+ * Replay key for a metadata read: provider, path and query, encoded so a value
+ * containing `&` or `=` cannot collide with a different query.
+ */
 export function metaKey(
   provider: string,
   urlPath: string,
   query?: Readonly<Record<string, string>>,
 ): string {
-  const sorted = query === undefined
-    ? ''
+  const pairs = query === undefined
+    ? []
     : Object.keys(query)
         .sort()
-        .map((key) => `${key}=${query[key] ?? ''}`)
-        .join('&')
-  return `${provider}\u0000${urlPath}\u0000${sorted}`
+        .map((key) => [key, query[key] ?? ''] as const)
+  return JSON.stringify([provider, urlPath, pairs])
 }
 
 export class CassetteError extends Error {
@@ -120,6 +122,11 @@ export function parseCassette(text: string): readonly CassetteTurn[] {
         `cassette line ${String(lineNumber)}: unsupported version ${String(parsed['version'])}; expected ${String(CASSETTE_VERSION)}`,
       )
     }
+    if (parsed['kind'] !== undefined && parsed['kind'] !== 'chat' && parsed['kind'] !== 'meta') {
+      throw new CassetteError(
+        `cassette line ${String(lineNumber)}: unknown kind ${JSON.stringify(parsed['kind'])}`,
+      )
+    }
     if (parsed['kind'] === 'meta') {
       const query = parsed['query']
       if (query !== undefined && !isRecord(query)) {
@@ -133,7 +140,13 @@ export function parseCassette(text: string): readonly CassetteTurn[] {
       }
       const entries: Record<string, string> = {}
       for (const [key, value] of Object.entries((query ?? {}) as Record<string, unknown>)) {
-        if (typeof value === 'string') entries[key] = value
+        // Silently dropping a number would change the replay key.
+        if (typeof value !== 'string') {
+          throw new CassetteError(
+            `cassette line ${String(lineNumber)}: query.${key} must be a string`,
+          )
+        }
+        entries[key] = value
       }
       turns.push({
         version: CASSETTE_VERSION,
@@ -144,7 +157,11 @@ export function parseCassette(text: string): readonly CassetteTurn[] {
         urlPath: requireString(parsed, 'urlPath', lineNumber),
         ...(Object.keys(entries).length === 0 ? {} : { query: entries }),
         status: parsed['status'],
-        ok: parsed['ok'] === true,
+        // A hand-written line may omit `ok`; the status decides, not `false`.
+        ok:
+          typeof parsed['ok'] === 'boolean'
+            ? parsed['ok']
+            : parsed['status'] >= 200 && parsed['status'] < 300,
         truncated: parsed['truncated'] === true,
         body: parsed['body'],
       })
@@ -192,8 +209,29 @@ export function createCassetteLlmService(options: CassetteLlmOptions): LlmServic
   const byHash = new Map<string, ChatResult>()
   const byMeta = new Map<string, CassetteMetaTurn>()
   for (const turn of options.turns) {
-    if (isMetaCassetteTurn(turn)) byMeta.set(metaKey(turn.provider, turn.urlPath, turn.query), turn)
-    else byHash.set(turn.requestHash, turn.response)
+    if (isMetaCassetteTurn(turn)) {
+      const key = metaKey(turn.provider, turn.urlPath, turn.query)
+      const previous = byMeta.get(key)
+      // Two different answers for one key mean the recording is ambiguous;
+      // silently keeping the last would replay the wrong one.
+      if (
+        previous !== undefined &&
+        (previous.body !== turn.body || previous.status !== turn.status)
+      ) {
+        throw new CassetteError(
+          `cassette has two different metadata reads for GET ${turn.urlPath} on "${turn.provider}"`,
+        )
+      }
+      byMeta.set(key, turn)
+      continue
+    }
+    const previous = byHash.get(turn.requestHash)
+    if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(turn.response)) {
+      throw new CassetteError(
+        `cassette has two different responses for request ${turn.requestHash}`,
+      )
+    }
+    byHash.set(turn.requestHash, turn.response)
   }
 
   return {
