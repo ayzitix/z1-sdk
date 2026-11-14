@@ -4,7 +4,6 @@ import { lstat, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  checkFs,
   checkFsReal,
   checkLlm,
   checkNet,
@@ -1465,8 +1464,12 @@ export class ModuleWorker {
       case 'fs.stat': {
         const path = this.#requirePath(args, 'fs.stat')
         // Metadata is a read: the same grant that lets a module read a file
-        // lets it ask whether the file exists and how large it is.
-        const check = checkFs(this.#capabilities, 'read', path, this.#moduleDir)
+        // lets it ask whether the file exists and how large it is. The final
+        // component is not resolved because lstat does not follow it, but an
+        // intermediate symlink must not widen the grant.
+        const check = checkFsReal(this.#capabilities, 'read', path, this.#moduleDir, {
+          followFinal: false,
+        })
         if (!check.ok) throw this.#denied(nodeId, 'fs.stat', path, check.reason)
         return this.#statEntry(path)
       }

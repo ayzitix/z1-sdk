@@ -152,6 +152,27 @@ describe('checkFsReal', () => {
     expect(checkFsReal(subtree, 'write', '/tmp/x', '/opt/module').ok).toBe(false)
   })
 
+  test('stat resolves intermediate symlinks but not the final one', () => {
+    const { moduleDir, outside } = fixture()
+    symlinkSync(outside, join(moduleDir, 'data', 'link'))
+    writeFileSync(join(outside, 'secret.txt'), 'outside')
+
+    // `data/link/secret.txt` reaches outside through an intermediate link.
+    expect(
+      checkFsReal(capabilities, 'read', join(moduleDir, 'data', 'link', 'secret.txt'), moduleDir, {
+        followFinal: false,
+      }).ok,
+    ).toBe(false)
+
+    // A final symlink is reported by lstat and is not followed, so it stays
+    // stattable without exposing the target.
+    const fileLink = join(moduleDir, 'data', 'file-link')
+    symlinkSync(join(outside, 'secret.txt'), fileLink)
+    expect(
+      checkFsReal(capabilities, 'read', fileLink, moduleDir, { followFinal: false }),
+    ).toEqual({ ok: true })
+  })
+
   test('keeps the lexical denials', () => {
     const { moduleDir } = fixture()
     expect(checkFsReal(capabilities, 'read', 'data/../a.txt', moduleDir).ok).toBe(false)

@@ -155,6 +155,7 @@ export function checkFsReal(
   direction: 'read' | 'write',
   path: string,
   moduleDir: string,
+  options: { followFinal?: boolean } = {},
 ): CapabilityCheck {
   const lexical = checkFs(capabilities, direction, path, moduleDir)
   if (!lexical.ok) return lexical
@@ -165,7 +166,16 @@ export function checkFsReal(
   if (realModuleRoot === undefined) return deny(`cannot resolve the module directory: ${moduleDir}`)
 
   const target = cleanPath(toPosix(normalize(resolve(moduleRoot, path))))
-  const realTarget = resolveReal(target)
+  // `fs.stat` uses lstat, so the final component is reported, never followed;
+  // resolving it would deny statting a link that points outside the grant while
+  // protecting nothing. Intermediate components are still resolved.
+  const realTarget =
+    options.followFinal === false
+      ? (() => {
+          const parent = resolveReal(dirname(target))
+          return parent === undefined ? undefined : join(parent, basename(target))
+        })()
+      : resolveReal(target)
   if (realTarget === undefined) return deny(`cannot resolve the path: ${path}`)
 
   /** The literal base, with any `moduleDir` part mapped onto its real path. */
