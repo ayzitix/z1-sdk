@@ -188,3 +188,9 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - Known: no cost accounting (tokens only); replay matching is by request hash, so
   any change to the prompt or model handle is a miss by design; `eval` has no
   model-based judge.
+- Known: recording covers host-resolved calls (`z1.llm.chat`, host services). A
+  call made *inside* a worker module goes through the worker bridge, which
+  carries the node id but not the run path, so it is not journaled yet. Fixing it
+  needs the execution scope on capability calls plus a per-run decorated service
+  in `ModuleRuntime`; until then `z1.providers.*` nodes are invisible to
+  cassettes and to eval token metrics.

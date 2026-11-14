@@ -438,6 +438,8 @@ dedupe; the hash is also the cassette's matching key. Credential-shaped fields
 `Z1_RECORD_LLM=full|hashes|off` (default `full`) selects blobs, events only, or
 nothing. The path and attempt arrive through an `AsyncLocalStorage` scope set by
 the executor around `definition.execute`, so the node contract is unchanged.
+It reaches a host-resolved service; a `ctx.llm.chat` made inside a worker module
+is not attributed to a run yet and is therefore not recorded.
 
 `node.stream` is delivered to `services.onEvent` but never appended to the
 journal. Nested runs (`pathPrefix` non-empty) emit node-level events only; the
