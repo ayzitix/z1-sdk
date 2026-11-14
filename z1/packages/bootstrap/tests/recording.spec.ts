@@ -177,6 +177,78 @@ test('credential-shaped request fields never reach the blob', async () => {
   expect(canonicalLlmRequest(JSON.parse(text) as ChatRequest)).toBe(text)
 })
 
+test('redaction covers snake_case, camelCase and header pairs', async () => {
+  const runtime = await makeRuntime('full')
+  const { events } = await runAgent(runtime, {
+    provider: 'mock',
+    model: 'mock-1',
+    params: {
+      access_token: 'leak-1',
+      accessToken: 'leak-2',
+      apiToken: 'leak-3',
+      bearer: 'leak-4',
+      client_secret: 'leak-5',
+      credentials: 'leak-6',
+      headers: [{ name: 'Authorization', value: 'leak-7' }],
+      // Not a credential, must survive so the request stays meaningful.
+      max_tokens: 512,
+      temperature: 0,
+    },
+  })
+
+  const request = events.find(
+    (event) => (event as { type?: string }).type === 'llm.request',
+  ) as { requestBlob?: string } | undefined
+  const text = new TextDecoder().decode(runtime.journal.getBlob(request?.requestBlob ?? '')?.bytes)
+  for (const leak of ['leak-1', 'leak-2', 'leak-3', 'leak-4', 'leak-5', 'leak-6', 'leak-7']) {
+    expect(text, leak).not.toContain(leak)
+  }
+  expect(JSON.parse(text)).toMatchObject({ model: { params: { max_tokens: 512, temperature: 0 } } })
+})
+
+test('a failed turn is journaled as llm.failed, not left as a bare request', async () => {
+  const runtime = await makeRuntime('full')
+  const failing: LlmService = {
+    chat: async () => {
+      throw new Error('upstream 503')
+    },
+  }
+  const graph = runtime.templates.build('agent.loop', { model: MODEL })
+  const runId = `run_${randomUUID()}`
+  const now = Date.now()
+  runtime.journal.createRun({
+    runId,
+    graphId: graph.id,
+    graphDigest: graphDigest(graph),
+    status: 'running',
+    createdAt: now,
+    updatedAt: now,
+  })
+  const handle = await runtime.beginRun({ runId, approval, llm: failing })
+  try {
+    const result = await runGraph({
+      graph,
+      registry: handle.registry,
+      services: handle.services,
+      input: 'hello',
+      journal: runtime.journal,
+      runId,
+    })
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain('upstream 503')
+  } finally {
+    await handle.dispose()
+  }
+
+  const types = runtime.journal
+    .read(runId)
+    .map((event) => event.type)
+    .filter((type) => type.startsWith('llm.'))
+  expect(types).toContain('llm.request')
+  expect(types).toContain('llm.failed')
+  expect(types).not.toContain('llm.response')
+})
+
 test('hashes mode journals events without writing payload blobs', async () => {
   const runtime = await makeRuntime('hashes')
   const { events, requests } = await runAgent(runtime)
