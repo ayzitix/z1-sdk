@@ -6,7 +6,7 @@ import type { PromptSection, PromptVars, StackOptions, StackResult } from './typ
  * Bumped whenever the default text or the stack semantics change, so a stored
  * prompt hash can be tied to the version that produced it.
  */
-export const PROMPT_VERSION = '1'
+export const PROMPT_VERSION = '2'
 
 export interface BuildPromptOptions {
   /** Role delta appended after the core. Defaults to `coder`. */

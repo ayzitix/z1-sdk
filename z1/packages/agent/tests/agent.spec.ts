@@ -118,8 +118,8 @@ describe('buildAgentGraph', () => {
     const fixture = await run({ model: MODEL }, 'hello')
     const system = systemMessage(fixture)
 
-    expect(system).toContain('You are the z1 agent')
-    expect(system).toContain('## Graph contract')
+    expect(system).toContain('You are z1')
+    expect(system).toContain('## Working context')
     expect(system).toContain('## Autonomy')
     expect(system).toContain('## Output')
     // The stack is materialized once: no transcript system message plus a port.

@@ -14,14 +14,14 @@ const ROLES: readonly RoleId[] = ['planner', 'coder', 'reviewer', 'summarizer', 
 
 const CORE_HEADINGS = [
   '## Success',
-  '## Non-negotiables',
-  '## Graph contract',
+  '## Safety',
+  '## Working context',
   '## Autonomy',
-  '## Operating loop',
+  '## Doing tasks',
   '## Editing',
   '## Failure',
   '## Memory',
-  '## Communication',
+  '## Writing for the user',
   '## Output',
 ]
 
@@ -51,11 +51,22 @@ describe('DEFAULT_SECTIONS', () => {
 
   test('renders the core headings in order', () => {
     const { text } = buildPrompt({ role: 'coder' })
-    expect(text.startsWith('You are the z1 agent')).toBe(true)
+    expect(text.startsWith('You are z1')).toBe(true)
 
     const positions = CORE_HEADINGS.map((heading) => text.indexOf(heading))
     expect(positions.every((position) => position >= 0)).toBe(true)
     expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+
+  test('does not describe the machinery or recite permissions', () => {
+    const { text } = buildPrompt({ role: 'coder' })
+    expect(text).not.toContain('one node in a typed graph')
+    expect(text).not.toContain('Graph contract')
+    expect(text).not.toContain('Non-negotiables')
+    expect(text).toContain('Do not describe z1 internals')
+    expect(text).toContain('Do not list what you refuse to do')
+    expect(text).toContain('Do not introduce yourself with a role description')
+    expect(text).toContain("Reply in the user's language")
   })
 
   test('leaves no unresolved placeholder for the default vars', () => {
@@ -144,7 +155,7 @@ describe('buildPrompt', () => {
     const two = buildPrompt({ role: 'reviewer' })
     expect(one.hash).toBe(two.hash)
     expect(one.text).toBe(two.text)
-    expect(PROMPT_VERSION).toBe('1')
+    expect(PROMPT_VERSION).toBe('2')
   })
 
   test('matches the committed default snapshot', () => {
