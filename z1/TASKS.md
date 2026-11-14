@@ -189,11 +189,13 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - Known: no cost accounting (tokens only); replay matching is by request hash, so
   any change to the prompt or model handle is a miss by design; `eval` has no
   model-based judge.
-- Known: recording covers host-resolved calls (`z1.llm.chat`, host services). A
-  call made *inside* a worker module — `chat` for nodes and worker services, and
-  `get` — goes through the worker bridge, which carries the node id but not the
-  run path and is handed the undecorated service. It is therefore invisible to
-  the journal, to cassettes and to eval token metrics, and a cassette replay of a
-  provider node fails with "does not support metadata reads". Fixing it needs the
-  execution scope on capability calls plus a per-run decorated service in
-  `ModuleRuntime`; note the cassette must then record metadata GETs too.
+- [x] Module nodes are attributed: the adapter captures the executor's scope,
+      the host stores it on the execution and re-enters it around a capability
+      call, and bootstrap registers each run's decorated `llm` for the bridge.
+      A module node's `chat` and `get` now reach the journal under their own run,
+      path and attempt, so eval token counts and cassettes include them.
+- [x] `llm.meta` records metadata reads, and a cassette replays them by
+      provider + path + query, so a provider-node graph can be replayed offline.
+- Known: worker *services* (not nodes) still call back without a run path, so
+      their model traffic lands on the ambient service; and module-node
+      approvals still resolve to the latest live run.

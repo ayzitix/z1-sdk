@@ -24,9 +24,16 @@ export {
   CassetteError,
   createCassetteLlmService,
   formatCassette,
+  isMetaCassetteTurn,
+  metaKey,
   parseCassette,
 } from './cassette.ts'
-export type { CassetteLlmOptions, CassetteTurn } from './cassette.ts'
+export type {
+  CassetteChatTurn,
+  CassetteLlmOptions,
+  CassetteMetaTurn,
+  CassetteTurn,
+} from './cassette.ts'
 export {
   AMBIENT_LLM_PATH,
   canonicalLlmRequest,

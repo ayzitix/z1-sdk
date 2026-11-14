@@ -144,15 +144,44 @@ export function createRecordingLlmService(options: RecordLlmOptions): LlmService
   const get = options.inner.get?.bind(options.inner)
 
   return {
-    // A metadata read is not a model turn: it is not recorded, but it must keep
-    // working through the wrapper or a module could not inspect a provider.
+    // Metadata is not a model turn, but it is recorded: a cassette has to be
+    // able to replay a provider node's discovery, and "which models did it see"
+    // is the first question after a bad run.
     ...(get === undefined
       ? {}
       : {
           get: async (
             request: Parameters<NonNullable<LlmService['get']>>[0],
             signal?: AbortSignal,
-          ) => await get(request, signal),
+          ) => {
+            const scope = currentLlmCallContext()
+            const runId = scope?.runId ?? options.runId
+            if (runId === undefined) return await get(request, signal)
+
+            const startedAt = Date.now()
+            const response = await get(request, signal)
+            const bodyText = String(response.body ?? '')
+            const bodyHash = sha256(bodyText)
+            const bodyBlob =
+              mode === 'full' ? journal.putBlob(bytesOf(bodyText), 'text/plain') : undefined
+            await record({
+              type: 'llm.meta',
+              runId,
+              path: scope?.path ?? AMBIENT_LLM_PATH,
+              provider: request.provider,
+              method: 'GET',
+              urlPath: request.path,
+              ...(request.query === undefined ? {} : { query: { ...request.query } }),
+              status: response.status,
+              ok: response.ok,
+              bodyHash,
+              ...(bodyBlob === undefined ? {} : { bodyBlob }),
+              truncated: response.truncated,
+              latencyMs: Date.now() - startedAt,
+              at: Date.now(),
+            })
+            return response
+          },
         }),
     chat: async (request, onDelta) => {
       const scope = currentLlmCallContext()

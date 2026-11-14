@@ -132,6 +132,44 @@ test('a recorded run exports and replays without a provider', async () => {
   ).toHaveLength(1)
 })
 
+test('a metadata read is exported as a meta turn and replays offline', async () => {
+  const runtime = await makeRuntime()
+  const runId = await runAgent(runtime, scripted())
+
+  // The agent graph has no discovery node, so append the row a module's
+  // `ctx.llm.get` would have written (the decorator is covered in runtime tests).
+  const body = '{"data":[{"id":"m1"}]}'
+  const blob = runtime.journal.putBlob(new TextEncoder().encode(body), 'text/plain')
+  runtime.journal.append({
+    type: 'llm.meta',
+    runId,
+    path: 'loop/0/chat',
+    provider: 'openai',
+    method: 'GET',
+    urlPath: '/models',
+    status: 200,
+    ok: true,
+    bodyHash: blob,
+    bodyBlob: blob,
+    truncated: false,
+    latencyMs: 1,
+    at: Date.now(),
+  })
+
+  const turns = exportCassette(runtime.journal, runId)
+  const meta = turns.find((turn) => turn.kind === 'meta')
+  expect(meta).toMatchObject({ provider: 'openai', urlPath: '/models', body, status: 200 })
+
+  const service = createCassetteLlmService({ turns })
+  await expect(service.get?.({ provider: 'openai', path: '/models' })).resolves.toMatchObject({
+    status: 200,
+    body,
+  })
+  await expect(service.get?.({ provider: 'openai', path: '/other' })).rejects.toThrow(
+    /cassette miss for GET \/other on "openai"/,
+  )
+})
+
 test('hashes mode cannot export payloads and says why', async () => {
   const runtime = await makeRuntime({ mode: 'hashes' })
   const runId = await runAgent(runtime, scripted())

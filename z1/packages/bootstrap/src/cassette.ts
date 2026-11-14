@@ -42,6 +42,20 @@ function payload<T>(journal: SqliteJournal, hash: string | undefined, what: stri
   return decodeLlmPayload<T>(blob.bytes)
 }
 
+/** A metadata body is stored as raw text, not as JSON. */
+function textPayload(journal: SqliteJournal, hash: string | undefined, what: string): string {
+  if (hash === undefined) {
+    throw new CassetteExportError(
+      `${what} has no payload blob: the run was recorded with Z1_RECORD_LLM=hashes or off. Re-run with "full" to export a cassette`,
+    )
+  }
+  const blob = journal.getBlob(hash)
+  if (blob === undefined) {
+    throw new CassetteExportError(`${what} blob ${hash} is missing from the journal`)
+  }
+  return new TextDecoder().decode(blob.bytes)
+}
+
 /** Recorded model turns of one run, in journal order. */
 export function exportCassette(journal: SqliteJournal, runId: string): readonly CassetteTurn[] {
   const open = new Map<string, { path: string; attempt: number; requestBlob?: string; requestHash: string; provider: string; model: string }>()
@@ -56,6 +70,22 @@ export function exportCassette(journal: SqliteJournal, runId: string): readonly 
         provider: event.provider,
         model: event.model,
         ...(event.requestBlob === undefined ? {} : { requestBlob: event.requestBlob }),
+      })
+      continue
+    }
+    if (event.type === 'llm.meta') {
+      turns.push({
+        version: CASSETTE_VERSION,
+        kind: 'meta',
+        path: event.path,
+        provider: event.provider,
+        method: 'GET',
+        urlPath: event.urlPath,
+        ...(event.query === undefined ? {} : { query: { ...event.query } }),
+        status: event.status,
+        ok: event.ok,
+        truncated: event.truncated,
+        body: textPayload(journal, event.bodyBlob, `metadata at ${event.path}`),
       })
       continue
     }

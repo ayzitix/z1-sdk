@@ -22,8 +22,10 @@ import type { LlmService } from './types.ts'
 /** Bumped when the on-disk shape changes in a way old files cannot satisfy. */
 export const CASSETTE_VERSION = 1
 
-export interface CassetteTurn {
+/** A model turn. `kind` is absent in files written before metadata existed. */
+export interface CassetteChatTurn {
   readonly version: number
+  readonly kind?: 'chat'
   /** Execution path of the node that made the call, for reports only. */
   readonly path: string
   readonly provider: string
@@ -33,6 +35,47 @@ export interface CassetteTurn {
   readonly requestHash: string
   readonly request: ChatRequest
   readonly response: ChatResult
+}
+
+/**
+ * A metadata read (`ctx.llm.get`), e.g. a provider's model catalog.
+ *
+ * Replay must not touch the network, and a provider node discovers its models
+ * through `get`, so a cassette without these turns cannot replay that graph.
+ */
+export interface CassetteMetaTurn {
+  readonly version: number
+  readonly kind: 'meta'
+  readonly path: string
+  readonly provider: string
+  readonly method: 'GET'
+  readonly urlPath: string
+  readonly query?: Readonly<Record<string, string>>
+  readonly status: number
+  readonly ok: boolean
+  readonly truncated: boolean
+  readonly body: string
+}
+
+export type CassetteTurn = CassetteChatTurn | CassetteMetaTurn
+
+export function isMetaCassetteTurn(turn: CassetteTurn): turn is CassetteMetaTurn {
+  return turn.kind === 'meta'
+}
+
+/** Replay key for a metadata read: provider + path + a stable query order. */
+export function metaKey(
+  provider: string,
+  urlPath: string,
+  query?: Readonly<Record<string, string>>,
+): string {
+  const sorted = query === undefined
+    ? ''
+    : Object.keys(query)
+        .sort()
+        .map((key) => `${key}=${query[key] ?? ''}`)
+        .join('&')
+  return `${provider}\u0000${urlPath}\u0000${sorted}`
 }
 
 export class CassetteError extends Error {
@@ -77,6 +120,36 @@ export function parseCassette(text: string): readonly CassetteTurn[] {
         `cassette line ${String(lineNumber)}: unsupported version ${String(parsed['version'])}; expected ${String(CASSETTE_VERSION)}`,
       )
     }
+    if (parsed['kind'] === 'meta') {
+      const query = parsed['query']
+      if (query !== undefined && !isRecord(query)) {
+        throw new CassetteError(`cassette line ${String(lineNumber)}: "query" must be an object`)
+      }
+      if (typeof parsed['body'] !== 'string') {
+        throw new CassetteError(`cassette line ${String(lineNumber)}: "body" must be a string`)
+      }
+      if (typeof parsed['status'] !== 'number') {
+        throw new CassetteError(`cassette line ${String(lineNumber)}: "status" must be a number`)
+      }
+      const entries: Record<string, string> = {}
+      for (const [key, value] of Object.entries((query ?? {}) as Record<string, unknown>)) {
+        if (typeof value === 'string') entries[key] = value
+      }
+      turns.push({
+        version: CASSETTE_VERSION,
+        kind: 'meta',
+        path: requireString(parsed, 'path', lineNumber),
+        provider: requireString(parsed, 'provider', lineNumber),
+        method: 'GET',
+        urlPath: requireString(parsed, 'urlPath', lineNumber),
+        ...(Object.keys(entries).length === 0 ? {} : { query: entries }),
+        status: parsed['status'],
+        ok: parsed['ok'] === true,
+        truncated: parsed['truncated'] === true,
+        body: parsed['body'],
+      })
+      continue
+    }
     if (!isRecord(parsed['request']) || !isRecord(parsed['response'])) {
       throw new CassetteError(
         `cassette line ${String(lineNumber)}: "request" and "response" must be objects`,
@@ -117,9 +190,28 @@ export interface CassetteLlmOptions {
  */
 export function createCassetteLlmService(options: CassetteLlmOptions): LlmService {
   const byHash = new Map<string, ChatResult>()
-  for (const turn of options.turns) byHash.set(turn.requestHash, turn.response)
+  const byMeta = new Map<string, CassetteMetaTurn>()
+  for (const turn of options.turns) {
+    if (isMetaCassetteTurn(turn)) byMeta.set(metaKey(turn.provider, turn.urlPath, turn.query), turn)
+    else byHash.set(turn.requestHash, turn.response)
+  }
 
   return {
+    get: async (request) => {
+      const turn = byMeta.get(metaKey(request.provider, request.path, request.query))
+      if (turn === undefined) {
+        const path = currentLlmCallContext()?.path ?? '(unknown)'
+        throw new CassetteError(
+          `cassette miss for GET ${request.path} on "${request.provider}" at ${path}: no recorded metadata read`,
+        )
+      }
+      return {
+        status: turn.status,
+        ok: turn.ok,
+        body: turn.body,
+        truncated: turn.truncated,
+      }
+    },
     chat: async (request: ChatRequest, onDelta) => {
       const hash = llmRequestHash(request)
       const response = byHash.get(hash)

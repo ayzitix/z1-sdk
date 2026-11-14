@@ -149,6 +149,25 @@ export type RunEvent =
       at: number
     }
   | {
+      type: 'llm.meta'
+      runId: string
+      path: string
+      provider: string
+      method: 'GET'
+      /** Path appended to the provider base URL, e.g. `/models`. */
+      urlPath: string
+      query?: Record<string, string>
+      status: number
+      ok: boolean
+      /** sha256 of the raw body; also the blob hash. */
+      bodyHash: string
+      /** Present only when `Z1_RECORD_LLM=full`. */
+      bodyBlob?: string
+      truncated: boolean
+      latencyMs: number
+      at: number
+    }
+  | {
       type: 'llm.failed'
       runId: string
       path: string

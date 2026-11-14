@@ -426,6 +426,9 @@ export type RunEvent =
       usage?: ChatUsage; latencyMs: number; stopReason: string; at: number }
   | { type: 'llm.failed'; runId: string; path: string; provider: string; model: string;
       attempt: number; error: string; latencyMs: number; at: number }
+  | { type: 'llm.meta'; runId: string; path: string; provider: string; method: 'GET';
+      urlPath: string; query?: Record<string, string>; status: number; ok: boolean;
+      bodyHash: string; bodyBlob?: string; truncated: boolean; latencyMs: number; at: number }
   | { type: 'run.completed'; runId: string; at: number; outputs: Record<string, Json> }
   | { type: 'run.failed'; runId: string; at: number; error: string }
   | { type: 'run.cancelled'; runId: string; at: number }
@@ -451,6 +454,13 @@ It reaches a host-resolved service; `ctx.llm.chat` and `ctx.llm.get` made inside
 a worker module are not attributed to a run yet and are therefore not recorded.
 A turn that throws appends `llm.failed` with the same path and attempt, so a
 journal never shows a request without an outcome.
+
+A module node is attributed too: the adapter captures the executor's scope and
+the host stores it on the pending execution, then re-enters it around the
+capability call. The child supplies nothing authoritative — a worker cannot
+choose which run its traffic lands in. `ctx.llm.get` is journaled as `llm.meta`
+(the path, query, status and body hash, with the body as a blob in `full` mode),
+because a cassette cannot replay a provider node's discovery without it.
 
 `node.stream` is delivered to `services.onEvent` but never appended to the
 journal. Nested runs (`pathPrefix` non-empty) emit node-level events only; the
@@ -520,8 +530,12 @@ z1 eval <case.json|dir> [--live] [--cassette <file>] [--json] [--jobs N]
         [--max-steps N] [--workspace <dir>] [--keep] [--no-memory]
 ```
 
-- A **cassette** is JSONL, one turn per line:
-  `{version, path, provider, model, attempt, requestHash, request, response}`.
+- A **cassette** is JSONL, one turn per line. A model turn is
+  `{version, path, provider, model, attempt, requestHash, request, response}`;
+  a metadata read is
+  `{version, kind:'meta', path, provider, method:'GET', urlPath, query?, status, ok, truncated, body}`
+  and is replayed by provider + path + sorted query. A file without `kind` is a
+  model turn, so cassettes written before metadata existed still load.
   `export` pairs each `llm.request` with the `llm.response` at the same path and
   attempt and resolves both blobs; a run recorded with `hashes` or `off` cannot
   be exported and says so.
