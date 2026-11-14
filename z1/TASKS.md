@@ -185,10 +185,18 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
       and without `..`, and a surrogate pair is never split. It sits
       between `mapCall` and `mapMessage` in the tool map, so a 50 KB result reaches
       the model as ~12 KB plus a path.
-- Known: the budget estimates; it does not tokenise, and `usage` is only wired
-  when a graph supplies it (the loop body has no per-turn usage slot yet).
-  Summarisation, clearing of old tool results, the read ledger and the repo map
-  are the next steps (see the context design note).
+- [x] `z1.ctx.compact`: clears the content of old tool results with no model
+      call, keeping the most recent ones and every assistant call.
+- [x] `z1.ctx.summarize`: replaces an older span with a nine-section checkpoint
+      (the same structure the upstream harness uses), keeps the system message
+      and the recent turns, and returns the transcript unchanged on a failed
+      call or when the checkpoint saves too little.
+- [x] `agent.loop` gates both on `budget.over`, so a transcript that fits is
+      untouched and no summary call is made.
+- Known: the budget estimates; it does not tokenise, and `usage` is not wired in
+  the loop body, so in the default template `over` is estimate-only. The window
+  is a config value with no provider lookup yet. Read ledger, notes file and repo
+  map are the next steps.
 
 ## M12 — recorded model traffic and eval
 

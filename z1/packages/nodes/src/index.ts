@@ -50,6 +50,8 @@ export {
   contextNodes,
   contextBudget,
   contextClip,
+  contextCompact,
+  contextSummarize,
   estimateMessages,
 } from './context.ts'
 export {

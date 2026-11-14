@@ -307,6 +307,276 @@ const clip = defineNode({
   },
 })
 
-export const contextNodes: readonly NodeDefinition[] = [budget, clip]
+/** Tags around the summary, so a later update pass can find its predecessor. */
+const SUMMARY_OPEN = '<compacted-summary>'
+const SUMMARY_CLOSE = '</compacted-summary>'
 
-export { budget as contextBudget, clip as contextClip }
+/**
+ * The summarization directive, appended as the final user message.
+ *
+ * Replaying the real conversation before it (rather than using a separate
+ * summarizer prompt) keeps this call a prefix of what the model already saw, so
+ * a provider's warm prefix cache is reused. The section list is deliberately
+ * fixed: a summary that silently drops "Next Step" is worse than a long one.
+ */
+const COMPACTION_INSTRUCTION = [
+  'You are now acting as a compaction engine for this coding assistant. Condense the conversation ABOVE into a structured checkpoint so another model can resume the work without losing essential context.',
+  '',
+  'Output EXACTLY this Markdown structure, every section, in order. Terse bullets, no prose. Write "(none)" for an empty section; never omit one.',
+  '',
+  '## Primary Request and Intent',
+  "- [the original and evolving goals; quote the user's exact wording where it matters]",
+  '',
+  '## Key Technical Concepts',
+  '- [technologies, conventions, patterns in play]',
+  '',
+  '## Files and Code',
+  '- [exact path: why it matters, key changes or snippets]',
+  '',
+  '## Errors and Fixes',
+  '- [error string: cause and fix, plus any user feedback]',
+  '',
+  '## Pending Jobs',
+  '- [explicitly requested work not yet done]',
+  '',
+  '## Current Work',
+  '- [precisely what was in progress at this checkpoint]',
+  '',
+  '## Next Step',
+  '- [the single next action, or "(none)"]',
+  '',
+  '## Critical Context',
+  '- [decisions and rationale, constraints, preferences, open questions]',
+  '',
+  'Rules:',
+  '- Keep exact file paths, commands, error strings, identifiers and numbers.',
+  '- Capture user corrections faithfully.',
+  '- Do not mention this request or that the context was compacted.',
+  `- If the conversation already contains a ${SUMMARY_OPEN} block, it is a PRIOR checkpoint: keep still-true facts, drop stale ones, merge newer information into one consolidated summary.`,
+  '- Output only the checkpoint text. Do not call a tool.',
+].join('\n')
+
+const CHECKPOINT_PREAMBLE =
+  'This is an automatically generated checkpoint condensing an earlier span of the conversation to free context. Treat it as established background and build on it without restating it. Continue from the messages that follow.'
+
+function messageText(message: Json): string {
+  if (!isRecord(message)) return ''
+  const content = message['content']
+  return typeof content === 'string' ? content : ''
+}
+
+function isToolResult(message: Json): boolean {
+  return isRecord(message) && message['role'] === 'tool'
+}
+
+/**
+ * Cut index for the kept tail: never start it with an orphan `tool` message.
+ *
+ * A tool message whose assistant call was dropped is rejected by every provider,
+ * so the cut moves forward until the tail begins with a message that can stand
+ * alone.
+ */
+function safeCut(messages: readonly Json[], keep: number): number {
+  let cut = Math.max(0, messages.length - keep)
+  while (cut < messages.length && isToolResult(messages[cut] as Json)) cut += 1
+  return cut
+}
+
+const compact = defineNode({
+  id: 'z1.ctx.compact',
+  version: NODE_VERSION,
+  title: 'Compact tool results',
+  description:
+    'Replaces the content of old tool results with a note. No model call, nothing reordered, every tool call kept.',
+  category: 'context',
+  config: z.object({
+    /** How many of the most recent tool results to keep verbatim. */
+    keepToolResults: z.number().int().nonnegative().default(3),
+    /** Results shorter than this are not worth a marker. */
+    minChars: z.number().int().nonnegative().default(400),
+  }),
+  defaultConfig: {},
+  cacheable: false,
+  inputs: [flowPort('in'), dataPort('messages', z.array(jsonValue))],
+  outputs: [
+    dataPort('messages', z.array(jsonValue)),
+    dataPort('compacted', z.boolean()),
+    dataPort('cleared', z.number()),
+    dataPort('tokensBefore', z.number()),
+    dataPort('tokensAfter', z.number()),
+    flowPort('out'),
+  ],
+  execute: async (ctx) => {
+    const values = inputValues(ctx.input)
+    const raw = values['messages']
+    if (!Array.isArray(raw)) {
+      throw new Error('z1.ctx.compact: the "messages" input must be an array')
+    }
+    const messages = raw as readonly Json[]
+    const toolIndexes: number[] = []
+    messages.forEach((message, index) => {
+      if (isToolResult(message)) toolIndexes.push(index)
+    })
+    const clearable = toolIndexes.slice(
+      0,
+      Math.max(0, toolIndexes.length - ctx.config.keepToolResults),
+    )
+
+    let cleared = 0
+    const next = messages.map((message, index) => {
+      if (!clearable.includes(index)) return message
+      const text = messageText(message)
+      if (text.length < ctx.config.minChars) return message
+      cleared += 1
+      return {
+        ...(message as Record<string, Json>),
+        content: `[cleared: earlier tool result, ${String(text.length)} chars · re-run the tool if it is needed again]`,
+      }
+    })
+
+    const tokensBefore = estimateMessages(messages, 4)
+    // Nothing cleared: hand back the very same array, so a caller can branch on
+    // identity as well as on the flag.
+    const result = cleared === 0 ? messages : next
+    const tokensAfter = estimateMessages(result, 4)
+    return {
+      messages: asJson(result),
+      compacted: cleared > 0,
+      cleared,
+      tokensBefore,
+      tokensAfter,
+      out: true,
+    }
+  },
+})
+
+const summarize = defineNode({
+  id: 'z1.ctx.summarize',
+  version: NODE_VERSION,
+  title: 'Summarize context',
+  description:
+    'Replaces an older span of the conversation with a structured checkpoint written by the model, keeping the most recent turns verbatim.',
+  category: 'context',
+  config: z.object({
+    /** Same handle the chat node uses; required when the port is not wired. */
+    model: z.unknown().optional(),
+    /** Recent messages kept verbatim; a tool message is never orphaned. */
+    keepRecentTurns: z.number().int().positive().default(6),
+    /** Output cap for the checkpoint itself. */
+    maxSummaryTokens: z.number().int().positive().default(2_000),
+    /** A checkpoint that does not save at least this share is discarded. */
+    minimumReduction: z.number().min(0).lt(1).default(0.1),
+  }),
+  defaultConfig: {},
+  cacheable: false,
+  inputs: [
+    flowPort('in'),
+    dataPort('messages', z.array(jsonValue)),
+    dataPort('tools', z.array(jsonValue), false),
+    dataPort('model', jsonValue, false),
+  ],
+  outputs: [
+    dataPort('messages', z.array(jsonValue)),
+    dataPort('summary', z.string()),
+    dataPort('compacted', z.boolean()),
+    dataPort('droppedTurns', z.number()),
+    dataPort('tokensBefore', z.number()),
+    dataPort('tokensAfter', z.number()),
+    dataPort('usage', jsonValue),
+    flowPort('out'),
+  ],
+  execute: async (ctx) => {
+    const values = inputValues(ctx.input)
+    const raw = values['messages']
+    if (!Array.isArray(raw)) {
+      throw new Error('z1.ctx.summarize: the "messages" input must be an array')
+    }
+    const messages = raw as readonly Json[]
+    const before = estimateMessages(messages, 4)
+    const noop = {
+      messages: asJson(messages),
+      summary: '',
+      compacted: false,
+      droppedTurns: 0,
+      tokensBefore: before,
+      tokensAfter: before,
+      usage: {},
+      out: true,
+    }
+
+    const cut = safeCut(messages, ctx.config.keepRecentTurns)
+    // The first message is the system prompt; it is never summarised and never
+    // dropped, because the checkpoint replaces the middle, not the rules.
+    const head = isRecord(messages[0]) && messages[0]['role'] === 'system' ? messages[0] : undefined
+    const from = head === undefined ? 0 : 1
+    if (cut <= from) return noop
+
+    const dropped = messages.slice(from, cut)
+    const tail = messages.slice(cut)
+    if (dropped.length === 0) return noop
+
+    const handle = ctx.config.model ?? values['model']
+    const model =
+      isRecord(handle) && typeof handle['provider'] === 'string' && typeof handle['model'] === 'string'
+        ? { provider: handle['provider'], model: handle['model'] }
+        : undefined
+    if (model === undefined) {
+      ctx.log('warn', 'z1.ctx.summarize: no model handle; returning the transcript unchanged')
+      return noop
+    }
+
+    const tools = values['tools']
+    let reply
+    try {
+      reply = await ctx.llm.chat({
+        model,
+        messages: [
+          ...(dropped as never[]),
+          { role: 'user', content: COMPACTION_INSTRUCTION },
+        ] as never,
+        ...(Array.isArray(tools) ? { tools: tools as never } : {}),
+        maxTokens: ctx.config.maxSummaryTokens,
+      })
+    } catch (error) {
+      // A failed summary must not fail the run: the caller still has a
+      // transcript that fits, or a compaction result from the tier below.
+      ctx.log('warn', `z1.ctx.summarize: summary call failed: ${errorMessage(error)}`)
+      return noop
+    }
+
+    const text = typeof reply.message.content === 'string' ? reply.message.content.trim() : ''
+    if (text.length === 0) {
+      ctx.log('warn', 'z1.ctx.summarize: the model returned an empty checkpoint')
+      return noop
+    }
+
+    const checkpoint: Json = {
+      role: 'user',
+      content: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN}\n${text}\n${SUMMARY_CLOSE}`,
+    }
+    const next = [...(head === undefined ? [] : [head]), checkpoint, ...tail]
+    const after = estimateMessages(next, 4)
+    if (after > before * (1 - ctx.config.minimumReduction)) {
+      ctx.log(
+        'warn',
+        `z1.ctx.summarize: checkpoint saves too little (${String(before)} → ${String(after)} tokens); keeping the transcript`,
+      )
+      return noop
+    }
+
+    return {
+      messages: asJson(next),
+      summary: text,
+      compacted: true,
+      droppedTurns: dropped.length,
+      tokensBefore: before,
+      tokensAfter: after,
+      usage: asJson(reply.usage ?? {}),
+      out: true,
+    }
+  },
+})
+
+export const contextNodes: readonly NodeDefinition[] = [budget, clip, compact, summarize]
+
+export { budget as contextBudget, clip as contextClip, compact as contextCompact, summarize as contextSummarize }

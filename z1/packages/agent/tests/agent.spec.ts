@@ -283,6 +283,58 @@ describe('buildAgentGraph', () => {
     expect(content.startsWith('xxxx')).toBe(true)
   })
 
+  test('an over-budget transcript is compacted before the next turn', async () => {
+    const graph = buildAgentGraph({ model: MODEL })
+    // The budget and summary nodes live inside the loop body's graph, so the
+    // config is reached through the loop node, not the top level.
+    const loop = graph.nodes.find((node) => node.type === 'z1.flow.loop')
+    expect(loop).toBeDefined()
+    const body = (loop?.config as { body?: GraphDocument } | undefined)?.body
+    expect(body).toBeDefined()
+    for (const node of body?.nodes ?? []) {
+      // Force the gate, and drop just the first user turn so the checkpoint
+      // replaces a 4k span rather than the whole conversation.
+      if (node.id === 'budget') node.config = { contextWindow: 1 } as never
+      if (node.id === 'ctxSummary') node.config = { model: MODEL, keepRecentTurns: 2 } as never
+    }
+
+    const services = createMockRuntimeServices()
+    const journal = new MemoryJournal()
+    const long = `[[tool:echo]] ${'x'.repeat(4_000)}`
+    const result = await runGraph({
+      graph,
+      registry: createBuiltinRegistry(),
+      services,
+      input: long,
+      journal,
+    })
+
+    expect(result.status).toBe('completed')
+    // The first iteration has nothing to drop yet (only system + user), so the
+    // compaction that matters is the second one.
+    const compacted = journal
+      .read(result.runId)
+      .filter((entry) => entry.type === 'node.completed' && entry.nodeId === 'ctxSummary')
+      .find((entry) => entry.outputs['compacted'] === true)
+    expect(compacted).toBeDefined()
+    if (compacted?.type !== 'node.completed') throw new Error('ctxSummary did not compact')
+    expect(Number(compacted.outputs['tokensAfter'])).toBeLessThan(
+      Number(compacted.outputs['tokensBefore']),
+    )
+
+    // The next request carries the checkpoint; the transcript did not keep the
+    // 4k-character user turn verbatim.
+    const checkpointed = services.chatCalls.find((request) =>
+      request.messages.some(
+        (message) =>
+          message.role === 'user' &&
+          typeof message.content === 'string' &&
+          message.content.includes('<compacted-summary>'),
+      ),
+    )
+    expect(checkpointed).toBeDefined()
+  })
+
   test('the budget node reports the transcript size without changing it', async () => {
     const { result, journal } = await run({ model: MODEL }, 'hello')
     expect(result.status).toBe('completed')

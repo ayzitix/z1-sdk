@@ -6,7 +6,13 @@
 
 import { describe, expect, test } from 'vitest'
 
-import { contextBudget, contextClip, estimateMessages } from '../src/index.ts'
+import {
+  contextBudget,
+  contextClip,
+  contextCompact,
+  contextSummarize,
+  estimateMessages,
+} from '../src/index.ts'
 
 interface Logged {
   level: string
@@ -22,6 +28,11 @@ interface Extras {
   writes?: FsWrite[]
   writeError?: Error
   logs?: Logged[]
+  llm?: Vec
+}
+
+interface Vec {
+  chat: (request: unknown) => Promise<unknown>
 }
 
 function ctx(inputs: Record<string, unknown>, config: unknown, extras: Extras = {}) {
@@ -44,7 +55,7 @@ function ctx(inputs: Record<string, unknown>, config: unknown, extras: Extras = 
         throw new Error('not used')
       },
     },
-    llm: {
+    llm: extras.llm ?? {
       chat: async () => {
         throw new Error('not used')
       },
@@ -138,6 +149,185 @@ describe('z1.ctx.budget', () => {
     // 4000 CJK characters tokenise at roughly one token each, not 1000.
     const estimate = estimateMessages([{ role: 'user', content: '漢'.repeat(4000) }] as never, 4)
     expect(estimate).toBeGreaterThan(3_500)
+  })
+})
+
+describe('z1.ctx.compact', () => {
+  function tool(id: string, text: string) {
+    return { role: 'tool', toolCallId: id, content: text }
+  }
+  function assistant(id: string) {
+    return { role: 'assistant', content: '', toolCalls: [{ id, name: 'read', arguments: {} }] }
+  }
+  const messages = [
+    { role: 'system', content: 'rules' },
+    { role: 'user', content: 'task' },
+    assistant('a'),
+    tool('a', 'x'.repeat(1_000)),
+    assistant('b'),
+    tool('b', 'y'.repeat(1_000)),
+    assistant('c'),
+    tool('c', 'z'.repeat(1_000)),
+    assistant('d'),
+    tool('d', 'w'.repeat(1_000)),
+  ]
+
+  async function runCompact(config: unknown, inputs: Record<string, unknown>) {
+    return await contextCompact.execute(
+      ctx(inputs, contextCompact.config.parse(config) as never),
+    )
+  }
+
+  test('clears old tool results and keeps the most recent ones verbatim', async () => {
+    const output = await runCompact({ keepToolResults: 2 }, { messages })
+    expect(output.compacted).toBe(true)
+    expect(output.cleared).toBe(2)
+    const next = output.messages as { role: string; toolCallId?: string; content: string }[]
+    expect(next.map((message) => message.role)).toEqual(messages.map((message) => message.role))
+    expect(next.map((message) => message.toolCallId)).toEqual(
+      messages.map((message) => (message as { toolCallId?: string }).toolCallId),
+    )
+    expect(next[3]?.content).toContain('[cleared: earlier tool result, 1000 chars')
+    expect(next[5]?.content).toContain('[cleared: earlier tool result, 1000 chars')
+    expect(next[7]?.content).toBe('z'.repeat(1_000))
+    expect(next[9]?.content).toBe('w'.repeat(1_000))
+    expect(output.tokensAfter).toBeLessThan(output.tokensBefore)
+  })
+
+  test('a short result is not replaced by a longer marker', async () => {
+    const short = [assistant('a'), tool('a', 'ok'), assistant('b'), tool('b', 'ok')]
+    const output = await runCompact({ keepToolResults: 0, minChars: 400 }, { messages: short })
+    expect(output.compacted).toBe(false)
+    expect(output.messages).toBe(short)
+  })
+
+  test('nothing to clear returns the same array', async () => {
+    const few = [assistant('a'), tool('a', 'x'.repeat(500))]
+    const output = await runCompact({ keepToolResults: 3 }, { messages: few })
+    expect(output.compacted).toBe(false)
+    expect(output.messages).toBe(few)
+  })
+
+  test('a malformed transcript is an error', async () => {
+    await expect(runCompact({}, { messages: 'nope' })).rejects.toThrow(/must be an array/)
+  })
+})
+
+describe('z1.ctx.summarize', () => {
+  const model = { provider: 'mock', model: 'mock-1' }
+  const messages = [
+    { role: 'system', content: 'rules' },
+    { role: 'user', content: `do the thing ${'x'.repeat(800)}` },
+    { role: 'assistant', content: `ok ${'y'.repeat(800)}` },
+    { role: 'tool', toolCallId: 'a', content: 'result '.repeat(200) },
+    { role: 'assistant', content: 'done' },
+    { role: 'user', content: 'now the next thing' },
+  ]
+
+  function llm(reply: { content: string } | Error, calls: unknown[] = []): Vec {
+    return {
+      chat: async (request: unknown) => {
+        calls.push(request)
+        if (reply instanceof Error) throw reply
+        return {
+          message: { role: 'assistant', content: reply.content },
+          toolCalls: [],
+          usage: { inputTokens: 10, outputTokens: 5 },
+          stopReason: 'stop',
+        }
+      },
+    }
+  }
+
+  async function runSummarize(
+    config: unknown,
+    inputs: Record<string, unknown>,
+    extras: Extras = {},
+  ) {
+    return await contextSummarize.execute(
+      ctx(inputs, contextSummarize.config.parse(config) as never, extras),
+    )
+  }
+
+  test('replaces the older span with a checkpoint and keeps the tail', async () => {
+    const calls: unknown[] = []
+    const output = await runSummarize(
+      { model, keepRecentTurns: 3 },
+      { messages },
+      { llm: llm({ content: '## Primary Request and Intent\n- do things' }, calls) },
+    )
+
+    expect(calls).toHaveLength(1)
+    const request = calls[0] as { messages: { role: string; content: string }[]; maxTokens?: number }
+    // The replayed conversation is the prefix; the directive is the last message.
+    expect(request.messages[0]?.role).toBe('user')
+    expect(request.messages[0]?.content).toContain('do the thing')
+    expect(request.messages.at(-1)?.content).toContain('compaction engine')
+
+    const next = output.messages as { role: string; content: string }[]
+    expect(next[0]?.role).toBe('system')
+    expect(next[1]?.content).toContain('<compacted-summary>')
+    expect(next[1]?.content).toContain('## Primary Request and Intent')
+    expect(next.at(-1)).toEqual({ role: 'user', content: 'now the next thing' })
+    expect(output.compacted).toBe(true)
+    expect(output.droppedTurns).toBe(3)
+    expect(output.tokensAfter).toBeLessThan(output.tokensBefore)
+    expect(output.usage).toEqual({ inputTokens: 10, outputTokens: 5 })
+  })
+
+  test('without a model handle it does nothing', async () => {
+    const output = await runSummarize({}, { messages })
+    expect(output.compacted).toBe(false)
+    expect(output.messages).toBe(messages)
+  })
+
+  test('a failed summary call leaves the transcript alone', async () => {
+    const logs: Logged[] = []
+    const output = await runSummarize(
+      { model, keepRecentTurns: 3 },
+      { messages },
+      { llm: llm(new Error('upstream 500')), logs },
+    )
+    expect(output.compacted).toBe(false)
+    expect(output.messages).toBe(messages)
+    expect(logs.some((entry) => entry.message.includes('upstream 500'))).toBe(true)
+  })
+
+  test('a checkpoint that saves too little is discarded', async () => {
+    const output = await runSummarize(
+      { model, keepRecentTurns: 1, minimumReduction: 0.9 },
+      { messages },
+      { llm: llm({ content: 'x'.repeat(1_000) }) },
+    )
+    expect(output.compacted).toBe(false)
+    expect(output.messages).toBe(messages)
+  })
+
+  test('the kept tail never starts with an orphan tool message', async () => {
+    const calls: unknown[] = []
+    await runSummarize(
+      { model, keepRecentTurns: 2 },
+      { messages },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    // With keepRecentTurns=2 the naive cut starts at the tool message; the
+    // node advances it, so the tail begins at the assistant turn.
+    const request = calls[0] as { messages: { role: string }[] }
+    expect(request.messages[0]?.role).not.toBe('tool')
+    expect(request.messages.at(-1)?.role).toBe('user')
+  })
+
+  test('a transcript that fits is a no-op with no model call', async () => {
+    const calls: unknown[] = []
+    const short = messages.slice(0, 2)
+    const output = await runSummarize(
+      { model, keepRecentTurns: 6 },
+      { messages: short },
+      { llm: llm({ content: 'x' }, calls) },
+    )
+    expect(calls).toHaveLength(0)
+    expect(output.compacted).toBe(false)
+    expect(output.messages).toBe(short)
   })
 })
 

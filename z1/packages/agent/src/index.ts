@@ -184,6 +184,12 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       // Observe-only: reports the transcript size, drops nothing, so the
       // journal records how close a turn came to the window.
       node('budget', 'z1.ctx.budget', 330, 0),
+      // Compaction is flow-gated on the budget, so a transcript that fits is
+      // passed through byte-identical and no summary call is made.
+      node('ctxGate', 'z1.flow.if', 440, -360),
+      node('ctxCompact', 'z1.ctx.compact', 550, 160),
+      node('ctxSummary', 'z1.ctx.summarize', 660, 160, chatConfig),
+      node('ctxMerge', 'z1.core.merge', 770, 0),
       // The seed's first entry is the system message built from the prompt
       // stack; it feeds the chat's `system` port and the message list alike.
       node('systemText', 'z1.core.get', 440, -300, { path: '0.content' }),
@@ -211,7 +217,13 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       // Data
       data('d1', 'body', 'value', 'messages', 'value'),
       data('d2', 'messages', 'value', 'budget', 'messages'),
-      data('d2b', 'budget', 'messages', 'chat', 'messages'),
+      data('d2b', 'budget', 'messages', 'ctxCompact', 'messages'),
+      data('d2c', 'budget', 'messages', 'ctxMerge', 'b'),
+      data('d2d', 'ctxCompact', 'messages', 'ctxSummary', 'messages'),
+      data('d2e', 'ctxSummary', 'messages', 'ctxMerge', 'a'),
+      data('d2f', 'ctxMerge', 'value', 'chat', 'messages'),
+      data('d2g', 'budget', 'over', 'ctxGate', 'condition'),
+      data('d2h', 'tools', toolsPort, 'ctxSummary', 'tools'),
       data('d3', 'tools', toolsPort, 'chat', 'tools'),
       data('d4', 'chat', 'hasToolCalls', 'branch', 'condition'),
       data('d5', 'chat', 'text', 'assistantMsg', 'content'),
@@ -235,7 +247,12 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       // Flow
       flow('f1', 'body', 'out', 'messages', 'in'),
       flow('f2', 'messages', 'out', 'systemText', 'in'),
-      flow('f3', 'systemText', 'out', 'chat', 'in'),
+      flow('f3', 'systemText', 'out', 'ctxGate', 'in'),
+      flow('f3b', 'ctxGate', 'then', 'ctxCompact', 'in'),
+      flow('f3c', 'ctxCompact', 'out', 'ctxSummary', 'in'),
+      flow('f3d', 'ctxSummary', 'out', 'ctxMerge', 'in'),
+      flow('f3e', 'ctxGate', 'else', 'ctxMerge', 'in'),
+      flow('f3f', 'ctxMerge', 'out', 'chat', 'in'),
       flow('f4', 'chat', 'out', 'branch', 'in'),
       flow('f5', 'branch', 'then', 'assistantMsg', 'in'),
       flow('f6', 'assistantMsg', 'out', 'toolMap', 'in'),

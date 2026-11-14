@@ -478,6 +478,8 @@ All ids are namespaced `z1.<name>`.
 | --- | --- | --- | --- |
 | `z1.core.input` | — | `value` (data Json), `out` (flow) | root; value = `ctx.input` |
 | `z1.ctx.budget` | `messages` (data Json[]), `usage` (data Json) | `messages`, `tokens`, `window`, `triggerAt`, `ratio`, `over` (data) | observe-only: estimates the transcript, drops nothing; config `{ contextWindow, reserveTokens, threshold, charsPerToken }` |
+| `z1.ctx.compact` | `in` (flow), `messages` (data Json[]) | `messages`, `compacted`, `cleared`, `tokensBefore`, `tokensAfter` (data), `out` (flow) | no model call: replaces the content of old tool results with a note, keeps the last `keepToolResults` verbatim, never reorders or drops a call; config `{ keepToolResults, minChars }` |
+| `z1.ctx.summarize` | `in` (flow), `messages`, `tools?`, `model?` (data) | `messages`, `summary`, `compacted`, `droppedTurns`, `tokensBefore`, `tokensAfter`, `usage` (data), `out` (flow) | replaces an older span with a structured checkpoint written by the model, keeps the recent turns and the system message; a failed call or a checkpoint that saves too little returns the transcript unchanged; config `{ model, keepRecentTurns, maxSummaryTokens, minimumReduction }` |
 | `z1.ctx.clip` | `in` (flow), `value` (data Json), `name` (data string) | `value`, `truncated`, `originalChars`, `spillPath` (data), `out` (flow) | keeps head+tail within `maxChars`, writes the full text under `.z1/out/<runId>/`, marks the cut with a sentinel; `directory` must be relative and without `..`; a result that is barely over the cap is left alone rather than inflated by the marker |
 | `z1.core.output` | `in` (flow), `value` (data Json) | — | config `{ port?: string }` |
 | `z1.core.const` | — | `value` (data Json) | root; config `{ value: Json }` |
@@ -546,6 +548,15 @@ z1 eval <case.json|dir> [--live] [--cassette <file>] [--json] [--jobs N]
   `cassette miss for <provider>/<model> at <path>: no recorded request with
   hash …`. Replayed calls are journaled like live ones, so an eval over a
   cassette produces its own measurements.
+`agent.loop` gates compaction on `z1.ctx.budget.over`: below the threshold the
+transcript reaches `chat` unchanged (and no summary call is made); above it,
+`z1.ctx.compact` clears old tool results and `z1.ctx.summarize` replaces the
+older span with a checkpoint. The cut is taken at the start of a body iteration,
+where the transcript is either an assistant message without `toolCalls` or an
+assistant message followed by every matching tool message, so a cut can never
+separate a tool call from its result. The summary turn is an ordinary
+`llm.request`/`llm.response` at the summary node's path, with its own hash.
+
 - `eval` runs every case through the real `run` path in a fresh directory
   (fixture copied, own DB) and asserts mechanical properties only:
   `outputContains`, `outputMatches` (regexp), `files[].contains`,
