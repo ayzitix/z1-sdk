@@ -136,6 +136,22 @@ describe('checkFsReal', () => {
     ).toEqual({ ok: true })
   })
 
+  test('a grant anchored at the filesystem root matches every absolute path', () => {
+    // The tools module grants `/**`; an implementation that appends '/' to the
+    // base turns the root into '//' and silently denies everything.
+    const root: ModuleCapabilities = { fs: { read: ['/**'], write: ['/**'] } }
+    for (const path of ['/tmp/x', '/home/me/project/file.ts', '/etc/passwd', '/']) {
+      expect(checkFsReal(root, 'read', path, '/opt/module')).toEqual({ ok: true })
+    }
+  })
+
+  test('a subtree grant still confines an absolute path', () => {
+    const subtree: ModuleCapabilities = { fs: { read: ['/tmp/**'] } }
+    expect(checkFsReal(subtree, 'read', '/tmp/x', '/opt/module')).toEqual({ ok: true })
+    expect(checkFsReal(subtree, 'read', '/etc/passwd', '/opt/module').ok).toBe(false)
+    expect(checkFsReal(subtree, 'write', '/tmp/x', '/opt/module').ok).toBe(false)
+  })
+
   test('keeps the lexical denials', () => {
     const { moduleDir } = fixture()
     expect(checkFsReal(capabilities, 'read', 'data/../a.txt', moduleDir).ok).toBe(false)

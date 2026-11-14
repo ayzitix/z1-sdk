@@ -200,7 +200,11 @@ export function checkFsReal(
     const base = anchor(pattern)
     if (base === undefined) return deny(`capability pattern has no base directory: ${pattern}`)
 
-    if (realTarget === base || realTarget.startsWith(base + '/')) return { ok: true }
+    // A grant anchored at the filesystem root (`/**`) has base `/`, and
+    // `'/' + '/'` would be `//`, which no path starts with.
+    if (realTarget === base || base === '/' || realTarget.startsWith(base + '/')) {
+      return { ok: true }
+    }
     denied = `fs.${direction} path resolves through a symlink outside the granted pattern ${pattern}: ${realTarget}`
   }
 
