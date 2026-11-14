@@ -126,16 +126,18 @@ export function createRecordingLlmService(options: RecordLlmOptions): LlmService
     options.onEvent?.(event)
   }
 
-  const discover = options.inner.listModels?.bind(options.inner)
+  const get = options.inner.get?.bind(options.inner)
 
   return {
-    // Discovery is not a model turn: it is not recorded, but it must keep
-    // working through the wrapper or a node could not ask what exists.
-    ...(discover === undefined
+    // A metadata read is not a model turn: it is not recorded, but it must keep
+    // working through the wrapper or a module could not inspect a provider.
+    ...(get === undefined
       ? {}
       : {
-          listModels: async (request: { provider: string }, signal?: AbortSignal) =>
-            await discover(request, signal),
+          get: async (
+            request: Parameters<NonNullable<LlmService['get']>>[0],
+            signal?: AbortSignal,
+          ) => await get(request, signal),
         }),
     chat: async (request, onDelta) => {
       const scope = currentLlmCallContext()

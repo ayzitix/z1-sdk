@@ -30,7 +30,6 @@ import {
 } from '@z1/module'
 import { formatCassette } from '@z1/runtime'
 import { evalCommand } from './eval.ts'
-import type { ModelInfo } from '@z1/node'
 import type { SequencedEvent } from '@z1/journal'
 import {
   MOCK_PROVIDER,
@@ -82,8 +81,6 @@ const USAGE = [
   '  template list [--templates-dir <path>] [--json]',
   '  tree [--db <path>] [--json]',
   '  cassette export <runId> [-o <file>] [--db <path>]',
-  '  models [provider] [--json] [--db <path>]',
-  '      discover models live from the provider (GET {baseURL}/models); nothing is stored',
   '  eval <case.json|dir> [--live] [--cassette <file>] [--json] [--jobs N] [--max-steps N]',
   '      [--workspace <dir>] [--keep] [--no-memory]',
   '  memory context <runId> [--db <path>] [--json]',
@@ -1376,97 +1373,6 @@ function nodeStartedSeq(
 }
 
 /**
- * `z1 models [provider]`: what the provider actually serves right now.
- *
- * Discovery is a request, not a catalogue: nothing is written to disk, and a
- * provider without a key or without `/models` is reported next to the ones that
- * answered.
- */
-async function modelsCommand(args: readonly string[], io: CliIO): Promise<number> {
-  let values: { json?: boolean; db?: string }
-  let positionals: string[]
-  try {
-    const parsed = parseArgs({
-      args: [...args],
-      options: {
-        json: { type: 'boolean' },
-        db: { type: 'string' },
-      },
-      allowPositionals: true,
-      strict: true,
-    })
-    values = parsed.values
-    positionals = [...parsed.positionals]
-  } catch (error) {
-    io.stderr(`${errorMessage(error)}\n`)
-    return 2
-  }
-
-  if (positionals.length > 1) {
-    io.stderr('usage: z1 models [provider] [--json] [--db <path>]\n')
-    return 2
-  }
-
-  // Listing is read-only and inherently live: asking a provider what it serves
-  // must not be routed through the deterministic mock.
-  const runtime = await openRuntime(io, {
-    ...(values.db === undefined ? {} : { dbPath: values.db }),
-    useMemory: false,
-    useModules: false,
-    live: true,
-  })
-  if (runtime === undefined) return 1
-
-  try {
-    const discover = runtime.llm.listModels?.bind(runtime.llm)
-    if (discover === undefined) {
-      io.stderr('this runtime has no model discovery (the mock backend lists nothing)\n')
-      return 1
-    }
-
-    const configured = runtime.providers.configs().map((config) => config.id)
-    const requested = positionals[0]
-    if (requested !== undefined && !configured.includes(requested)) {
-      io.stderr(
-        `provider "${requested}" is not configured; known: ${configured.join(', ')}\n`,
-      )
-      return 1
-    }
-    const ids = requested === undefined ? configured : [requested]
-
-    const rows: { provider: string; models?: readonly ModelInfo[]; error?: string }[] = []
-    for (const provider of ids) {
-      try {
-        rows.push({ provider, models: await discover({ provider }) })
-      } catch (error) {
-        rows.push({ provider, error: errorMessage(error) })
-      }
-    }
-
-    if (values.json === true) {
-      io.stdout(`${JSON.stringify({ providers: rows })}\n`)
-    } else {
-      for (const row of rows) {
-        if (row.error !== undefined) {
-          io.stdout(`${row.provider}: ${row.error}\n`)
-          continue
-        }
-        const models = row.models ?? []
-        io.stdout(`${row.provider} (${String(models.length)})\n`)
-        for (const model of models) {
-          io.stdout(`  ${model.id}${model.name === undefined || model.name === model.id ? '' : `  ${model.name}`}\n`)
-        }
-      }
-    }
-
-    const failed = rows.filter((row) => row.error !== undefined)
-    return requested !== undefined && failed.length > 0 ? 1 : 0
-  } finally {
-    await runtime.close()
-  }
-}
-
-/**
  * `z1 cassette export <runId>`: turn a recorded run into a replayable file.
  *
  * The journal is the source, so this is a read-only command; it never starts a
@@ -1899,8 +1805,6 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return await forkCommand(rest, io)
     case 'cassette':
       return await cassetteCommand(rest, io)
-    case 'models':
-      return await modelsCommand(rest, io)
     case 'eval':
       return await evalCommand(rest, io, runCli)
     case 'serve':

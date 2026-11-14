@@ -429,6 +429,13 @@ export type RunEvent =
   | { type: 'run.cancelled'; runId: string; at: number }
 ```
 
+`LlmService.get({ provider, path, query })` is an authenticated metadata read:
+the path is appended to that provider's base URL, the credential is injected by
+the host, retries apply, and the raw body is returned. It is GET-only and
+path-scoped (no absolute URL, no `..`), so a module can ask a provider about
+itself without the SDK knowing any provider's address. It is not journaled: a
+model turn must go through `chat`.
+
 `llm.request` / `llm.response` wrap every resolved `LlmService.chat`, including a
 module adapter and a cassette replay. The payload goes to the `blobs` table and
 the event keeps the sha256 only, so a row stays small and identical prompts

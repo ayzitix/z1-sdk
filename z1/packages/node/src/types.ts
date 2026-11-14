@@ -86,17 +86,25 @@ export interface ChatRequest {
 }
 
 /**
- * One model as the provider itself reports it.
+ * An authenticated metadata read against a configured provider.
  *
- * Only `id` is guaranteed: the OpenAI `/models` shape also carries `object`,
- * `created` and `owned_by`, while context length, pricing and capabilities are
- * provider extensions. Callers must treat everything but `id` as a hint.
+ * The host owns the base URL and the credential. The caller supplies a path and
+ * query only, so a provider's catalog address (`/models`, `/api/tags`,
+ * `?api-version=…`) stays in the module that knows that provider.
  */
-export interface ModelInfo {
-  readonly id: string
-  readonly name?: string
-  readonly ownedBy?: string
-  readonly created?: number
+export interface ProviderGetRequest {
+  readonly provider: string
+  /** Path appended to the provider's base URL. Must start with `/`. */
+  readonly path: string
+  readonly query?: Readonly<Record<string, string>>
+}
+
+export interface ProviderGetResponse {
+  readonly status: number
+  readonly ok: boolean
+  /** Raw body. Parsing is the caller's job, so provider shapes stay outside. */
+  readonly body: string
+  readonly truncated: boolean
 }
 
 export interface ChatUsage {

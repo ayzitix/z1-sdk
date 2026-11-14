@@ -130,14 +130,14 @@ export class ProviderRegistry {
     return {
       chat: async (request, onDelta) =>
         await this.#service(request.model.provider, services).chat(request, onDelta),
-      listModels: async (request, signal) => {
+      get: async (request, signal) => {
         const service = this.#service(request.provider, services)
-        if (service.listModels === undefined) {
+        if (service.get === undefined) {
           throw new Error(
-            `provider "${request.provider}" does not support model discovery; name the model explicitly`,
+            `provider "${request.provider}" does not support authenticated metadata reads`,
           )
         }
-        return await service.listModels(request, signal)
+        return await service.get(request, signal)
       },
     }
   }

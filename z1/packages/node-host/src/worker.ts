@@ -18,7 +18,7 @@ import type {
   ChatRequest,
   ChatResult,
   Json,
-  ModelInfo,
+  ProviderGetResponse,
   ToolSchema,
 } from '@z1/node'
 import type { DeclaredPort } from '@z1/module'
@@ -65,8 +65,12 @@ interface ModuleContext {
   emit(port: string, chunk: unknown): void
   llm: {
     chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult>
-    /** Live model list for a provider; needs the same `llm` grant as `chat`. */
-    models(provider: string): Promise<readonly ModelInfo[]>
+    /** Authenticated GET on the provider base URL; same grant as `chat`. */
+    get(request: {
+      provider: string
+      path: string
+      query?: Readonly<Record<string, string>>
+    }): Promise<ProviderGetResponse>
   }
   tools: {
     call(name: string, args: Json): Promise<Json>
@@ -115,8 +119,12 @@ interface ModuleServiceContext {
   net: { request(request: NetRequest): Promise<NetResponse> }
   llm: {
     chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult>
-    /** Live model list for a provider; needs the same `llm` grant as `chat`. */
-    models(provider: string): Promise<readonly ModelInfo[]>
+    /** Authenticated GET on the provider base URL; same grant as `chat`. */
+    get(request: {
+      provider: string
+      path: string
+      query?: Readonly<Record<string, string>>
+    }): Promise<ProviderGetResponse>
   }
   tools: {
     call(name: string, args: Json): Promise<Json>
@@ -462,7 +470,12 @@ function serviceContext(
     llm: {
       chat: (chatRequest, onDelta) =>
         call(0, 'llm.chat', chatRequest, onDelta) as Promise<ChatResult>,
-      models: (provider) => invoke('llm.models', { provider }) as Promise<readonly ModelInfo[]>,
+      get: (request) =>
+        invoke('llm.get', {
+          provider: request.provider,
+          path: request.path,
+          ...(request.query === undefined ? {} : { query: request.query }),
+        }) as Promise<ProviderGetResponse>,
     },
     tools: {
       call: (name, args) => invoke('tools.call', { name, args }) as Promise<Json>,
@@ -584,7 +597,12 @@ function createContext(
           chatRequest,
           onDelta,
         ) as Promise<ChatResult>,
-      models: (provider) => invoke('llm.models', { provider }) as Promise<readonly ModelInfo[]>,
+      get: (request) =>
+        invoke('llm.get', {
+          provider: request.provider,
+          path: request.path,
+          ...(request.query === undefined ? {} : { query: request.query }),
+        }) as Promise<ProviderGetResponse>,
     },
     tools: {
       call: (name, args) =>

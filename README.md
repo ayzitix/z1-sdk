@@ -142,7 +142,6 @@ base URL. Rate limits are retried with backoff; tune the budget with
 | `z1 tree` / `z1 fork` | inspect the run tree, fork a branch |
 | `z1 memory context <run>` | print the branch-tree context envelope |
 | `z1 module propose/approve/list` | review and install executable modules |
-| `z1 models [provider]` | discover the models a provider serves right now |
 | `z1 cassette export <run>` | turn a recorded run into a replayable file |
 | `z1 eval <cases.json>` | run a task suite and report pass rate, steps, tokens |
 | `z1 serve` | headless WebSocket server |

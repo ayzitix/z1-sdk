@@ -60,7 +60,12 @@ function createServices(probes: Probes): WorkerHostServices {
     list: async () => [],
   }
   const llm: LlmService = {
-    listModels: async (request) => [{ id: `${request.provider}-one` }, { id: `${request.provider}-two` }],
+    get: async (request) => ({
+      status: 200,
+      ok: true,
+      body: `{"data":[{"id":"${request.provider}-one"}]}`,
+      truncated: false,
+    }),
     chat: async (_request, onDelta) => {
       onDelta?.({ type: 'text', text: 'po' })
       return {
@@ -241,14 +246,14 @@ test('a redirect between allowlisted hosts is followed', async () => {
   }
 }, 20_000)
 
-test('llm.models is gated by the same grant as llm.chat', async () => {
+test('llm.get is gated by the same grant as llm.chat', async () => {
   const probes = freshProbes()
   // No `llm` capability at all: discovery must be refused, not forwarded.
   const denied = createWorker(probes, { capabilities: {} })
   await denied.start()
   await expect(
     denied.execute('com.example.echo.modeller', {}, { provider: 'stub' }, null),
-  ).rejects.toThrow(/capability "llm" not granted for llm\.models/)
+  ).rejects.toThrow(/capability "llm" not granted for llm\.get/)
 
   // A granted provider is listed; another one is still refused.
   const allowed = createWorker(probes, { capabilities: { llm: { providers: ['stub'] } } })
@@ -259,11 +264,11 @@ test('llm.models is gated by the same grant as llm.chat', async () => {
     { provider: 'stub' },
     null,
   )
-  expect(outputs).toEqual({ ids: ['stub-one', 'stub-two'] })
+  expect(outputs).toEqual({ ids: '{"data":[{"id":"stub-one"}]}' })
 
   await expect(
     allowed.execute('com.example.echo.modeller', {}, { provider: 'other' }, null),
-  ).rejects.toThrow(/capability "llm" not granted for llm\.models/)
+  ).rejects.toThrow(/capability "llm" not granted for llm\.get/)
 }, 20_000)
 
 test('llm.chat is forwarded to the host service with deltas', async () => {

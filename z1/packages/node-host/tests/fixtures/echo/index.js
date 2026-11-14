@@ -88,8 +88,11 @@ export const nodes = [
     inputs: [{ kind: 'data', id: 'provider', schema: { type: 'string' }, required: true }],
     outputs: [{ kind: 'data', id: 'ids', schema: { type: 'array' } }],
     async execute(ctx) {
-      const models = await ctx.llm.models(String(ctx.inputs.provider))
-      return { ids: models.map((model) => model.id) }
+      const response = await ctx.llm.get({
+        provider: String(ctx.inputs.provider),
+        path: '/models',
+      })
+      return { ids: response.body }
     },
   },
   {

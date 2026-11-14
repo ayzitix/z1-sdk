@@ -5,7 +5,6 @@ import type {
   ChatResult,
   ChatUsage,
   Json,
-  ModelInfo,
   ToolCall,
   ToolSchema,
 } from '@z1/node'
@@ -22,9 +21,6 @@ import {
 } from './retry.ts'
 import { readSseData } from './sse.ts'
 import type { OpenAiProviderOptions } from './types.ts'
-
-/** How long a discovered model list is trusted. Discovery is not configuration. */
-const MODELS_TTL_MS = 5 * 60_000
 
 /** Minimal shape of the OpenAI wire payload; only the fields we read are typed. */
 interface WireFunctionCall {
@@ -108,9 +104,6 @@ export class OpenAiLlmService implements LlmService {
    * never collide with one handed out for an earlier request (or turn).
    */
   private syntheticCalls = 0
-  /** Live model list, kept only in memory and only for {@link MODELS_TTL_MS}. */
-  private models: { at: number; models: readonly ModelInfo[] } | undefined
-  private modelsInFlight: Promise<readonly ModelInfo[]> | undefined
 
   constructor(options: OpenAiProviderOptions) {
     this.endpoint = options.baseURL.replace(/\/+$/, '')
@@ -122,65 +115,40 @@ export class OpenAiLlmService implements LlmService {
   }
 
   /**
-   * `GET {baseURL}/models`, cached per service instance.
+   * Authenticated GET against the provider's own base URL.
    *
-   * The list is discovery, never configuration: it is not persisted, and a
-   * provider that does not implement the endpoint fails with its own status so
-   * the caller can fall back to an explicit model id.
+   * Only the path and query are caller-supplied: the host part comes from the
+   * configured base URL, so a module cannot point the credential at another
+   * host. The body is returned raw; the SDK deliberately does not parse a
+   * provider's catalog shape.
    */
-  async listModels(
-    _request: { provider: string },
+  async get(
+    request: { provider: string; path: string; query?: Readonly<Record<string, string>> },
     signal?: AbortSignal,
-  ): Promise<readonly ModelInfo[]> {
-    const now = Date.now()
-    if (this.models !== undefined && now - this.models.at < MODELS_TTL_MS) {
-      return this.models.models
+  ): Promise<{ status: number; ok: boolean; body: string; truncated: boolean }> {
+    const path = request.path
+    if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
+      throw new Error(`provider path must start with a single "/": ${String(path)}`)
     }
-    // One request per provider even when several nodes ask at once.
-    this.modelsInFlight ??= this.fetchModels(signal)
-      .then((models) => {
-        this.models = { at: Date.now(), models }
-        return models
-      })
-      .finally(() => {
-        this.modelsInFlight = undefined
-      })
-    return await this.modelsInFlight
-  }
+    if (path.includes('\u0000') || path.split('/').includes('..')) {
+      throw new Error(`provider path must not contain "..": ${path}`)
+    }
 
-  private async fetchModels(signal: AbortSignal | undefined): Promise<readonly ModelInfo[]> {
-    const response = await this.request('/models', {
+    let suffix = path
+    if (request.query !== undefined) {
+      const query = new URLSearchParams()
+      for (const [key, value] of Object.entries(request.query)) query.set(key, value)
+      const encoded = query.toString()
+      if (encoded.length > 0) suffix += `${suffix.includes('?') ? '&' : '?'}${encoded}`
+    }
+
+    const response = await this.request(suffix, {
       method: 'GET',
       headers: this.headers(),
       ...(signal === undefined ? {} : { signal }),
     })
-    if (!response.ok) {
-      const detail = redact(await readErrorBody(response), this.apiKey)
-      const status = `${response.status} ${response.statusText}`.trim()
-      throw new Error(
-        `model discovery failed for ${this.endpoint} (${detail.length > 0 ? `${status}: ${detail}` : status})`,
-      )
-    }
-    const raw: unknown = await response.json()
-    const data = isRecord(raw) && Array.isArray(raw['data']) ? raw['data'] : []
-    const models: ModelInfo[] = []
-    const seen = new Set<string>()
-    for (const entry of data) {
-      if (!isRecord(entry)) continue
-      const id = entry['id']
-      if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
-      seen.add(id)
-      const name = entry['name']
-      const ownedBy = entry['owned_by']
-      const created = entry['created']
-      models.push({
-        id,
-        ...(typeof name === 'string' ? { name } : {}),
-        ...(typeof ownedBy === 'string' ? { ownedBy } : {}),
-        ...(typeof created === 'number' ? { created } : {}),
-      })
-    }
-    return models
+    const { text, truncated } = await readBodyCapped(response)
+    return { status: response.status, ok: response.ok, body: text, truncated }
   }
 
   async chat(
@@ -532,6 +500,17 @@ function initFor(headers: Record<string, string>, body: string, signal: AbortSig
   const init: RequestInit = { method: 'POST', headers, body }
   if (signal !== undefined) init.signal = signal
   return init
+}
+
+/** Metadata bodies are small; anything larger is cut rather than buffered. */
+const MAX_METADATA_BYTES = 2 * 1024 * 1024
+
+async function readBodyCapped(
+  response: Response,
+): Promise<{ text: string; truncated: boolean }> {
+  const raw = await response.text()
+  if (raw.length <= MAX_METADATA_BYTES) return { text: raw, truncated: false }
+  return { text: raw.slice(0, MAX_METADATA_BYTES), truncated: true }
 }
 
 /** Releases a response we are about to retry so the socket can be reused. */

@@ -8,22 +8,27 @@ import type {
   ChatUsage,
   Json,
   MemoryService,
-  ModelInfo,
   NodeRegistry,
+  ProviderGetRequest,
+  ProviderGetResponse,
   ToolSchema,
 } from '@z1/node'
 
 export interface LlmService {
   chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult>
   /**
-   * Models the provider currently serves, discovered live (`GET /models` for an
-   * OpenAI-compatible endpoint). Optional: a deterministic mock has nothing to
-   * list, and a provider may not implement the endpoint.
+   * An authenticated **metadata read** against a configured provider.
    *
-   * This is discovery, not configuration: the list is never persisted, and a
-   * caller must work when it is unavailable.
+   * The host owns the base URL, the credential and the retry policy; the caller
+   * supplies only a path and a query. This exists so a module can ask a provider
+   * what it serves without the SDK knowing any provider's address: which path
+   * (`/models`, `/api/tags`, `/openai/models`), which query (`?api-version`,
+   * `?type=text`) and how to read the body are the module's business.
+   *
+   * Deliberately GET-only. A model turn must go through {@link chat} so it is
+   * journaled; this is for metadata, never for inference.
    */
-  listModels?(request: { provider: string }, signal?: AbortSignal): Promise<readonly ModelInfo[]>
+  get?(request: ProviderGetRequest, signal?: AbortSignal): Promise<ProviderGetResponse>
 }
 
 export interface ToolService {
