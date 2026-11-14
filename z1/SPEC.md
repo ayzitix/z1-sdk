@@ -395,7 +395,10 @@ export async function runGraph(options: RunOptions): Promise<RunResult>
    `flow.map`, `memory.context`) sets it. Policy is resolved **before** the
    cache lookup, so a `deny` node can never be satisfied by another instance's
    cached output.
-10. Timeout: `definition.timeoutMs` (default 120_000) aborts the node.
+10. Timeout: `definition.timeoutMs` (default 120_000) aborts the node. A
+    container node (`flow.loop`, `flow.map`, `graph.subgraph`) sets a larger
+    one, because it runs whole child graphs inside a single node execution and
+    the per-node default would cut a legitimate long turn short.
 11. Retry: `definition.retry` retries on thrown errors with linear backoff.
 12. Approval: effective policy = node instance `autonomy` ?? definition
     `autonomy` ?? `{ mode: 'auto' }`. Before `execute`, `ask` calls

@@ -19,6 +19,9 @@ const subgraph = defineNode({
   },
   // A nested graph may write files or call tools.
   cacheable: false,
+  // A container: its own nodes are timed individually, so the 120 s default
+  // would cut a legitimate sub-run short.
+  timeoutMs: 1_800_000,
   inputs: [flowPort('in'), dataPort('input', jsonValue, false)],
   outputs: [flowPort('out'), dataPort('output', jsonValue)],
   execute: async (ctx) => {

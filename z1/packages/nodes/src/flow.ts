@@ -61,6 +61,10 @@ const loop = defineNode({
     body: { schemaVersion: 1, id: 'body', title: 'loop body', nodes: [], edges: [] },
     maxIterations: 3,
   },
+  // This node runs the whole body per iteration, so the executor's 120 s
+  // per-node default would kill a long agent turn mid-work. The run is bounded
+  // by `maxIterations` and by cancellation, not by a wall clock here.
+  timeoutMs: 3_600_000,
   inputs: [flowPort('in'), dataPort('seed', jsonValue, false)],
   outputs: [
     flowPort('out'),
@@ -118,6 +122,9 @@ const map = defineNode({
   defaultConfig: {
     body: { schemaVersion: 1, id: 'body', title: 'map body', nodes: [], edges: [] },
   },
+  // One body run per item, sequential: a tool map of five calls can legitimately
+  // exceed two minutes even when every call fits its own timeout.
+  timeoutMs: 1_800_000,
   // Same as the loop: each item may have a side effect.
   cacheable: false,
   inputs: [flowPort('in'), dataPort('items', z.array(jsonValue))],

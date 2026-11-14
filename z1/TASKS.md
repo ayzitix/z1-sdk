@@ -203,6 +203,9 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   the loop body, so in the default template `over` is estimate-only. The window
   is a config value with no provider lookup yet. Read ledger, notes file and repo
   map are the next steps.
+- [x] Container nodes (`flow.loop`, `flow.map`, `graph.subgraph`) declare their
+      own timeout: the 120 s per-node default killed a real agent turn at two
+      minutes while it was making progress.
 - Known: adding the context nodes changed the graph digest, so runs journaled
   before this commit fail `RESUME_MISMATCH`. Resuming an old run needs the old
   graph, which is the intended behaviour of the digest check.
