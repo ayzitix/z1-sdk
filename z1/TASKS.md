@@ -154,3 +154,19 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - Known: a service-only child may still start if the runtime was constructed
   with services enabled and a later run disables them; module-node approvals
   resolve to the latest live run (ambiguous for concurrent runs).
+
+## Post-M11 — audit fixes
+
+- [x] Cache key includes the execution path; `flow.map` items and two tool
+  nodes with equal arguments no longer collapse into one call.
+- [x] Side-effect nodes declare `cacheable: false` (`tool.call`, `llm.chat`,
+  `tools.list`, `graph.subgraph`, `flow.loop`, `flow.map`, `memory.context`),
+  guarded by a smoke test.
+- [x] `propagateFlow` follows SPEC §6.3 for `core.output`: a custom definition
+  with a flow port advances the spine, and replay does the same.
+- [x] `PRAGMA busy_timeout = 5000` so two processes can share `.z1/runs.db`.
+- [x] `recent` and the ancestor/sibling sections read `ownedEvents`; an
+  inherited step is no longer repeated in the context envelope.
+- [x] Forking by a path that ran in an ancestor names the owning run.
+- [x] `graphDigest` ignores the display-only `title`.
+- [x] `checkFsReal` resolves symlinks; `ctx.net` re-checks every redirect hop.

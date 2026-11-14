@@ -1407,7 +1407,16 @@ async function forkCommand(args: readonly string[], io: CliIO): Promise<number> 
     } else {
       const seq = nodeStartedSeq(journal.ownedEvents(sourceId), at)
       if (seq === undefined) {
-        io.stderr(`no node.started event with path "${at}" in run "${sourceId}"\n`)
+        // `z1 tree` and the canvas timeline show the merged chain, so a path
+        // inherited from an ancestor is visible but not this run's to fork.
+        const owner = journal
+          .read(sourceId)
+          .find((event) => isNodeStartedEvent(event) && event.path === at)?.runId
+        io.stderr(
+          owner === undefined || owner === sourceId
+            ? `no node.started event with path "${at}" in run "${sourceId}"\n`
+            : `path "${at}" ran in ancestor run "${owner}"; fork that run instead\n`,
+        )
         return 1
       }
       // The forking run must re-execute the node, so fork before it started.

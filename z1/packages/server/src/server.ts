@@ -592,7 +592,17 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
           (item) => item.event.type === 'node.started' && item.event.path === nodePath,
         )
         if (started === undefined) {
-          throw invalidParams(`no node.started event for path "${nodePath}"`, { nodePath })
+          // A path visible in the merged timeline may belong to an ancestor:
+          // say so instead of claiming it does not exist.
+          const owner = journal
+            .read(runId)
+            .find((event) => event.type === 'node.started' && event.path === nodePath)?.runId
+          throw invalidParams(
+            owner === undefined || owner === runId
+              ? `no node.started event for path "${nodePath}"`
+              : `path "${nodePath}" ran in ancestor run "${owner}"; fork that run instead`,
+            { nodePath, ...(owner === undefined ? {} : { ownerRunId: owner }) },
+          )
         }
         // The fork happens just before that node ran.
         forkSeq = started.seq - 1
