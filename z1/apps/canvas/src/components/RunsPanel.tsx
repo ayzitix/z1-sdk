@@ -47,6 +47,15 @@ function describeEvent(event: RunEvent): EventRow {
       return { label: `approval.requested · ${event.request.action}`, path: event.path, at: null }
     case 'approval.decided':
       return { label: `approval.decided · ${event.decision}`, path: event.path, at: null }
+    case 'llm.request':
+      return { label: `llm.request · ${event.provider}/${event.model}`, path: event.path, at: event.at }
+    case 'llm.response':
+      return {
+        label: `llm.response · ${event.stopReason} · ${String(event.latencyMs)}ms`,
+        path: event.path,
+        at: event.at,
+        status: 'completed',
+      }
   }
 }
 
