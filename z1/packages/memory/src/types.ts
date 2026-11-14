@@ -1,4 +1,4 @@
-import type { RunRecord } from '@z1/journal'
+import type { RunRecord, SequencedEvent } from '@z1/journal'
 import type { Json, MemoryEnvelope, MemoryService } from '@z1/node'
 import type { RunEvent } from '@z1/runtime'
 
@@ -8,6 +8,12 @@ import type { RunEvent } from '@z1/runtime'
  */
 export interface MemoryJournal {
   read(runId: string): readonly RunEvent[]
+  /**
+   * The run's own rows without the inherited prefix. Optional so a minimal
+   * journal can still drive memory; without it `recent` falls back to the
+   * merged chain and may repeat ancestor steps.
+   */
+  ownedEvents?(runId: string): readonly SequencedEvent[]
   getRun(runId: string): RunRecord | undefined
   listRuns(): readonly RunRecord[]
 }

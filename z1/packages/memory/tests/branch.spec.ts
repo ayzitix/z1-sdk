@@ -87,6 +87,21 @@ describe('BranchMemory nodes', () => {
     expect(after.recent('run').map((node) => node.path)).toEqual(['loop/1/chat', 'done'])
   })
 
+  test('recent lists only the run own steps, not inherited ones', async () => {
+    const { journal, memory } = tree()
+    journal.append(completed('childA', 'step', { text: 'own step' }, 4))
+
+    // `nodes` is the lineage view; `recent` feeds the context envelope, where
+    // ancestors are already rendered in their own section.
+    expect(memory.nodes('childA').map((node) => node.path)).toEqual(['plan', 'chat', 'step'])
+    expect(memory.recent('childA').map((node) => node.path)).toEqual(['step'])
+
+    const envelope = await memory.buildContext({ runId: 'childA' })
+    const recent = envelope.text.split('## Recent steps')[1] ?? ''
+    expect(recent).toContain('step')
+    expect(recent).not.toContain('root answer')
+  })
+
   test('recent keeps one entry per loop iteration path', () => {
     const journal = new SqliteJournal(':memory:')
     journal.createRun(runRecord('run'))
@@ -111,7 +126,8 @@ describe('BranchMemory nodes', () => {
 
 describe('BranchMemory buildContext', () => {
   test('renders ancestor, sibling and recent sections with a system message', async () => {
-    const { memory } = tree()
+    const { journal, memory } = tree()
+    journal.append(completed('childA', 'step', { text: 'own step' }, 4))
 
     const envelope = await memory.buildContext({ runId: 'childA' })
 

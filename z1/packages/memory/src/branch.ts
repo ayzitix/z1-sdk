@@ -1,4 +1,5 @@
 import type { RunRecord } from '@z1/journal'
+import type { RunEvent } from '@z1/runtime'
 import type { MemoryContextRequest, MemoryEnvelope, MemoryService } from '@z1/node'
 
 import type {
@@ -38,6 +39,24 @@ function truncate(text: string, limit: number): string {
 
 function snippet(outputs: Record<string, unknown>): string {
   return truncate(JSON.stringify(outputs), OUTPUT_SNIPPET)
+}
+
+/** Fold completed steps into one entry per path, last execution winning. */
+function collect(events: readonly RunEvent[]): MemoryNode[] {
+  const latest = new Map<string, MemoryNode>()
+  for (const event of events) {
+    if (event.type !== 'node.completed') continue
+    // Delete first so re-entry moves the path to the end of the iteration
+    // order: a loop body repeats paths, and only its last execution counts.
+    latest.delete(event.path)
+    latest.set(event.path, {
+      path: event.path,
+      type: event.nodeId,
+      outputs: event.outputs,
+      at: event.at,
+    })
+  }
+  return [...latest.values()]
 }
 
 function render(entries: readonly Entry[]): string {
@@ -99,25 +118,25 @@ export class BranchMemory implements MemoryService {
 
   /** Completed steps of the run's lineage, deduped by path (last wins). */
   nodes(runId: string): MemoryNode[] {
-    const latest = new Map<string, MemoryNode>()
-    for (const event of this.#journal.read(runId)) {
-      if (event.type !== 'node.completed') continue
-      // Delete first so re-entry moves the path to the end of the iteration
-      // order: a loop body repeats paths, and only its last execution counts.
-      latest.delete(event.path)
-      latest.set(event.path, {
-        path: event.path,
-        type: event.nodeId,
-        outputs: event.outputs,
-        at: event.at,
-      })
-    }
-    return [...latest.values()]
+    return collect(this.#journal.read(runId))
+  }
+
+  /**
+   * Completed steps of this run only, with inherited ancestor steps excluded.
+   *
+   * Context assembly already lists ancestors separately, so using the merged
+   * `nodes()` here would repeat every ancestor step in "recent" and spend the
+   * budget twice.
+   */
+  ownNodes(runId: string): MemoryNode[] {
+    const owned = this.#journal.ownedEvents?.(runId)
+    if (owned === undefined) return collect(this.#journal.read(runId))
+    return collect(owned.map((entry) => entry.event))
   }
 
   recent(runId: string, limit = this.#recentNodes): MemoryNode[] {
     if (limit <= 0) return []
-    return this.nodes(runId).slice(-limit)
+    return this.ownNodes(runId).slice(-limit)
   }
 
   async buildContext(request: MemoryContextRequest): Promise<MemoryEnvelope> {
@@ -130,7 +149,7 @@ export class BranchMemory implements MemoryService {
 
     const ancestors = this.ancestry(run.runId).slice(0, -1)
     const spine = ancestors.map((ancestor) => {
-      const steps = this.nodes(ancestor.runId).slice(-ANCESTOR_NODES)
+      const steps = this.ownNodes(ancestor.runId).slice(-ANCESTOR_NODES)
       return steps
         .map((step) => `${ancestor.runId} ${step.type} ${step.path}: ${snippet(step.outputs)}`)
         .join('\n')
@@ -138,7 +157,7 @@ export class BranchMemory implements MemoryService {
     const siblings = this.siblings(run.runId).map(
       (sibling) =>
         `↳ ${sibling.runId} (forked at ${String(sibling.forkSeq ?? 0)}, ${sibling.status}): ${
-          this.nodes(sibling.runId).length
+          this.ownNodes(sibling.runId).length
         } nodes`,
     )
     const recent = this.recent(run.runId, recentLimit).map((step) => ({
