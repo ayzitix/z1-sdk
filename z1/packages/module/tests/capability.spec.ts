@@ -1,7 +1,10 @@
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import {
   checkFs,
+  checkFsReal,
   checkNet,
   checkProcess,
   matchPath,
@@ -78,6 +81,73 @@ describe('checkFs', () => {
 
     const escapingPattern: ModuleCapabilities = { fs: { read: ['${moduleDir}/data/../secret'] } }
     expect(checkFs(escapingPattern, 'read', join(moduleDir, 'secret'), moduleDir).ok).toBe(false)
+  })
+})
+
+describe('checkFsReal', () => {
+  function fixture(): { root: string; moduleDir: string; outside: string } {
+    const root = mkdtempSync(join(tmpdir(), 'z1-fsreal-'))
+    const moduleDir = join(root, 'mod')
+    mkdirSync(join(moduleDir, 'data', 'sub'), { recursive: true })
+    const outside = join(root, 'outside')
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(moduleDir, 'data', 'a.txt'), 'inside')
+    writeFileSync(join(outside, 'secret.txt'), 'outside')
+    return { root, moduleDir, outside }
+  }
+
+  const capabilities: ModuleCapabilities = {
+    fs: { read: ['${moduleDir}/data/**'], write: ['${moduleDir}/out/**'] },
+  }
+
+  test('allows real paths inside the granted tree', () => {
+    const { moduleDir } = fixture()
+    expect(checkFsReal(capabilities, 'read', join(moduleDir, 'data', 'a.txt'), moduleDir)).toEqual({
+      ok: true,
+    })
+  })
+
+  test('denies a symlink that escapes the granted tree', () => {
+    const { moduleDir, outside } = fixture()
+    symlinkSync(outside, join(moduleDir, 'data', 'link'))
+
+    // The lexical check cannot see the link, the real one must.
+    const path = join(moduleDir, 'data', 'link', 'secret.txt')
+    expect(checkFs(capabilities, 'read', path, moduleDir).ok).toBe(true)
+    expect(checkFsReal(capabilities, 'read', path, moduleDir).ok).toBe(false)
+  })
+
+  test('denies a symlinked directory used as a write target', () => {
+    const { moduleDir, outside } = fixture()
+    symlinkSync(outside, join(moduleDir, 'out'))
+
+    expect(checkFsReal(capabilities, 'write', join(moduleDir, 'out', 'new.txt'), moduleDir).ok).toBe(
+      false,
+    )
+  })
+
+  test('allows a symlink that stays inside the granted tree', () => {
+    const { moduleDir } = fixture()
+    symlinkSync(join(moduleDir, 'data', 'sub'), join(moduleDir, 'data', 'inner'))
+    writeFileSync(join(moduleDir, 'data', 'sub', 'b.txt'), 'b')
+
+    expect(
+      checkFsReal(capabilities, 'read', join(moduleDir, 'data', 'inner', 'b.txt'), moduleDir),
+    ).toEqual({ ok: true })
+  })
+
+  test('keeps the lexical denials', () => {
+    const { moduleDir } = fixture()
+    expect(checkFsReal(capabilities, 'read', 'data/../a.txt', moduleDir).ok).toBe(false)
+    expect(checkFsReal(capabilities, 'read', join(moduleDir, 'data', 'a.txt'), moduleDir).ok).toBe(
+      true,
+    )
+    expect(checkFsReal(capabilities, 'write', join(moduleDir, 'data', 'a.txt'), moduleDir).ok).toBe(
+      false,
+    )
+    expect(checkFsReal(undefined, 'read', join(moduleDir, 'data', 'a.txt'), moduleDir).ok).toBe(
+      false,
+    )
   })
 })
 

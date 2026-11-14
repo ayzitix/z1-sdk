@@ -28,6 +28,7 @@ export type { AuditAppend, AuditEntry } from './audit.ts'
 export { AuditChainError, AuditLog, GENESIS_HASH, auditEntryHash } from './audit.ts'
 export {
   checkFs,
+  checkFsReal,
   checkLlm,
   checkNet,
   checkProcess,

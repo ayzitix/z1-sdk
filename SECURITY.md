@@ -26,8 +26,19 @@ boundary legible rather than absolute.
   the host's reach. Approving one is a statement that you trust its code.
 - **Network is not a syscall boundary.** Node's permission model does not block
   direct sockets or `fetch` inside a worker. The supported path is `ctx.net`,
-  which enforces the manifest's host allowlist. Untrusted modules still need an
+  which enforces the manifest's host allowlist on **every redirect hop**;
+  redirects are followed by the host, never by `fetch`, so an allowlisted host
+  cannot bounce a request to another one. Untrusted modules still need an
   OS-level sandbox (container, netns, seccomp) that z1 does not provide.
+- **Filesystem grants are resolved against symlinks.** `ctx.fs` compares the
+  real target of the path with the real target of the granted base, so a symlink
+  inside a granted directory cannot widen the grant. A grant on `${moduleDir}` is
+  anchored to the module directory itself: a symlinked subdirectory does not
+  extend it. `fs.stat` reports a link without following it.
+- **`process.spawn` is code execution, not command isolation.** Allowing a
+  binary by basename allows everything that binary can do; for example
+  `git -c alias.x='!sh' x` runs a shell. Grant exact argv patterns, not `*`, and
+  treat a `git`/`node`/`sh` grant as full local code execution.
 - **Tools are not shipped here.** The SDK keeps the tools service contract and
   brokered capabilities; concrete tools live in a separate repository.
 - **Secrets** are resolved by the host and are never passed into a worker. Keep

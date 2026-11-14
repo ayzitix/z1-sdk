@@ -174,6 +174,71 @@ test('net requests are denied unless the host is declared', async () => {
   }
 }, 20_000)
 
+test('a redirect to a host outside the allowlist is denied', async () => {
+  const probes = freshProbes()
+  // Only `localhost` is granted; the redirect points at 127.0.0.1.
+  const worker = createWorker(probes, { capabilities: { net: { hosts: ['localhost'] } } })
+  await worker.start()
+
+  let port = 0
+  const server: Server = createServer((request, response) => {
+    if (request.url === '/redir') {
+      response.writeHead(302, { location: `http://127.0.0.1:${port}/secret` })
+      response.end()
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/plain' })
+    response.end('INTERNAL-ONLY')
+  })
+  await new Promise<void>((settle) => server.listen(0, settle))
+  try {
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('no server address')
+    port = address.port
+
+    await expect(
+      worker.execute('com.example.echo.fetcher', {}, { url: `http://localhost:${port}/redir` }, null),
+    ).rejects.toThrow(/capability denied for net\.request/)
+  } finally {
+    await new Promise<void>((settle) => server.close(() => settle()))
+  }
+}, 20_000)
+
+test('a redirect between allowlisted hosts is followed', async () => {
+  const probes = freshProbes()
+  const worker = createWorker(probes, {
+    capabilities: { net: { hosts: ['localhost', '127.0.0.1'] } },
+  })
+  await worker.start()
+
+  let port = 0
+  const server: Server = createServer((request, response) => {
+    if (request.url === '/redir') {
+      response.writeHead(302, { location: `http://127.0.0.1:${port}/final` })
+      response.end()
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/plain' })
+    response.end('final body')
+  })
+  await new Promise<void>((settle) => server.listen(0, settle))
+  try {
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('no server address')
+    port = address.port
+
+    const outputs = await worker.execute(
+      'com.example.echo.fetcher',
+      {},
+      { url: `http://localhost:${port}/redir` },
+      null,
+    )
+    expect(outputs).toEqual({ status: 200, body: 'final body' })
+  } finally {
+    await new Promise<void>((settle) => server.close(() => settle()))
+  }
+}, 20_000)
+
 test('llm.chat is forwarded to the host service with deltas', async () => {
   const probes = freshProbes()
   const seen: string[] = []

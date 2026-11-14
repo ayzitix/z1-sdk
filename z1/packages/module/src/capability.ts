@@ -1,4 +1,5 @@
-import { basename, isAbsolute, normalize, resolve, sep } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import type { ModuleCapabilities } from './types.ts'
 
 export type CapabilityCheck = { ok: true } | { ok: false; reason: string }
@@ -7,6 +8,12 @@ const PARENT_SEGMENT = /(?:^|[\\/])\.\.(?:[\\/]|$)/
 
 function toPosix(path: string): string {
   return path.split(sep).join('/')
+}
+
+/** `normalize` keeps a trailing slash; capability matching compares clean paths. */
+function cleanPath(path: string): string {
+  const trimmed = path.replace(/\/+$/, '')
+  return trimmed.length === 0 ? '/' : trimmed
 }
 
 function escapeRegex(character: string): string {
@@ -89,20 +96,115 @@ export function checkFs(
   }
 
   const moduleRoot = resolve(moduleDir)
-  const target = toPosix(normalize(resolve(moduleRoot, path)))
+  const target = cleanPath(toPosix(normalize(resolve(moduleRoot, path))))
 
   for (const pattern of patterns) {
     if (pattern.trim().length === 0) continue
     if (hasParentSegment(pattern)) continue
 
     const expanded = resolveCapabilityPath(pattern, moduleRoot)
-    const absolute = toPosix(
-      normalize(isAbsolute(expanded) ? expanded : resolve(moduleRoot, expanded)),
+    const absolute = cleanPath(
+      toPosix(normalize(isAbsolute(expanded) ? expanded : resolve(moduleRoot, expanded))),
     )
     if (matchPath(absolute, target)) return { ok: true }
   }
 
   return deny(`fs.${direction} path is outside the granted patterns: ${target}`)
+}
+
+/**
+ * Resolve `path` the way the filesystem will: realpath of the longest existing
+ * ancestor, then the not-yet-existing tail appended unchanged.
+ *
+ * A missing path is normal for `fs.write`, so it cannot be an error. Returns
+ * `undefined` only when no ancestor can be resolved at all.
+ */
+function resolveReal(path: string): string | undefined {
+  let current = path
+  const missing: string[] = []
+
+  for (;;) {
+    try {
+      const real = realpathSync.native(current)
+      return missing.length === 0 ? real : join(real, ...missing.reverse())
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return undefined
+      missing.push(basename(current))
+      current = parent
+    }
+  }
+}
+
+/**
+ * {@link checkFs} plus symlink resolution.
+ *
+ * The lexical check alone can be widened by a symlink inside a granted
+ * directory: `data/link -> /etc` passes a `data/**` grant. This variant resolves
+ * the real target of the path and requires it to stay under the real target of
+ * the pattern's literal base.
+ *
+ * The literal base is anchored to the **real** module directory rather than
+ * resolved itself, so a grant `${moduleDir}/out/**` where `out` is a symlink
+ * does not become a grant for the link's destination. Symlinks that stay inside
+ * the granted tree remain allowed, and a write to a not-yet-existing file is
+ * checked through its nearest existing ancestor.
+ */
+export function checkFsReal(
+  capabilities: ModuleCapabilities | undefined,
+  direction: 'read' | 'write',
+  path: string,
+  moduleDir: string,
+): CapabilityCheck {
+  const lexical = checkFs(capabilities, direction, path, moduleDir)
+  if (!lexical.ok) return lexical
+
+  const patterns = capabilities?.fs?.[direction] ?? []
+  const moduleRoot = cleanPath(toPosix(normalize(resolve(moduleDir))))
+  const realModuleRoot = resolveReal(moduleRoot)
+  if (realModuleRoot === undefined) return deny(`cannot resolve the module directory: ${moduleDir}`)
+
+  const target = cleanPath(toPosix(normalize(resolve(moduleRoot, path))))
+  const realTarget = resolveReal(target)
+  if (realTarget === undefined) return deny(`cannot resolve the path: ${path}`)
+
+  /** The literal base, with any `moduleDir` part mapped onto its real path. */
+  const anchor = (pattern: string): string | undefined => {
+    const wildcard = pattern.search(/[*?[\]]/)
+    const literal = wildcard < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', wildcard) + 1)
+    if (literal.length === 0) return undefined
+
+    const expanded = resolveCapabilityPath(literal, moduleRoot)
+    const absolute = cleanPath(
+      toPosix(normalize(isAbsolute(expanded) ? expanded : resolve(moduleRoot, expanded))),
+    )
+    if (absolute === moduleRoot) return realModuleRoot
+    if (absolute.startsWith(moduleRoot + '/')) {
+      return toPosix(join(realModuleRoot, absolute.slice(moduleRoot.length + 1)))
+    }
+    // An absolute grant outside the module directory is the operator's choice;
+    // resolve it so its own symlinks are honoured.
+    return resolveReal(absolute)
+  }
+
+  let denied = `fs.${direction} path resolves outside the granted patterns: ${path}`
+  for (const pattern of patterns) {
+    if (pattern.trim().length === 0 || hasParentSegment(pattern)) continue
+
+    const expanded = resolveCapabilityPath(pattern, moduleRoot)
+    const absolute = cleanPath(
+      toPosix(normalize(isAbsolute(expanded) ? expanded : resolve(moduleRoot, expanded))),
+    )
+    if (!matchPath(absolute, target)) continue
+
+    const base = anchor(pattern)
+    if (base === undefined) return deny(`capability pattern has no base directory: ${pattern}`)
+
+    if (realTarget === base || realTarget.startsWith(base + '/')) return { ok: true }
+    denied = `fs.${direction} path resolves through a symlink outside the granted pattern ${pattern}: ${realTarget}`
+  }
+
+  return deny(denied)
 }
 
 /** Gate a network request. Host matching is case-insensitive and glob-aware. */

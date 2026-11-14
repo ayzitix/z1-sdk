@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   checkFs,
+  checkFsReal,
   checkLlm,
   checkNet,
   checkProcess,
@@ -54,6 +55,8 @@ const DEFAULT_TIMEOUT_MS = 120_000
 export const DEFAULT_SERVICE_CALL_TIMEOUT_MS = 300_000
 const MAX_NET_BODY_BYTES = 1024 * 1024
 const FETCH_TIMEOUT_MS = 30_000
+/** Redirects are re-checked per hop, so the limit also bounds allowlist probing. */
+const MAX_REDIRECTS = 5
 
 const LEVELS: readonly WorkerLogLevel[] = ['debug', 'info', 'warn', 'error']
 const PORT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/
@@ -1353,7 +1356,7 @@ export class ModuleWorker {
         return this.#services.tools.list()
       case 'fs.read': {
         const path = this.#requirePath(args, 'fs.read')
-        const check = checkFs(this.#capabilities, 'read', path, this.#moduleDir)
+        const check = checkFsReal(this.#capabilities, 'read', path, this.#moduleDir)
         if (!check.ok) throw this.#denied(nodeId, 'fs.read', path, check.reason)
         return this.#services.fs.read(path)
       }
@@ -1361,13 +1364,13 @@ export class ModuleWorker {
         const path = this.#requirePath(args, 'fs.write')
         const data = isRecord(args) ? args['data'] : undefined
         if (typeof data !== 'string') throw new Error('fs.write requires string data')
-        const check = checkFs(this.#capabilities, 'write', path, this.#moduleDir)
+        const check = checkFsReal(this.#capabilities, 'write', path, this.#moduleDir)
         if (!check.ok) throw this.#denied(nodeId, 'fs.write', path, check.reason)
         return this.#services.fs.write(path, data)
       }
       case 'fs.list': {
         const path = this.#requirePath(args, 'fs.list')
-        const check = checkFs(this.#capabilities, 'read', path, this.#moduleDir)
+        const check = checkFsReal(this.#capabilities, 'read', path, this.#moduleDir)
         if (!check.ok) throw this.#denied(nodeId, 'fs.list', path, check.reason)
         return this.#listDirectory(path)
       }
@@ -1386,7 +1389,7 @@ export class ModuleWorker {
           throw this.#denied(nodeId, 'process.run', request.command, allowed.reason)
         }
         if (request.cwd !== undefined) {
-          const cwdCheck = checkFs(this.#capabilities, 'read', request.cwd, this.#moduleDir)
+          const cwdCheck = checkFsReal(this.#capabilities, 'read', request.cwd, this.#moduleDir)
           if (!cwdCheck.ok) {
             throw this.#denied(
               nodeId,
@@ -1519,23 +1522,78 @@ export class ModuleWorker {
       throw new Error(`net.request only supports http(s), not "${parsed.protocol}"`)
     }
 
-    const check = checkNet(this.#capabilities, parsed.hostname)
-    if (!check.ok) throw this.#denied(nodeId, 'net.request', parsed.hostname, check.reason)
+    let current = parsed
+    let method = typeof args['method'] === 'string' ? args['method'].toUpperCase() : 'GET'
+    let body = typeof args['body'] === 'string' ? args['body'] : undefined
+    const originalHost = parsed.hostname.toLowerCase()
+    const headers = this.#requestHeaders(args['headers'])
 
-    const init: RequestInit = {
-      method: typeof args['method'] === 'string' ? args['method'].toUpperCase() : 'GET',
-      headers: this.#requestHeaders(args['headers']),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    }
-    if (typeof args['body'] === 'string') init.body = args['body']
+    // Redirects are followed by hand: `fetch` follows them internally, which
+    // would let an allowlisted host bounce the request to any other host and
+    // return its body. Every hop is checked against the same allowlist.
+    for (let hop = 0; ; hop += 1) {
+      const check = checkNet(this.#capabilities, current.hostname)
+      if (!check.ok) {
+        throw this.#denied(nodeId, 'net.request', current.hostname, check.reason)
+      }
 
-    const response = await fetch(parsed, init)
-    const { body, truncated } = await readBody(response)
-    return {
-      status: response.status,
-      headers: headersRecord(response.headers),
-      body,
-      truncated,
+      const hopHeaders = { ...headers }
+      if (current.hostname.toLowerCase() !== originalHost) {
+        for (const name of Object.keys(hopHeaders)) {
+          const lower = name.toLowerCase()
+          if (lower === 'authorization' || lower === 'cookie' || lower === 'proxy-authorization') {
+            delete hopHeaders[name]
+          }
+        }
+      }
+
+      const init: RequestInit = {
+        method,
+        headers: hopHeaders,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      }
+      if (body !== undefined) init.body = body
+
+      const response = await fetch(current, init)
+
+      const location = response.headers.get('location')
+      const isRedirect =
+        response.status === 301 ||
+        response.status === 302 ||
+        response.status === 303 ||
+        response.status === 307 ||
+        response.status === 308
+      if (!isRedirect || location === null) {
+        const { body: text, truncated } = await readBody(response)
+        return {
+          status: response.status,
+          headers: headersRecord(response.headers),
+          body: text,
+          truncated,
+        }
+      }
+
+      if (hop >= MAX_REDIRECTS) {
+        throw new Error(`net.request exceeded ${MAX_REDIRECTS} redirects`)
+      }
+
+      let next: URL
+      try {
+        next = new URL(location, current)
+      } catch {
+        throw new Error(`net.request received an invalid redirect location: ${location}`)
+      }
+      if (next.protocol !== 'http:' && next.protocol !== 'https:') {
+        throw new Error(`net.request cannot redirect to "${next.protocol}"`)
+      }
+
+      // 303 always becomes GET; 301/302 historically do for non-GET/HEAD.
+      if (response.status === 303 || (method !== 'GET' && method !== 'HEAD' && response.status !== 307 && response.status !== 308)) {
+        method = 'GET'
+        body = undefined
+      }
+      current = next
     }
   }
 
