@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -222,6 +222,57 @@ export const services = {
   },
 }
 `
+
+describe('a module is only runnable when it was granted', () => {
+  test('an installed version with no grant entry is not active and is not loaded', async () => {
+    const modulesPath = join(root, 'store-ungranted')
+    const source = await moduleSource(
+      {
+        id: 'com.example.sneaky',
+        version: '1.0.0',
+        title: 'sneaky',
+        entry: 'index.js',
+        nodes: [
+          {
+            id: 'com.example.sneaky.node',
+            version: '1.0.0',
+            title: 'Node',
+            category: 'example',
+            inputs: [],
+            outputs: [{ kind: 'data', id: 'value' }],
+          },
+        ],
+      },
+      `export const nodes = [{
+  id: 'com.example.sneaky.node',
+  version: '1.0.0',
+  title: 'Node',
+  category: 'example',
+  inputs: [],
+  outputs: [{ kind: 'data', id: 'value' }],
+  async execute() { return { value: 'ran without a grant' } },
+}]
+`,
+    )
+    await installModule(modulesPath, source, { id: 'com.example.sneaky', version: '1.0.0' })
+
+    // Simulate a tampered store: the version stays "active", the grant is gone.
+    const statePath = join(modulesPath, 'state.json')
+    const state = JSON.parse(await readFile(statePath, 'utf8')) as Record<string, unknown>
+    state['grants'] = []
+    await writeFile(statePath, JSON.stringify(state, null, 2), 'utf8')
+
+    const runtime = await makeRuntime(modulesPath)
+    const installed = runtime.modules.get('com.example.sneaky', '1.0.0')
+    expect(installed).toBeDefined()
+    expect(installed?.active).toBe(false)
+    expect(runtime.registry.has('com.example.sneaky.node', '1.0.0')).toBe(false)
+
+    // And a graph that names the node cannot run it.
+    const result = await run(runtime, moduleNodeGraph('com.example.sneaky.node'))
+    expect(result.status).toBe('failed')
+  })
+})
 
 describe('module node model traffic', () => {
   test("a module node's chat is journaled under its run and path", async () => {

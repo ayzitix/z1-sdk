@@ -357,13 +357,20 @@ export class ModuleStore {
     return { manifest, integrity, installedAt }
   }
 
-  private toInstalled(record: InstalledRecord, grant: ModuleGrant): InstalledModule {
+  private toInstalled(
+    record: InstalledRecord,
+    grant: ModuleGrant,
+    granted: boolean,
+  ): InstalledModule {
     const { id: moduleId, version } = record.manifest
     return {
       manifest: record.manifest,
       integrity: record.integrity,
       directory: this.installedDirectory(moduleId, version),
-      active: this.state.active[moduleId] === version,
+      // A version the user never approved is not runnable, even if `state.json`
+      // marks it active. Without this, writing a directory plus an `active`
+      // entry was enough to execute code with no grant, no prompt and no audit.
+      active: granted && this.state.active[moduleId] === version,
       installedAt: record.installedAt,
       grant,
     }
@@ -376,8 +383,9 @@ export class ModuleStore {
       const moduleRoot = join(this.modulesDir, moduleId)
       for (const version of directories(moduleRoot)) {
         const record = this.readInstalledRecord(moduleId, version)
+        const stored = this.findGrant(moduleId, version)
         const grant =
-          this.findGrant(moduleId, version) ??
+          stored ??
           ({
             moduleId,
             version,
@@ -387,7 +395,9 @@ export class ModuleStore {
             grantedAt: record.installedAt,
             futureVersions: false,
           } satisfies ModuleGrant)
-        modules.push(this.toInstalled(record, grant))
+        // The synthetic grant only exists so `module list` can show the version;
+        // it must not make the module active.
+        modules.push(this.toInstalled(record, grant, stored !== undefined))
       }
     }
 
@@ -621,7 +631,7 @@ export class ModuleStore {
         )
       }
       const savedGrant = this.persistGrant(moduleId, version, integrity, grantInput)
-      return this.toInstalled(record, savedGrant)
+      return this.toInstalled(record, savedGrant, true)
     }
 
     mkdirSync(join(this.modulesDir, moduleId), { recursive: true })
@@ -651,7 +661,7 @@ export class ModuleStore {
       integrity,
       detail: { directory, services: grantInput.services },
     })
-    return this.toInstalled(record, savedGrant)
+    return this.toInstalled(record, savedGrant, true)
   }
 
   activate(moduleId: string, version?: string): InstalledModule {
