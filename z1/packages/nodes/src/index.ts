@@ -1,4 +1,6 @@
 import { NodeRegistry, type NodeDefinition } from '@z1/node'
+
+import { contextNodes } from './context.ts'
 import {
   coreNodes,
   coreConcat,
@@ -29,6 +31,7 @@ export const PACKAGE = '@z1/nodes'
  */
 export const builtinNodes: readonly NodeDefinition[] = [
   ...coreNodes,
+  ...contextNodes,
   ...flowNodes,
   ...graphNodes,
   ...llmNodes,
@@ -43,6 +46,12 @@ export function createBuiltinRegistry(): NodeRegistry {
   return registry
 }
 
+export {
+  contextNodes,
+  contextBudget,
+  contextClip,
+  estimateMessages,
+} from './context.ts'
 export {
   coreNodes,
   coreConcat,

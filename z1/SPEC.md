@@ -450,8 +450,6 @@ dedupe; the hash is also the cassette's matching key. Credential-shaped fields
 `Z1_RECORD_LLM=full|hashes|off` (default `full`) selects blobs, events only, or
 nothing. The path and attempt arrive through an `AsyncLocalStorage` scope set by
 the executor around `definition.execute`, so the node contract is unchanged.
-It reaches a host-resolved service; `ctx.llm.chat` and `ctx.llm.get` made inside
-a worker module are not attributed to a run yet and are therefore not recorded.
 A turn that throws appends `llm.failed` with the same path and attempt, so a
 journal never shows a request without an outcome.
 
@@ -477,6 +475,8 @@ All ids are namespaced `z1.<name>`.
 | id | inputs | outputs | notes |
 | --- | --- | --- | --- |
 | `z1.core.input` | — | `value` (data Json), `out` (flow) | root; value = `ctx.input` |
+| `z1.ctx.budget` | `messages` (data Json[]), `usage` (data Json) | `messages`, `tokens`, `window`, `triggerAt`, `ratio`, `over` (data) | observe-only: estimates the transcript, drops nothing; config `{ contextWindow, reserveTokens, threshold, charsPerToken }` |
+| `z1.ctx.clip` | `in` (flow), `value` (data Json), `name` (data string) | `value`, `truncated`, `originalChars`, `spillPath` (data), `out` (flow) | keeps head+tail, writes the full text under `.z1/out/<runId>/`, marks the cut; config `{ maxChars, headRatio, spill, directory }` |
 | `z1.core.output` | `in` (flow), `value` (data Json) | — | config `{ port?: string }` |
 | `z1.core.const` | — | `value` (data Json) | root; config `{ value: Json }` |
 | `z1.core.template` | `vars` (data Json, optional) | `text` (data string) | `{{a.b}}` lookup |

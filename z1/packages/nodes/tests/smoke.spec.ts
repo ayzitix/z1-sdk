@@ -21,6 +21,8 @@ test('registers every SPEC §7 node at 1.0.0', () => {
     'z1.core.output',
     'z1.core.template',
     'z1.core.value',
+    'z1.ctx.budget',
+    'z1.ctx.clip',
     'z1.flow.if',
     'z1.flow.loop',
     'z1.flow.map',

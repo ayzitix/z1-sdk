@@ -171,6 +171,22 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] `graphDigest` ignores the display-only `title`.
 - [x] `checkFsReal` resolves symlinks; `ctx.net` re-checks every redirect hop.
 
+## M13 — context hygiene, step 1-2
+
+- [x] `z1.ctx.budget`: observe-only token estimate (characters / `charsPerToken`,
+      or a larger reported `usage.inputTokens`), window and a trigger threshold
+      that reserves room for the answer. It is in `agent.loop` between the
+      transcript and `chat`, so every iteration journals how full the window was
+      and nothing is dropped.
+- [x] `z1.ctx.clip`: head+tail clipping of a tool result with a visible marker,
+      the full text spilled to `.z1/out/<runId>/<path>-<tool>.txt`. It sits
+      between `mapCall` and `mapMessage` in the tool map, so a 50 KB result reaches
+      the model as ~12 KB plus a path.
+- Known: the budget estimates; it does not tokenise, and `usage` is only wired
+  when a graph supplies it (the loop body has no per-turn usage slot yet).
+  Summarisation, clearing of old tool results, the read ledger and the repo map
+  are the next steps (see the context design note).
+
 ## M12 — recorded model traffic and eval
 
 - [x] `llm.request` / `llm.response` / `llm.failed` events around every resolved

@@ -241,6 +241,65 @@ describe('buildAgentGraph', () => {
     }
   })
 
+  test('a huge tool result is clipped before the next model turn', async () => {
+    const big = 'x'.repeat(50_000)
+    const { result, services } = await run(
+      { model: MODEL, tools: [{ name: 'big', parameters: {} }] },
+      'grab it',
+      (stub) => {
+        let turns = 0
+        stub.llm = {
+          async chat(request: ChatRequest): Promise<ChatResult> {
+            stub.chatCalls.push(request)
+            turns += 1
+            if (turns === 1) {
+              return {
+                message: { role: 'assistant', content: '' },
+                toolCalls: [{ id: 'call_big', name: 'big', arguments: {} }],
+                stopReason: 'tool_calls',
+              }
+            }
+            return {
+              message: { role: 'assistant', content: 'done' },
+              toolCalls: [],
+              stopReason: 'stop',
+            }
+          },
+        }
+        stub.tools = { ...stub.tools, call: async () => big }
+      },
+    )
+
+    expect(result.status).toBe('completed')
+    expect(result.outputs['output']).toBe('done')
+    // The next request carries the clipped tool message, not 50k characters.
+    const messages = services.lastChatRequest?.messages ?? []
+    const toolMessage = messages.find((message) => message.role === 'tool')
+    expect(toolMessage).toBeDefined()
+    const content = String(toolMessage?.content ?? '')
+    expect(content.length).toBeLessThan(13_000)
+    expect(content).toContain('z1: clipped 50000 chars')
+    expect(content).toContain('full output at .z1/out/')
+    expect(content.startsWith('xxxx')).toBe(true)
+  })
+
+  test('the budget node reports the transcript size without changing it', async () => {
+    const { result, journal } = await run({ model: MODEL }, 'hello')
+    expect(result.status).toBe('completed')
+
+    const event = journal
+      .read(result.runId)
+      .find((entry) => entry.type === 'node.completed' && entry.nodeId === 'budget')
+    expect(event?.type).toBe('node.completed')
+    if (event?.type !== 'node.completed') throw new Error('budget did not complete')
+    expect(typeof event.outputs['tokens']).toBe('number')
+    expect(event.outputs['tokens']).toBeGreaterThan(0)
+    expect(event.outputs['over']).toBe(false)
+    // The messages that reach the model are the ones the budget passed through.
+    const passed = event.outputs['messages']
+    expect(Array.isArray(passed)).toBe(true)
+  })
+
   test('rejects a maxSteps below one with a clear error', () => {
     expect(() => buildAgentGraph({ model: MODEL, maxSteps: 0 })).toThrow('maxSteps must be >= 1')
   })

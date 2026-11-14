@@ -117,6 +117,9 @@ function buildToolMapBody(): GraphDocument {
       node('itemArgs', 'z1.core.get', 220, 0, { path: 'item.arguments' }),
       node('itemId', 'z1.core.get', 220, 120, { path: 'item.id' }),
       node('mapCall', 'z1.tool.call', 440, 0),
+      // A tool result becomes message content; clipping here bounds the
+      // transcript without changing what the tool returned on disk.
+      node('mapClip', 'z1.ctx.clip', 550, 0),
       node('mapMessage', 'z1.core.message', 660, 0, { role: 'tool' }),
       node('mapOut', 'z1.core.output', 880, 0, { port: 'value' }),
     ],
@@ -126,14 +129,17 @@ function buildToolMapBody(): GraphDocument {
       data('m3', 'mapInput', 'value', 'itemId', 'value'),
       data('m4', 'itemName', 'value', 'mapCall', 'name'),
       data('m5', 'itemArgs', 'value', 'mapCall', 'args'),
-      data('m6', 'mapCall', 'result', 'mapMessage', 'content'),
+      data('m6', 'mapCall', 'result', 'mapClip', 'value'),
+      data('m6b', 'mapClip', 'value', 'mapMessage', 'content'),
+      data('m6c', 'itemName', 'value', 'mapClip', 'name'),
       data('m7', 'itemId', 'value', 'mapMessage', 'toolCallId'),
       data('m8', 'mapMessage', 'message', 'mapOut', 'value'),
       flow('mf1', 'mapInput', 'out', 'itemName', 'in'),
       flow('mf2', 'itemName', 'out', 'itemArgs', 'in'),
       flow('mf3', 'itemArgs', 'out', 'itemId', 'in'),
       flow('mf4', 'itemId', 'out', 'mapCall', 'in'),
-      flow('mf5', 'mapCall', 'out', 'mapMessage', 'in'),
+      flow('mf5', 'mapCall', 'out', 'mapClip', 'in'),
+      flow('mf5b', 'mapClip', 'out', 'mapMessage', 'in'),
       flow('mf6', 'mapMessage', 'out', 'mapOut', 'in'),
     ],
   }
@@ -175,6 +181,9 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
     nodes: [
       node('body', 'z1.core.input', 0, 0),
       node('messages', 'z1.core.get', 220, 0, { path: 'value' }),
+      // Observe-only: reports the transcript size, drops nothing, so the
+      // journal records how close a turn came to the window.
+      node('budget', 'z1.ctx.budget', 330, 0),
       // The seed's first entry is the system message built from the prompt
       // stack; it feeds the chat's `system` port and the message list alike.
       node('systemText', 'z1.core.get', 440, -300, { path: '0.content' }),
@@ -201,7 +210,8 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
     edges: [
       // Data
       data('d1', 'body', 'value', 'messages', 'value'),
-      data('d2', 'messages', 'value', 'chat', 'messages'),
+      data('d2', 'messages', 'value', 'budget', 'messages'),
+      data('d2b', 'budget', 'messages', 'chat', 'messages'),
       data('d3', 'tools', toolsPort, 'chat', 'tools'),
       data('d4', 'chat', 'hasToolCalls', 'branch', 'condition'),
       data('d5', 'chat', 'text', 'assistantMsg', 'content'),
