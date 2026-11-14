@@ -13,6 +13,7 @@ import type {
   ModuleCapabilities,
   ModuleNodeDeclaration,
 } from '@z1/module'
+import { currentLlmCallContext } from '@z1/runtime'
 import type { ModuleWorker } from './host.ts'
 
 function toPort(port: DeclaredPort): PortSpec {
@@ -121,6 +122,11 @@ export function moduleNodeDefinition(
     ...(capabilities.length > 0 ? { capabilities } : {}),
     execute: async (ctx: NodeContext<unknown>): Promise<NodeOutputs> => {
       const inputs = isRecord(ctx.input) ? ctx.input : {}
+      // The executor's model-call scope owns the run id, path and attempt. The
+      // child cannot know them, and must never be trusted to supply them, so
+      // the host carries this scope alongside the execution and re-enters it
+      // around the capability call the module makes.
+      const scope = currentLlmCallContext()
       const outputs = await resolveWorker(source).executeWithHooks(
         declaration.id,
         ctx.config,
@@ -135,6 +141,7 @@ export function moduleNodeDefinition(
             ctx.emit(event.port, event.chunk)
           },
         },
+        scope,
       )
       return outputs as NodeOutputs
     },

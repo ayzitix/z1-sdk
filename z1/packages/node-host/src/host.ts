@@ -21,7 +21,14 @@ import type {
   ChatRequest,
   Json,
 } from '@z1/node'
-import type { ApprovalService, FsService, LlmService, ToolService } from '@z1/runtime'
+import {
+  withLlmCallContext,
+  type ApprovalService,
+  type FsService,
+  type LlmCallContext,
+  type LlmService,
+  type ToolService,
+} from '@z1/runtime'
 import {
   DEFAULT_PROCESS_MAX_OUTPUT_BYTES,
   DEFAULT_PROCESS_TIMEOUT_MS,
@@ -93,6 +100,13 @@ export interface WorkerCapabilityDenial {
 
 export interface WorkerHostServices {
   llm: LlmService
+  /**
+   * The **decorated** service of a specific run, so a module's model traffic is
+   * journaled under the run that caused it. Resolved per call from the scope
+   * the host itself stored for the execution; `llm` is the fallback when the
+   * run has no registered service (or the call belongs to no run).
+   */
+  llmFor?: (runId: string) => LlmService | undefined
   tools: ToolService
   fs: FsService
   approval: ApprovalService
@@ -169,6 +183,12 @@ interface PendingExecution {
   readonly nodeId: string
   readonly child: ChildProcess
   readonly hooks: WorkerExecutionHooks | undefined
+  /**
+   * Model-call scope of the node, captured by the adapter from the executor.
+   * This — never anything the child sends — is what a capability call is
+   * attributed to.
+   */
+  readonly scope: LlmCallContext | undefined
   readonly signal: AbortSignal | undefined
   readonly onAbort: (() => void) | undefined
   readonly resolve: (outputs: Record<string, unknown>) => void
@@ -620,12 +640,16 @@ export class ModuleWorker {
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     await this.#awaitReady()
-    return this.#execute(nodeId, config, inputs, seed, signal, undefined)
+    return this.#execute(nodeId, config, inputs, seed, signal, undefined, undefined)
   }
 
   /**
    * `execute` plus per-run sinks. The adapter uses this so a module's log and
    * stream calls reach the executor's NodeContext instead of a global service.
+   *
+   * `scope` is the executor's model-call scope: the host stores it for the
+   * execution and re-enters it when the module calls a capability, so the
+   * journal attributes a module's model traffic to the run path that caused it.
    */
   async executeWithHooks(
     nodeId: string,
@@ -634,9 +658,10 @@ export class ModuleWorker {
     seed: unknown,
     signal: AbortSignal | undefined,
     hooks: WorkerExecutionHooks,
+    scope?: LlmCallContext,
   ): Promise<Record<string, unknown>> {
     await this.#awaitReady()
-    return this.#execute(nodeId, config, inputs, seed, signal, hooks)
+    return this.#execute(nodeId, config, inputs, seed, signal, hooks, scope)
   }
 
   /**
@@ -986,7 +1011,7 @@ export class ModuleWorker {
       const method = raw['method']
       if (typeof callId !== 'number' || typeof method !== 'string') return
       const execution = this.#executions.get(executionId)
-      void this.#handleCall(child, callId, method, raw['args'], execution?.nodeId ?? 'module')
+      void this.#handleCall(child, callId, method, raw['args'], execution)
       return
     }
     if (type === 'result') {
@@ -1163,6 +1188,7 @@ export class ModuleWorker {
     seed: unknown,
     signal: AbortSignal | undefined,
     hooks: WorkerExecutionHooks | undefined,
+    scope: LlmCallContext | undefined,
   ): Promise<Record<string, unknown>> {
     if (this.#state === 'disposed') {
       return Promise.reject(new Error('module worker has been disposed'))
@@ -1208,6 +1234,7 @@ export class ModuleWorker {
         nodeId,
         child,
         hooks,
+        scope,
         signal,
         onAbort,
         resolve: resolveOutputs,
@@ -1290,10 +1317,10 @@ export class ModuleWorker {
     callId: number,
     method: string,
     args: unknown,
-    nodeId: string,
+    execution: PendingExecution | undefined,
   ): Promise<void> {
     try {
-      const value = await this.#dispatch(child, callId, method, args, nodeId)
+      const value = await this.#dispatch(child, callId, method, args, execution)
       if (this.#child !== child) return
       this.#send({ t: 'call-result', callId, ok: true, value: value ?? null })
     } catch (error) {
@@ -1302,13 +1329,31 @@ export class ModuleWorker {
     }
   }
 
+  /**
+   * The service a call is served by. A node execution resolves the run's own
+   * decorated service from the scope the host stored, so its model traffic is
+   * journaled under that run; with no scope (a worker *service* calling back,
+   * which carries no run path) the ambient service serves it unchanged.
+   */
+  #llmFor(scope: LlmCallContext | undefined): LlmService {
+    if (scope === undefined) return this.#services.llm
+    return this.#services.llmFor?.(scope.runId) ?? this.#services.llm
+  }
+
+  /** Re-enter the stored scope so a decorator sees the run path, then call. */
+  #inScope<T>(scope: LlmCallContext | undefined, fn: () => T): T {
+    return scope === undefined ? fn() : withLlmCallContext(scope, fn)
+  }
+
   async #dispatch(
     child: ChildProcess,
     callId: number,
     method: string,
     args: unknown,
-    nodeId: string,
+    execution: PendingExecution | undefined,
   ): Promise<unknown> {
+    const nodeId = execution?.nodeId ?? 'module'
+    const scope = execution?.scope
     switch (method) {
       case 'llm.chat': {
         if (!isRecord(args)) throw new Error('llm.chat requires a ChatRequest object')
@@ -1329,10 +1374,13 @@ export class ModuleWorker {
           )
         }
         const request = args as unknown as ChatRequest
-        return this.#services.llm.chat(request, (delta: ChatDelta) => {
-          if (this.#child !== child) return
-          this.#send({ t: 'delta', callId, delta })
-        })
+        const llm = this.#llmFor(scope)
+        return this.#inScope(scope, () =>
+          llm.chat(request, (delta: ChatDelta) => {
+            if (this.#child !== child) return
+            this.#send({ t: 'delta', callId, delta })
+          }),
+        )
       }
       case 'llm.get': {
         if (!isRecord(args) || typeof args['provider'] !== 'string' || args['provider'] === '') {
@@ -1342,6 +1390,7 @@ export class ModuleWorker {
           throw new Error('llm.get requires a path starting with "/"')
         }
         const provider = args['provider']
+        const path = args['path']
         // The same grant as `chat`: a module that may not talk to a provider may
         // not read its metadata either.
         const check = checkLlm(this.#capabilities, provider)
@@ -1353,7 +1402,8 @@ export class ModuleWorker {
             'llm.get',
           )
         }
-        const call = this.#services.llm.get?.bind(this.#services.llm)
+        const llm = this.#llmFor(scope)
+        const call = llm.get?.bind(llm)
         if (call === undefined) {
           throw new Error(`provider "${provider}" does not support metadata reads in this runtime`)
         }
@@ -1364,11 +1414,13 @@ export class ModuleWorker {
               ),
             )
           : undefined
-        return call({
-          provider,
-          path: args['path'],
-          ...(query === undefined ? {} : { query }),
-        })
+        return this.#inScope(scope, () =>
+          call({
+            provider,
+            path,
+            ...(query === undefined ? {} : { query }),
+          }),
+        )
       }
       case 'tools.call': {
         if (!isRecord(args)) throw new Error('tools.call requires { name, args }')

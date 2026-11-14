@@ -223,6 +223,73 @@ export const services = {
 }
 `
 
+describe('module node model traffic', () => {
+  test("a module node's chat is journaled under its run and path", async () => {
+    const modulesPath = join(root, 'store-talk')
+    const source = await moduleSource(
+      {
+        id: 'com.example.talk',
+        version: '1.0.0',
+        title: 'talk',
+        entry: 'index.js',
+        nodes: [
+          {
+            id: 'com.example.talk.chat',
+            version: '1.0.0',
+            title: 'Chat',
+            category: 'example',
+            inputs: [],
+            outputs: [
+              { kind: 'data', id: 'value' },
+              { kind: 'flow', id: 'out' },
+            ],
+          },
+        ],
+      },
+      `export const nodes = [{
+  id: 'com.example.talk.chat',
+  version: '1.0.0',
+  title: 'Chat',
+  category: 'example',
+  inputs: [],
+  outputs: [{ kind: 'data', id: 'value' }, { kind: 'flow', id: 'out' }],
+  async execute(ctx) {
+    const reply = await ctx.llm.chat({
+      model: { provider: 'mock', model: 'mock-1' },
+      messages: [{ role: 'user', content: 'from the module' }],
+    })
+    return { value: reply.message.content, out: true }
+  },
+}]
+`,
+    )
+    // The manifest gate: a node may call the provider the grant names.
+    const store = new ModuleStore(modulesPath)
+    store.propose(source)
+    store.install('com.example.talk', '1.0.0', {
+      capabilities: { llm: { providers: ['mock'] } },
+      futureVersions: false,
+    })
+    store.activate('com.example.talk', '1.0.0')
+
+    const runtime = await makeRuntime(modulesPath)
+    const runId = `run_${randomUUID()}`
+    const result = await run(runtime, moduleNodeGraph('com.example.talk.chat'), { runId })
+    expect(result.status).toBe('completed')
+
+    const events = runtime.journal
+      .ownedEvents(runId)
+      .map((entry) => entry.event)
+      .filter((event) => event.type.startsWith('llm.'))
+    expect(events.map((event) => event.type)).toEqual(['llm.request', 'llm.response'])
+    const [request, response] = events
+    expect(request?.type === 'llm.request' ? request.path : undefined).toBe('node')
+    expect(request?.type === 'llm.request' ? request.provider : undefined).toBe('mock')
+    expect(response?.type === 'llm.response' ? response.path : undefined).toBe('node')
+    expect(response?.type === 'llm.response' ? response.latencyMs : undefined).toBeGreaterThanOrEqual(0)
+  })
+})
+
 describe('persistent module runtime', () => {
   test('one child hosts nodes and services across runs', async () => {
     const modulesPath = join(root, 'store-duo')

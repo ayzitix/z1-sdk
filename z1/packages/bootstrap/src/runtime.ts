@@ -235,6 +235,13 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
    * connection that started the call.
    */
   const runApprovals = new Map<string, ApprovalService>()
+  /**
+   * The **decorated** llm service of each live run. The worker bridge resolves
+   * a module's model calls through this map, so a module node's turn is
+   * journaled under the run whose path caused it instead of the ambient
+   * service. Entries are removed on dispose.
+   */
+  const runLlm = new Map<string, LlmService>()
 
   /**
    * Resolve a run's approval. Module *nodes* arrive as the pseudo-run
@@ -280,6 +287,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
       workspace: config.cwd,
       services: {
         llm,
+        llmFor: (runId: string) => runLlm.get(runId),
         tools: mock.tools,
         fs,
         approval: moduleNodeApproval,
@@ -517,6 +525,10 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
               if (runApprovals.get(overrides.runId) === approval) {
                 runApprovals.delete(overrides.runId)
               }
+              const decorated = services?.llm
+              if (decorated !== undefined && runLlm.get(overrides.runId) === decorated) {
+                runLlm.delete(overrides.runId)
+              }
             }
             handles.delete(handle)
           })()
@@ -569,6 +581,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
           ...(overrides.onLog === undefined ? {} : { onLog: overrides.onLog }),
         }
 
+        if (overrides.runId !== undefined) runLlm.set(overrides.runId, services.llm)
         if (closed) throw new Error('runtime is closed')
         return handle
       } catch (error) {
