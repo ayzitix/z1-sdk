@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { SqliteJournal } from '@z1/journal'
+import { ModuleStore } from '@z1/module'
 import {
   APP_ERRORS,
   JsonRpcPeer,
@@ -203,6 +204,94 @@ test('run.start completes a hello graph and streams events', async () => {
     expect(seq).toBeGreaterThan(seqs[index - 1] ?? 0)
   }
   expect(statuses).toContainEqual({ runId: reply.runId, status: 'completed' })
+})
+
+test('a module node started over the server journals its model turn', async () => {
+  // The regression this covers: `run.start` called `beginRun` without a run id,
+  // so the bridge could not attribute the module node's chat to any run and it
+  // was served by the ambient service, silently unjournaled.
+  const store = await mkdtemp(join(tmpdir(), 'z1-server-modules-'))
+  directories.push(store)
+  const source = join(store, 'src')
+  await mkdir(source, { recursive: true })
+  await writeFile(
+    join(source, 'z1.module.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      id: 'com.example.talk',
+      version: '1.0.0',
+      title: 'talk',
+      license: 'MIT',
+      engines: { z1: '>=0.1.0' },
+      entry: 'index.js',
+      nodes: [
+        {
+          id: 'com.example.talk.chat',
+          version: '1.0.0',
+          title: 'Chat',
+          category: 'example',
+          inputs: [],
+          outputs: [{ kind: 'data', id: 'value' }, { kind: 'flow', id: 'out' }],
+        },
+      ],
+    }),
+    'utf8',
+  )
+  await writeFile(
+    join(source, 'index.js'),
+    `export const nodes = [{
+  id: 'com.example.talk.chat',
+  version: '1.0.0',
+  title: 'Chat',
+  category: 'example',
+  inputs: [],
+  outputs: [{ kind: 'data', id: 'value' }, { kind: 'flow', id: 'out' }],
+  async execute(ctx) {
+    const reply = await ctx.llm.chat({
+      model: { provider: 'mock', model: 'mock-1' },
+      messages: [{ role: 'user', content: 'from the module' }],
+    })
+    return { value: reply.message.content, out: true }
+  },
+}]
+`,
+    'utf8',
+  )
+  const modules = new ModuleStore(join(store, 'modules'))
+  modules.propose(source)
+  modules.install('com.example.talk', '1.0.0', {
+    capabilities: { llm: { providers: ['mock'] } },
+    futureVersions: false,
+  })
+  modules.activate('com.example.talk', '1.0.0')
+
+  const { server, dbPath } = await makeServer({ modulesPath: join(store, 'modules') })
+  const peer = await connect(server)
+  const reply = await peer.request('run.start', {
+    graph: {
+      schemaVersion: 1,
+      id: 'module-node',
+      nodes: [
+        node('call', 'com.example.talk.chat', {}),
+        node('out', 'z1.core.output', {}),
+      ],
+      edges: [
+        { id: 'd1', kind: 'data', from: { node: 'call', port: 'value' }, to: { node: 'out', port: 'value' } },
+        { id: 'f1', kind: 'flow', from: { node: 'call', port: 'out' }, to: { node: 'out', port: 'in' } },
+      ],
+    },
+  })
+  expect(reply.status).toBe('completed')
+
+  const journal = new SqliteJournal(dbPath)
+  try {
+    const events = journal.ownedEvents(reply.runId).map((entry) => entry.event)
+    const llm = events.filter((event) => event.type.startsWith('llm.'))
+    expect(llm.map((event) => event.type)).toEqual(['llm.request', 'llm.response'])
+    expect(llm[0]?.type === 'llm.request' ? llm[0].path : undefined).toBe('call')
+  } finally {
+    journal.close()
+  }
 })
 
 test('an approved node runs after approval/request is answered', async () => {

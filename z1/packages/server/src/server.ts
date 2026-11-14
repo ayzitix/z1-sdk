@@ -361,6 +361,10 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       // Workers are per run: a module crash must not poison later runs, and an
       // approval from module code must reach the connection that started it.
       handle = await runtime.beginRun({
+        // Without the id the runtime cannot attribute a module node's model
+        // traffic or its approval to this run: both would resolve to the
+        // ambient service and the latest live run.
+        runId: state.runId,
         approval: createApprovalService(state.runId, connection),
         moduleApproval: createApprovalService(state.runId, connection),
         artifacts,
