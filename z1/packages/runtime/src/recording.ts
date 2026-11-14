@@ -50,7 +50,10 @@ const JSON_MIME = 'application/json'
  * a bearer header or an env-style `*_KEY` value even if a caller smuggles one
  * into `model.params`.
  */
-const SECRET_FIELD = /^(authorization|api[-_]?key|x[-_]api[-_]key|secret|token|password)$|_key$/i
+const SECRET_FIELD =
+  /(^|[_-])(authorization|api[_-]?key|bearer|credential|credentials|secret|password|passphrase|token)$/i
+/** camelCase variants the separator rule misses: `accessToken`, `apiKey`. */
+const SECRET_SUFFIX = /[a-z0-9](Token|Key|Secret|Password|Credential)$/
 
 const REDACTED = '[redacted]'
 
@@ -59,15 +62,27 @@ const REDACTED = '[redacted]'
  * both directions: redaction is the reason a replayed response can differ from
  * the live one, which is the safe direction to err in.
  */
+function isSecretField(field: string): boolean {
+  return SECRET_FIELD.test(field) || SECRET_SUFFIX.test(field)
+}
+
 export function redactLlmPayload(value: unknown, field?: string): unknown {
-  if (field !== undefined && SECRET_FIELD.test(field)) return REDACTED
+  if (field !== undefined && isSecretField(field)) return REDACTED
   if (Array.isArray(value)) return value.map((entry) => redactLlmPayload(entry))
   if (value !== null && typeof value === 'object') {
     const source = value as Record<string, unknown>
     const copy: Record<string, unknown> = {}
+    // A header pair (`{ name: 'Authorization', value: '…' }`) hides the secret
+    // behind a harmless key, so the pair is masked as a unit.
+    const headerPair =
+      typeof source['name'] === 'string' && isSecretField(source['name'])
     for (const [key, entry] of Object.entries(source)) {
       // `undefined` is not JSON; canonicalJson drops it, so skip it here too.
       if (entry === undefined) continue
+      if (headerPair && key === 'value') {
+        copy[key] = REDACTED
+        continue
+      }
       copy[key] = redactLlmPayload(entry, key)
     }
     return copy
@@ -169,7 +184,25 @@ export function createRecordingLlmService(options: RecordLlmOptions): LlmService
       await record(requestEvent)
 
       const startedAt = Date.now()
-      const result = await inner.chat(request, onDelta)
+      let result
+      try {
+        result = await inner.chat(request, onDelta)
+      } catch (error) {
+        // A turn that throws still happened; without this row the journal shows
+        // a request with no outcome and every attempt count is wrong.
+        await record({
+          type: 'llm.failed',
+          runId,
+          path,
+          provider,
+          model,
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+          latencyMs: Date.now() - startedAt,
+          at: Date.now(),
+        })
+        throw error
+      }
       const latencyMs = Date.now() - startedAt
 
       const responseText = canonicalLlmResponse(result)

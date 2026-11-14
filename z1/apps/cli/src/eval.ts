@@ -95,7 +95,6 @@ interface EvalOptions {
   noMemory: boolean
 }
 
-const CHAT_PATH = /(?:^|\/)chat$/
 const MAP_CALL_PATH = /\/toolMap\/\d+\/mapCall$/
 
 function errorMessage(error: unknown): string {
@@ -215,6 +214,7 @@ function readCase(raw: unknown, label: string, baseDir: string): EvalCase {
     if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
       throw new Error(`${label}.fixture "${fixture}" is not a directory`)
     }
+    assertNoSymlinks(resolved)
     spec.fixture = resolved
   }
   if (raw['model'] !== undefined) {
@@ -277,7 +277,10 @@ function metricsOf(journal: SqliteJournal, runId: string): CaseMetrics {
   let outputTokens = 0
 
   for (const event of journal.read(runId)) {
-    if (event.type === 'node.started' && CHAT_PATH.test(event.path)) steps += 1
+    // One `llm.request` is one model turn, whatever the node is called. A path
+    // suffix (`*/chat`) only works for the builtin node and silently reports 0
+    // for a provider node.
+    if (event.type === 'llm.request') steps += 1
     if (event.type === 'node.completed' && MAP_CALL_PATH.test(event.path)) {
       toolCalls += 1
       const outputs = event.outputs as Record<string, unknown>
@@ -325,6 +328,20 @@ function renderTable(results: readonly CaseResult[]): string {
   return `${lines.join('\n')}\n`
 }
 
+/**
+ * A copied fixture must not contain a live link: `cp` keeps a symlink as a
+ * link, and a builtin `fs` node would then read outside the case workspace.
+ */
+function assertNoSymlinks(directory: string): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    if (entry.isSymbolicLink()) {
+      throw new Error(`fixture contains a symlink, which a case must not follow: ${path}`)
+    }
+    if (entry.isDirectory()) assertNoSymlinks(path)
+  }
+}
+
 /** Copy the fixture (if any) into a fresh directory for this case. */
 function prepareWorkspace(parent: string, spec: EvalCase): string {
   mkdirSync(parent, { recursive: true })
@@ -364,6 +381,10 @@ async function runCase(
 
   let stdout = ''
   let stderr = ''
+  const env = { ...(io.env ?? process.env) }
+  // Metrics come from `llm.request` / `llm.response`; `hashes` keeps them
+  // without writing a blob per turn. A caller-set mode still wins.
+  if (env['Z1_RECORD_LLM'] === undefined) env['Z1_RECORD_LLM'] = 'hashes'
   const captured: CliIO = {
     stdout: (chunk) => {
       stdout += chunk
@@ -372,7 +393,7 @@ async function runCase(
       stderr += chunk
     },
     isTTY: false,
-    ...(io.env === undefined ? {} : { env: io.env }),
+    env,
     cwd: workspace,
   }
 
@@ -382,17 +403,27 @@ async function runCase(
 
   const result: CaseResult = { id: spec.id, passed: true, failures: [], workspace }
   try {
-    const line = stdout
+    // The last line that parses as the run result, not the last line that
+    // starts with `{`: a diagnostic object printed later must not hide it.
+    const parsedRun = stdout
       .split('\n')
       .map((entry) => entry.trim())
       .filter((entry) => entry.startsWith('{'))
-      .pop()
-    if (line === undefined) {
-      result.error = `run produced no JSON (exit ${String(code)}): ${stderr.trim().split('\n').pop() ?? ''}`
+      .reverse()
+      .map((line) => {
+        try {
+          return JSON.parse(line) as unknown
+        } catch {
+          return undefined
+        }
+      })
+      .find((value) => isRecord(value) && typeof value['runId'] === 'string')
+    if (!isRecord(parsedRun)) {
+      result.error = `run produced no JSON result (exit ${String(code)}): ${stderr.trim().split('\n').pop() ?? ''}`
       result.passed = false
       return result
     }
-    const parsed = JSON.parse(line) as { runId?: unknown; status?: unknown; outputs?: unknown }
+    const parsed = parsedRun as { runId?: unknown; status?: unknown; outputs?: unknown }
     const runId = typeof parsed.runId === 'string' ? parsed.runId : undefined
     if (runId === undefined) {
       result.error = 'run JSON has no runId'

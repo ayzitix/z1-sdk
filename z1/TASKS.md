@@ -173,7 +173,8 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 
 ## M12 — recorded model traffic and eval
 
-- [x] `llm.request` / `llm.response` events around every resolved `LlmService`,
+- [x] `llm.request` / `llm.response` / `llm.failed` events around every resolved
+      `LlmService` (`llm.failed` keeps a thrown turn from leaving a bare request),
       payloads in the journal's `blobs`, credential-shaped fields redacted before
       hashing; `Z1_RECORD_LLM=full|hashes|off`.
 - [x] Path and attempt reach the decorator through an `AsyncLocalStorage` scope
@@ -189,8 +190,10 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
   any change to the prompt or model handle is a miss by design; `eval` has no
   model-based judge.
 - Known: recording covers host-resolved calls (`z1.llm.chat`, host services). A
-  call made *inside* a worker module goes through the worker bridge, which
-  carries the node id but not the run path, so it is not journaled yet. Fixing it
-  needs the execution scope on capability calls plus a per-run decorated service
-  in `ModuleRuntime`; until then `z1.providers.*` nodes are invisible to
-  cassettes and to eval token metrics.
+  call made *inside* a worker module — `chat` for nodes and worker services, and
+  `get` — goes through the worker bridge, which carries the node id but not the
+  run path and is handed the undecorated service. It is therefore invisible to
+  the journal, to cassettes and to eval token metrics, and a cassette replay of a
+  provider node fails with "does not support metadata reads". Fixing it needs the
+  execution scope on capability calls plus a per-run decorated service in
+  `ModuleRuntime`; note the cassette must then record metadata GETs too.

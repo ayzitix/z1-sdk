@@ -149,6 +149,18 @@ export type RunEvent =
       at: number
     }
   | {
+      type: 'llm.failed'
+      runId: string
+      path: string
+      provider: string
+      model: string
+      attempt: number
+      /** The provider's message, already redacted by the client. */
+      error: string
+      latencyMs: number
+      at: number
+    }
+  | {
       type: 'llm.response'
       runId: string
       path: string

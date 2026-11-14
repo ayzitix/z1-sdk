@@ -424,6 +424,8 @@ export type RunEvent =
   | { type: 'llm.response'; runId: string; path: string; provider: string; model: string;
       attempt: number; responseHash: string; responseBlob?: string;
       usage?: ChatUsage; latencyMs: number; stopReason: string; at: number }
+  | { type: 'llm.failed'; runId: string; path: string; provider: string; model: string;
+      attempt: number; error: string; latencyMs: number; at: number }
   | { type: 'run.completed'; runId: string; at: number; outputs: Record<string, Json> }
   | { type: 'run.failed'; runId: string; at: number; error: string }
   | { type: 'run.cancelled'; runId: string; at: number }
@@ -445,8 +447,10 @@ dedupe; the hash is also the cassette's matching key. Credential-shaped fields
 `Z1_RECORD_LLM=full|hashes|off` (default `full`) selects blobs, events only, or
 nothing. The path and attempt arrive through an `AsyncLocalStorage` scope set by
 the executor around `definition.execute`, so the node contract is unchanged.
-It reaches a host-resolved service; a `ctx.llm.chat` made inside a worker module
-is not attributed to a run yet and is therefore not recorded.
+It reaches a host-resolved service; `ctx.llm.chat` and `ctx.llm.get` made inside
+a worker module are not attributed to a run yet and are therefore not recorded.
+A turn that throws appends `llm.failed` with the same path and attempt, so a
+journal never shows a request without an outcome.
 
 `node.stream` is delivered to `services.onEvent` but never appended to the
 journal. Nested runs (`pathPrefix` non-empty) emit node-level events only; the

@@ -171,6 +171,20 @@ test('cases run in a copy of their fixture and cannot collide', async () => {
   expect(leftovers).toEqual([])
 })
 
+test('a fixture with a symlink is refused', async () => {
+  const fixture = join(root, 'fixture-link')
+  const { mkdir, symlink } = await import('node:fs/promises')
+  await mkdir(fixture, { recursive: true })
+  await symlink('/etc/passwd', join(fixture, 'leak.txt'))
+
+  const file = await caseFile('fixture-link', {
+    cases: [{ id: 'x', message: 'hello', fixture, expect: { maxSteps: 1 } }],
+  })
+  const { code, err } = await run(['eval', file, '--workspace', await freshWorkspace('link')])
+  expect(code).toBe(2)
+  expect(err).toContain('symlink')
+})
+
 test('a missing fixture directory is a load error, not a failed case', async () => {
   const file = await caseFile('bad-fixture', {
     cases: [{ id: 'x', message: 'hello', fixture: './nope', expect: { maxSteps: 1 } }],
