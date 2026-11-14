@@ -142,8 +142,28 @@ base URL. Rate limits are retried with backoff; tune the budget with
 | `z1 tree` / `z1 fork` | inspect the run tree, fork a branch |
 | `z1 memory context <run>` | print the branch-tree context envelope |
 | `z1 module propose/approve/list` | review and install executable modules |
+| `z1 cassette export <run>` | turn a recorded run into a replayable file |
+| `z1 eval <cases.json>` | run a task suite and report pass rate, steps, tokens |
 | `z1 serve` | headless WebSocket server |
 | `z1 studio` | server + built canvas in one process |
+
+## Measuring a change
+
+Every model turn is journaled (`llm.request` / `llm.response`; payloads live in
+the journal's blob table and the event keeps the hash). That makes a run
+replayable and a change measurable:
+
+```bash
+z1 run --template agent.loop --message "..."        # journaled as usual
+z1 cassette export <runId> -o case.jsonl            # portable, no keys
+z1 eval z1/examples/eval/smoke.json --cassette case.jsonl --json
+```
+
+`z1 eval` runs each case through the real `run` path in its own directory and
+reports status, loop steps, tool calls and errors, tokens and wall time. It has
+no model-based judge: assertions are `outputContains`, `outputMatches`, file
+contents, a command's exit code, and step/tool-error budgets. `Z1_RECORD_LLM`
+selects `full`, `hashes` or `off`.
 
 ## The node contract
 
