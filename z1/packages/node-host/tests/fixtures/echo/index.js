@@ -81,6 +81,18 @@ export const nodes = [
     },
   },
   {
+    id: 'com.example.echo.modeller',
+    version: '1.0.0',
+    title: 'Modeller',
+    category: 'example',
+    inputs: [{ kind: 'data', id: 'provider', schema: { type: 'string' }, required: true }],
+    outputs: [{ kind: 'data', id: 'ids', schema: { type: 'array' } }],
+    async execute(ctx) {
+      const models = await ctx.llm.models(String(ctx.inputs.provider))
+      return { ids: models.map((model) => model.id) }
+    },
+  },
+  {
     id: 'com.example.echo.denied',
     version: '1.0.0',
     title: 'Denied',

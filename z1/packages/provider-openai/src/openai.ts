@@ -5,6 +5,7 @@ import type {
   ChatResult,
   ChatUsage,
   Json,
+  ModelInfo,
   ToolCall,
   ToolSchema,
 } from '@z1/node'
@@ -21,6 +22,9 @@ import {
 } from './retry.ts'
 import { readSseData } from './sse.ts'
 import type { OpenAiProviderOptions } from './types.ts'
+
+/** How long a discovered model list is trusted. Discovery is not configuration. */
+const MODELS_TTL_MS = 5 * 60_000
 
 /** Minimal shape of the OpenAI wire payload; only the fields we read are typed. */
 interface WireFunctionCall {
@@ -104,6 +108,9 @@ export class OpenAiLlmService implements LlmService {
    * never collide with one handed out for an earlier request (or turn).
    */
   private syntheticCalls = 0
+  /** Live model list, kept only in memory and only for {@link MODELS_TTL_MS}. */
+  private models: { at: number; models: readonly ModelInfo[] } | undefined
+  private modelsInFlight: Promise<readonly ModelInfo[]> | undefined
 
   constructor(options: OpenAiProviderOptions) {
     this.endpoint = options.baseURL.replace(/\/+$/, '')
@@ -112,6 +119,68 @@ export class OpenAiLlmService implements LlmService {
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.retry = resolveRetryOptions(options.retry)
     this.signal = options.signal
+  }
+
+  /**
+   * `GET {baseURL}/models`, cached per service instance.
+   *
+   * The list is discovery, never configuration: it is not persisted, and a
+   * provider that does not implement the endpoint fails with its own status so
+   * the caller can fall back to an explicit model id.
+   */
+  async listModels(
+    _request: { provider: string },
+    signal?: AbortSignal,
+  ): Promise<readonly ModelInfo[]> {
+    const now = Date.now()
+    if (this.models !== undefined && now - this.models.at < MODELS_TTL_MS) {
+      return this.models.models
+    }
+    // One request per provider even when several nodes ask at once.
+    this.modelsInFlight ??= this.fetchModels(signal)
+      .then((models) => {
+        this.models = { at: Date.now(), models }
+        return models
+      })
+      .finally(() => {
+        this.modelsInFlight = undefined
+      })
+    return await this.modelsInFlight
+  }
+
+  private async fetchModels(signal: AbortSignal | undefined): Promise<readonly ModelInfo[]> {
+    const response = await this.request('/models', {
+      method: 'GET',
+      headers: this.headers(),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    if (!response.ok) {
+      const detail = redact(await readErrorBody(response), this.apiKey)
+      const status = `${response.status} ${response.statusText}`.trim()
+      throw new Error(
+        `model discovery failed for ${this.endpoint} (${detail.length > 0 ? `${status}: ${detail}` : status})`,
+      )
+    }
+    const raw: unknown = await response.json()
+    const data = isRecord(raw) && Array.isArray(raw['data']) ? raw['data'] : []
+    const models: ModelInfo[] = []
+    const seen = new Set<string>()
+    for (const entry of data) {
+      if (!isRecord(entry)) continue
+      const id = entry['id']
+      if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
+      seen.add(id)
+      const name = entry['name']
+      const ownedBy = entry['owned_by']
+      const created = entry['created']
+      models.push({
+        id,
+        ...(typeof name === 'string' ? { name } : {}),
+        ...(typeof ownedBy === 'string' ? { ownedBy } : {}),
+        ...(typeof created === 'number' ? { created } : {}),
+      })
+    }
+    return models
   }
 
   async chat(
@@ -171,14 +240,19 @@ export class OpenAiLlmService implements LlmService {
    * POSTs the body, retrying 429/5xx and network failures. Retries happen
    * before the response stream is read, so a retried attempt emits no deltas.
    */
-  private async send(body: string): Promise<Response> {
-    const url = `${this.endpoint}/chat/completions`
-    const signal = this.signal
+  private send(body: string): Promise<Response> {
+    return this.request('/chat/completions', initFor(this.headers(), body, this.signal))
+  }
+
+  /** One URL path, with the shared retry policy. */
+  private async request(path: string, init: RequestInit): Promise<Response> {
+    const url = `${this.endpoint}${path}`
+    const signal = this.signal ?? (init.signal as AbortSignal | null | undefined) ?? undefined
     for (let attempt = 1; ; attempt += 1) {
       if (isAborted(signal)) throw abortError()
       let response: Response
       try {
-        response = await this.fetchImpl(url, initFor(this.headers(), body, signal))
+        response = await this.fetchImpl(url, init)
       } catch (error) {
         if (isAbortError(error) || isAborted(signal)) throw error
         if (attempt >= this.retry.attempts) throw error

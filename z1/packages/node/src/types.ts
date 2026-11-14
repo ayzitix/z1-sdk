@@ -85,6 +85,20 @@ export interface ChatRequest {
   maxTokens?: number
 }
 
+/**
+ * One model as the provider itself reports it.
+ *
+ * Only `id` is guaranteed: the OpenAI `/models` shape also carries `object`,
+ * `created` and `owned_by`, while context length, pricing and capabilities are
+ * provider extensions. Callers must treat everything but `id` as a hint.
+ */
+export interface ModelInfo {
+  readonly id: string
+  readonly name?: string
+  readonly ownedBy?: string
+  readonly created?: number
+}
+
 export interface ChatUsage {
   inputTokens: number
   outputTokens: number

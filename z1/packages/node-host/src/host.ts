@@ -1334,6 +1334,30 @@ export class ModuleWorker {
           this.#send({ t: 'delta', callId, delta })
         })
       }
+      case 'llm.models': {
+        if (!isRecord(args) || typeof args['provider'] !== 'string' || args['provider'] === '') {
+          throw new Error('llm.models requires { provider }')
+        }
+        const provider = args['provider']
+        // Discovery is gated by the same grant as `chat`: a module that may not
+        // talk to a provider may not enumerate its catalog either.
+        const check = checkLlm(this.#capabilities, provider)
+        if (!check.ok) {
+          throw this.#capabilityDenied(
+            nodeId,
+            'llm',
+            `model provider "${provider}": ${check.reason}`,
+            'llm.models',
+          )
+        }
+        const discover = this.#services.llm.listModels?.bind(this.#services.llm)
+        if (discover === undefined) {
+          throw new Error(
+            `provider "${provider}" does not support model discovery in this runtime; name the model explicitly`,
+          )
+        }
+        return discover({ provider })
+      }
       case 'tools.call': {
         if (!isRecord(args)) throw new Error('tools.call requires { name, args }')
         const name = args['name']

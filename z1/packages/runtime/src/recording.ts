@@ -126,7 +126,17 @@ export function createRecordingLlmService(options: RecordLlmOptions): LlmService
     options.onEvent?.(event)
   }
 
+  const discover = options.inner.listModels?.bind(options.inner)
+
   return {
+    // Discovery is not a model turn: it is not recorded, but it must keep
+    // working through the wrapper or a node could not ask what exists.
+    ...(discover === undefined
+      ? {}
+      : {
+          listModels: async (request: { provider: string }, signal?: AbortSignal) =>
+            await discover(request, signal),
+        }),
     chat: async (request, onDelta) => {
       const scope = currentLlmCallContext()
       const runId = scope?.runId ?? options.runId

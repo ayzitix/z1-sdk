@@ -31,6 +31,7 @@ const NODE_IDS = [
   'com.example.echo.crasher',
   'com.example.echo.sleeper',
   'com.example.echo.llmer',
+  'com.example.echo.modeller',
   'com.example.echo.denied',
   'com.example.echo.fetcher',
   'com.example.echo.subgrapher',
@@ -59,6 +60,7 @@ function createServices(probes: Probes): WorkerHostServices {
     list: async () => [],
   }
   const llm: LlmService = {
+    listModels: async (request) => [{ id: `${request.provider}-one` }, { id: `${request.provider}-two` }],
     chat: async (_request, onDelta) => {
       onDelta?.({ type: 'text', text: 'po' })
       return {
@@ -237,6 +239,31 @@ test('a redirect between allowlisted hosts is followed', async () => {
   } finally {
     await new Promise<void>((settle) => server.close(() => settle()))
   }
+}, 20_000)
+
+test('llm.models is gated by the same grant as llm.chat', async () => {
+  const probes = freshProbes()
+  // No `llm` capability at all: discovery must be refused, not forwarded.
+  const denied = createWorker(probes, { capabilities: {} })
+  await denied.start()
+  await expect(
+    denied.execute('com.example.echo.modeller', {}, { provider: 'stub' }, null),
+  ).rejects.toThrow(/capability "llm" not granted for llm\.models/)
+
+  // A granted provider is listed; another one is still refused.
+  const allowed = createWorker(probes, { capabilities: { llm: { providers: ['stub'] } } })
+  await allowed.start()
+  const outputs = await allowed.execute(
+    'com.example.echo.modeller',
+    {},
+    { provider: 'stub' },
+    null,
+  )
+  expect(outputs).toEqual({ ids: ['stub-one', 'stub-two'] })
+
+  await expect(
+    allowed.execute('com.example.echo.modeller', {}, { provider: 'other' }, null),
+  ).rejects.toThrow(/capability "llm" not granted for llm\.models/)
 }, 20_000)
 
 test('llm.chat is forwarded to the host service with deltas', async () => {

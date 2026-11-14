@@ -130,6 +130,15 @@ export class ProviderRegistry {
     return {
       chat: async (request, onDelta) =>
         await this.#service(request.model.provider, services).chat(request, onDelta),
+      listModels: async (request, signal) => {
+        const service = this.#service(request.provider, services)
+        if (service.listModels === undefined) {
+          throw new Error(
+            `provider "${request.provider}" does not support model discovery; name the model explicitly`,
+          )
+        }
+        return await service.listModels(request, signal)
+      },
     }
   }
 

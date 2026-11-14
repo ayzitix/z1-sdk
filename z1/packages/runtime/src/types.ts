@@ -8,12 +8,22 @@ import type {
   ChatUsage,
   Json,
   MemoryService,
+  ModelInfo,
   NodeRegistry,
   ToolSchema,
 } from '@z1/node'
 
 export interface LlmService {
   chat(request: ChatRequest, onDelta?: (delta: ChatDelta) => void): Promise<ChatResult>
+  /**
+   * Models the provider currently serves, discovered live (`GET /models` for an
+   * OpenAI-compatible endpoint). Optional: a deterministic mock has nothing to
+   * list, and a provider may not implement the endpoint.
+   *
+   * This is discovery, not configuration: the list is never persisted, and a
+   * caller must work when it is unavailable.
+   */
+  listModels?(request: { provider: string }, signal?: AbortSignal): Promise<readonly ModelInfo[]>
 }
 
 export interface ToolService {
