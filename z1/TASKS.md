@@ -170,3 +170,21 @@ and runs the checks. The lead commits and verifies at milestone boundaries.
 - [x] Forking by a path that ran in an ancestor names the owning run.
 - [x] `graphDigest` ignores the display-only `title`.
 - [x] `checkFsReal` resolves symlinks; `ctx.net` re-checks every redirect hop.
+
+## M12 — recorded model traffic and eval
+
+- [x] `llm.request` / `llm.response` events around every resolved `LlmService`,
+      payloads in the journal's `blobs`, credential-shaped fields redacted before
+      hashing; `Z1_RECORD_LLM=full|hashes|off`.
+- [x] Path and attempt reach the decorator through an `AsyncLocalStorage` scope
+      set by the executor, so the node contract is unchanged.
+- [x] `z1 cassette export <run>` writes JSONL turns; `--cassette` replaces the
+      transport and a miss fails with the provider, path and hash — never a
+      silent mock or network fallback.
+- [x] `z1 eval <json|dir>` runs each case through the real `run` path in a fresh
+      workspace with its own DB, asserts output/files/command/budgets, and
+      reports steps, tool calls, tool errors and tokens from the case journal.
+- [x] `z1/examples/eval/smoke.json` runs green against the mock with no network.
+- Known: no cost accounting (tokens only); replay matching is by request hash, so
+  any change to the prompt or model handle is a miss by design; `eval` has no
+  model-based judge.

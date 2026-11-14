@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline/promises'
@@ -10,6 +10,7 @@ import {
   builtinRegistry,
   createRuntime,
   createTemplateRegistry,
+  exportCassette,
   loadRuntimeConfig,
   type Runtime,
   type RuntimeConfig,
@@ -27,6 +28,8 @@ import {
   type ModuleCapabilities,
   type ModuleServiceDeclaration,
 } from '@z1/module'
+import { formatCassette } from '@z1/runtime'
+import { evalCommand } from './eval.ts'
 import type { SequencedEvent } from '@z1/journal'
 import {
   MOCK_PROVIDER,
@@ -70,13 +73,16 @@ const USAGE = [
   '  validate <graph.json>',
   '  run <graph.json> [--input <json> | --message <text>] [--input-file <path>] [--json] [--trace]',
   '      [--approve auto|ask|deny] [--module-approve auto|ask|deny] [--db <path>]',
-  '      [--suspend] [--resume <runId>] [--live]',
+  '      [--suspend] [--resume <runId>] [--live] [--cassette <file>]',
   '      [--modules-dir <path>] [--no-modules] [--no-service-modules] [--no-memory]',
   '      [--cwd <path>]',
   '  run --template <id> [--model <provider/model>] [--provider <id>] [--role <id>]',
   '      [--max-steps <n>] [--system <text>] [--budget-tokens <n>] [--json] [--db <path>]',
   '  template list [--templates-dir <path>] [--json]',
   '  tree [--db <path>] [--json]',
+  '  cassette export <runId> [-o <file>] [--db <path>]',
+  '  eval <case.json|dir> [--live] [--cassette <file>] [--json] [--jobs N] [--max-steps N]',
+  '      [--workspace <dir>] [--keep] [--no-memory]',
   '  memory context <runId> [--db <path>] [--json]',
   '  fork <runId> --at <nodePath|seq> [--db <path>] [--json]',
   '  serve [--host <host>] [--port <port>] [--db <path>] [--token <token>] [--live] [--json]',
@@ -879,6 +885,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     'budget-tokens'?: string
     'templates-dir'?: string
     cwd?: string
+    cassette?: string
   }
   let positionals: string[]
   try {
@@ -909,6 +916,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         'budget-tokens': { type: 'string' },
         'templates-dir': { type: 'string' },
         cwd: { type: 'string' },
+        cassette: { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -1039,6 +1047,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
         ...(values['no-modules'] === true ? { useModules: false } : {}),
         ...(values['no-service-modules'] === true ? { useServiceModules: false } : {}),
         ...(values['no-memory'] === true ? { useMemory: false } : {}),
+        ...(values.cassette === undefined ? {} : { cassette: resolve(values.cassette) }),
       },
     })
   } catch (error) {
@@ -1046,7 +1055,12 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
     return 1
   }
 
-  if (model !== undefined && model.provider !== MOCK_PROVIDER && !config.live) {
+  if (
+    model !== undefined &&
+    model.provider !== MOCK_PROVIDER &&
+    !config.live &&
+    config.cassette === undefined
+  ) {
     // Routing to a named provider is what `--live` turns on. Without it the
     // run uses the deterministic mock, so say so instead of pretending.
     io.stderr(
@@ -1089,7 +1103,7 @@ async function runCommand(args: readonly string[], io: CliIO): Promise<number> {
       return 2
     }
 
-    if (config.live) {
+    if (config.live && config.cassette === undefined) {
       const missing = missingLiveCredential(graph, runtime.providers, config.env)
       if (missing !== undefined) {
         io.stderr(missing)
@@ -1356,6 +1370,75 @@ function nodeStartedSeq(
     if (isNodeStartedEvent(event) && event.path === path) return seq
   }
   return undefined
+}
+
+/**
+ * `z1 cassette export <runId>`: turn a recorded run into a replayable file.
+ *
+ * The journal is the source, so this is a read-only command; it never starts a
+ * runtime with providers or modules.
+ */
+async function cassetteCommand(args: readonly string[], io: CliIO): Promise<number> {
+  const [subcommand, ...rest] = args
+  if (subcommand !== 'export') {
+    io.stderr('usage: z1 cassette export <runId> [-o <file>] [--db <path>]\n')
+    return 2
+  }
+
+  let values: { db?: string; out?: string }
+  let positionals: string[]
+  try {
+    const parsed = parseArgs({
+      args: [...rest],
+      options: {
+        db: { type: 'string' },
+        out: { type: 'string', short: 'o' },
+      },
+      allowPositionals: true,
+      strict: true,
+    })
+    values = parsed.values
+    positionals = [...parsed.positionals]
+  } catch (error) {
+    io.stderr(`${errorMessage(error)}\n`)
+    return 2
+  }
+
+  const runId = positionals[0]
+  if (runId === undefined || positionals.length > 1) {
+    io.stderr('usage: z1 cassette export <runId> [-o <file>] [--db <path>]\n')
+    return 2
+  }
+
+  const runtime = await openRuntime(io, {
+    ...(values.db === undefined ? {} : { dbPath: values.db }),
+    useMemory: false,
+    useModules: false,
+  })
+  if (runtime === undefined) return 1
+
+  try {
+    if (runtime.journal.getRun(runId) === undefined) {
+      io.stderr(`unknown run "${runId}"\n`)
+      return 1
+    }
+    let text: string
+    try {
+      text = formatCassette(exportCassette(runtime.journal, runId))
+    } catch (error) {
+      io.stderr(`${errorMessage(error)}\n`)
+      return 1
+    }
+    if (values.out === undefined) {
+      io.stdout(text)
+    } else {
+      writeFileSync(values.out, text, 'utf8')
+      io.stdout(`cassette: ${values.out}\n`)
+    }
+    return 0
+  } finally {
+    await runtime.close()
+  }
 }
 
 async function forkCommand(args: readonly string[], io: CliIO): Promise<number> {
@@ -1720,6 +1803,10 @@ export async function runCli(argv: readonly string[], io: CliIO): Promise<number
       return await memoryCommand(rest, io)
     case 'fork':
       return await forkCommand(rest, io)
+    case 'cassette':
+      return await cassetteCommand(rest, io)
+    case 'eval':
+      return await evalCommand(rest, io, runCli)
     case 'serve':
       return await serveCommand(rest, io)
     case 'studio':

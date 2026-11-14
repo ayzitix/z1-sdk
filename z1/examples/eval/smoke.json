@@ -1,0 +1,23 @@
+{
+  "cases": [
+    {
+      "id": "echo",
+      "template": "agent.loop",
+      "message": "hello",
+      "expect": {
+        "outputContains": ["mock: hello"],
+        "maxSteps": 1,
+        "maxToolErrors": 0
+      }
+    },
+    {
+      "id": "single-step",
+      "template": "agent.loop",
+      "message": "count to three",
+      "expect": {
+        "outputMatches": "^mock: count to three$",
+        "maxSteps": 1
+      }
+    }
+  ]
+}
