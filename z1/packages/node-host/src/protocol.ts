@@ -70,22 +70,56 @@ export interface ProcessRunRequest {
   timeoutMs?: number
   /** Shared stdout+stderr cap; defaults to 1 MiB, clamped to 5 MiB. */
   maxOutputBytes?: number
-  /** Added to the minimal `{ PATH }` environment. */
+  /** Written to the child's stdin, which is then closed. Absent means no stdin. */
+  stdin?: string
+  /** Merged on top of the inherited allowlist (PATH, HOME, LANG, LC_*, TMPDIR, TZ, *_PROXY). */
   env?: Record<string, string>
+}
+
+/**
+ * One run of output from a single stream.
+ *
+ * Segments preserve the order the process wrote in, so callers can render
+ * interleaved stdout/stderr correctly instead of concatenating the streams.
+ */
+export interface ProcessRunOutputSegment {
+  stream: 'stdout' | 'stderr'
+  /** Decoded text; empty when the segment is binary. */
+  text: string
+  /** Bytes in the segment (after the output cap clipped the final segment). */
+  bytes: number
+  /** True when the segment holds NUL bytes or invalid UTF-8. */
+  binary: boolean
 }
 
 /** Outcome of the brokered `process.run`. */
 export interface ProcessRunResult {
   code: number | null
   signal: string | null
+  /** All stdout text, in its own order (use `segments` for interleaving). */
   stdout: string
   stderr: string
-  /** True when stdout+stderr hit `maxOutputBytes` and the child was killed. */
+  /** True when stdout+stderr hit `maxOutputBytes` (same as `outputLimit`). */
   truncated: boolean
+  /** True when the tool's own timeout signalled the process group. */
+  timedOut: boolean
+  /** True when output exceeded the cap and the excess was discarded. */
+  outputLimit: boolean
+  /** Cap that applied to this run. */
+  maxOutputBytes: number
+  /** Output in the order it was written, one entry per contiguous stream run. */
+  segments: ProcessRunOutputSegment[]
   durationMs: number
 }
 
-export type BackgroundTaskStatus = 'running' | 'exited' | 'killed'
+/**
+ * Task lifecycle.
+ *
+ * `stopping` means a signal was sent, not that the process is dead. `exited`
+ * and `killed` are only published once the child's stdout and stderr are
+ * drained, so a poller that stops on them has the complete output.
+ */
+export type BackgroundTaskStatus = 'running' | 'stopping' | 'exited' | 'killed'
 
 /** `process.start`: a child the host keeps running across capability calls. */
 export interface BackgroundTaskStartRequest {
@@ -93,16 +127,16 @@ export interface BackgroundTaskStartRequest {
   args?: string[]
   /** Must be inside the granted `fs.read` patterns; defaults to the module dir. */
   cwd?: string
-  /** Added to the minimal `{ PATH }` environment. */
+  /** Merged on top of the inherited allowlist (PATH, HOME, LANG, LC_*, TMPDIR, TZ, *_PROXY). */
   env?: Record<string, string>
 }
 
-/** `process.poll`: everything the caller has not seen yet. */
+/** `process.poll`: the head of the output at `cursor`. */
 export interface BackgroundTaskPollRequest {
   id: string
-  /** Byte offset returned by a previous call; defaults to 0. */
+  /** Character offset returned by a previous call; defaults to 0. */
   cursor?: number
-  /** Cap on the bytes returned, keeping the tail. */
+  /** Cap on the characters returned, keeping the head of the range. */
   limit?: number
 }
 
@@ -111,13 +145,30 @@ export interface BackgroundTaskSnapshot {
   pid?: number
   command: string
   args: string[]
+  /** Directory the child was spawned in, when the caller asked for one. */
+  cwd?: string
   status: BackgroundTaskStatus
   exitCode: number | null
   signal: string | null
+  /** Last signal sent by `process.kill`; null when never killed. */
+  killSignal: string | null
   startedAt: number
   endedAt: number | null
+  /** Next cursor: advanced only over characters actually returned. */
   cursor: number
+  /** Total characters ever written. */
   size: number
+  /**
+   * True while unread characters remain after `cursor`.
+   *
+   * A `process.kill` snapshot reports the cursor the caller was at (0, since
+   * the request carries none) rather than the end of the output it returns, and
+   * sets `more` whenever that output is non-empty, so nothing written before
+   * the task died is skipped.
+   */
+  more: boolean
+  /** Characters lost from the head of the output by the ring buffer. */
+  droppedChars: number
   output: string
   /** True when the requested cursor predates the retained buffer. */
   truncated: boolean

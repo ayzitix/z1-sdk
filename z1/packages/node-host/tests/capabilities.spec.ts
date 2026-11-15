@@ -281,6 +281,9 @@ describe('process.run', () => {
 
     expect(result.code).toBeNull()
     expect(result.signal).toMatch(/^SIG/)
+    // The timeout signalled the group; that is not an output overflow.
+    expect(result.timedOut).toBe(true)
+    expect(result.outputLimit).toBe(false)
     expect(result.durationMs).toBeGreaterThanOrEqual(90)
   }, 20_000)
 
@@ -300,29 +303,67 @@ describe('process.run', () => {
     )) as unknown as ProcessRunResult
 
     expect(result.truncated).toBe(true)
+    expect(result.outputLimit).toBe(true)
+    expect(result.maxOutputBytes).toBe(64)
+    expect(result.timedOut).toBe(false)
+    // The excess was discarded, not turned into a kill.
+    expect(result.code).toBe(0)
     expect(result.stdout).toHaveLength(64)
   }, 20_000)
 
-  test('passes request env on top of a minimal PATH-only environment', async () => {
+  test('inherits only the allowlisted environment and never a secret', async () => {
     const worker = createWorker()
     await worker.start()
 
-    const result = (await worker.execute(
-      RUN_NODE,
-      {},
-      {
-        command: process.execPath,
-        args: [
-          '-e',
-          'process.stdout.write(JSON.stringify({ home: process.env.HOME ?? null, tag: process.env.Z1_TAG ?? null, path: typeof process.env.PATH }))',
-        ],
-        env: { Z1_TAG: 'ok' },
-      },
-      null,
-    )) as unknown as ProcessRunResult
+    // Sentinels: a secret that must not leak into the child, and an `LC_*`
+    // variable that must be copied even on a host with no locale set.
+    const secretKey = 'Z1_TEST_SECRET'
+    const localeKey = 'LC_TEST'
+    const savedSecret = process.env[secretKey]
+    const savedLocale = process.env[localeKey]
+    process.env[secretKey] = 'do-not-leak'
+    process.env[localeKey] = 'C'
+    try {
+      const result = (await worker.execute(
+        RUN_NODE,
+        {},
+        {
+          command: process.execPath,
+          args: ['-e', 'process.stdout.write(JSON.stringify(process.env))'],
+          env: { Z1_TAG: 'ok' },
+        },
+        null,
+      )) as unknown as ProcessRunResult
 
-    expect(result.code).toBe(0)
-    expect(JSON.parse(result.stdout)).toEqual({ home: null, tag: 'ok', path: 'string' })
+      expect(result.code).toBe(0)
+      const env = JSON.parse(result.stdout) as Record<string, string>
+      // The host's own HOME/PATH/LANG reach the child, so a dev server can find
+      // its config and a sensible locale.
+      expect(env['HOME']).toBe(process.env['HOME'])
+      expect(env['PATH']).toBe(process.env['PATH'])
+      expect(env['LANG']).toBe(process.env['LANG'])
+      expect(env[localeKey]).toBe('C')
+      // Request env still overlays the inherited map.
+      expect(env['Z1_TAG']).toBe('ok')
+      // A secret in the host environment is not inherited.
+      expect(env[secretKey]).toBeUndefined()
+      // Nothing outside the allowlist leaks in either.
+      for (const key of Object.keys(env)) {
+        expect(
+          key === 'Z1_TAG' ||
+            key === localeKey ||
+            key.startsWith('LC_') ||
+            key.endsWith('_PROXY') ||
+            ['PATH', 'HOME', 'LANG', 'TMPDIR', 'TMP', 'TEMP', 'TZ'].includes(key),
+          `unexpected inherited key ${key}`,
+        ).toBe(true)
+      }
+    } finally {
+      if (savedSecret === undefined) delete process.env[secretKey]
+      else process.env[secretKey] = savedSecret
+      if (savedLocale === undefined) delete process.env[localeKey]
+      else process.env[localeKey] = savedLocale
+    }
   }, 20_000)
 
   test('passes args as argv without shell interpretation', async () => {

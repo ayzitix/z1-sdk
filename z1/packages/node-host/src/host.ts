@@ -33,6 +33,7 @@ import {
   DEFAULT_PROCESS_TIMEOUT_MS,
   MAX_PROCESS_MAX_OUTPUT_BYTES,
   MAX_PROCESS_TIMEOUT_MS,
+  baseProcessEnv,
   clampProcessOption,
   runProcess,
 } from './process-run.ts'
@@ -223,6 +224,7 @@ interface ProcessRunArguments {
   cwd: string | undefined
   timeoutMs: number
   maxOutputBytes: number
+  stdin: string | undefined
   env: Record<string, string>
 }
 
@@ -260,6 +262,11 @@ function parseProcessRun(raw: unknown): ProcessRunArguments {
   const timeout = optionalPositiveNumber(raw['timeoutMs'], 'process.run timeoutMs')
   const output = optionalPositiveNumber(raw['maxOutputBytes'], 'process.run maxOutputBytes')
 
+  const stdin = raw['stdin']
+  if (stdin !== undefined && typeof stdin !== 'string') {
+    throw new Error('process.run stdin must be a string')
+  }
+
   const env: Record<string, string> = {}
   if (raw['env'] !== undefined) {
     if (!isRecord(raw['env'])) throw new Error('process.run env must be an object of strings')
@@ -286,6 +293,7 @@ function parseProcessRun(raw: unknown): ProcessRunArguments {
       1,
       MAX_PROCESS_MAX_OUTPUT_BYTES,
     ),
+    stdin,
     env,
   }
 }
@@ -790,8 +798,9 @@ export class ModuleWorker {
     }
     this.#state = 'disposed'
     // Every background task belongs to this worker: a disposed worker must not
-    // leave a dev server running with no way to reach it.
-    this.#tasks.dispose()
+    // leave a dev server running with no way to reach it. SIGTERM, bounded
+    // grace, then SIGKILL.
+    await this.#tasks.dispose()
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       // A started service may hold resources; let it release them. Node-only
       // workers never instantiated services, so they skip the round trip.
@@ -1509,9 +1518,10 @@ export class ModuleWorker {
           throw this.#denied(nodeId, 'process.start', command, allowed.reason)
         }
         const rawArgs = args['args']
-        const taskArgs = Array.isArray(rawArgs)
-          ? rawArgs.filter((entry): entry is string => typeof entry === 'string')
-          : []
+        if (rawArgs !== undefined && (!Array.isArray(rawArgs) || rawArgs.some((entry) => typeof entry !== 'string'))) {
+          throw new Error('process.start args must be an array of strings')
+        }
+        const taskArgs = rawArgs ?? []
         const rawCwd = args['cwd']
         const requestCwd = typeof rawCwd === 'string' ? rawCwd : this.#moduleDir
         // Same rule as `process.run`: the module directory is its own working
@@ -1666,16 +1676,14 @@ export class ModuleWorker {
     return { path: directory, entries }
   }
 
-  /** Spawn the validated request with a minimal environment and shared cap. */
+  /** Spawn the validated request with the inherited allowlist and shared cap. */
   #runProcess(request: ProcessRunArguments): Promise<ProcessRunResult> {
-    const env: Record<string, string> = { PATH: process.env['PATH'] ?? '' }
-    for (const [key, value] of Object.entries(request.env)) env[key] = value
-
     return runProcess(request.command, request.args, {
       cwd: resolve(this.#moduleDir, request.cwd ?? this.#moduleDir),
-      env,
+      env: baseProcessEnv(request.env),
       timeoutMs: request.timeoutMs,
       maxOutputBytes: request.maxOutputBytes,
+      ...(request.stdin === undefined ? {} : { stdin: request.stdin }),
     })
   }
 

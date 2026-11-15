@@ -94,12 +94,17 @@ export const nodes = [
       })
       let snapshot = await ctx.process.poll({ id: task.id })
       const deadline = Date.now() + 5000
+      // A poll returns only the bytes after the cursor, so accumulate: the line
+      // can arrive on a poll whose status is still `running`, leaving the later
+      // terminal snapshot empty.
+      let text = snapshot.output
       while (snapshot.status === 'running' && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 20))
         snapshot = await ctx.process.poll({ id: task.id, cursor: snapshot.cursor })
+        text += snapshot.output
       }
       const tasks = await ctx.process.list()
-      return { value: `${snapshot.status}|${snapshot.output.trim()}|${tasks.length}` }
+      return { value: `${snapshot.status}|${text.trim()}|${tasks.length}` }
     },
   },
   {
