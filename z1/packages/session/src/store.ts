@@ -16,6 +16,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
 } from 'node:fs'
 import type { Dirent } from 'node:fs'
@@ -342,6 +343,16 @@ function replayEvents(file: string): Replay {
   return { messages, tornTail, nextOrd }
 }
 
+/** A missing file has nothing to lose; anything else is a real stat result. */
+function isFileEmpty(file: string): boolean {
+  try {
+    return statSync(file).size === 0
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+    throw error
+  }
+}
+
 function startsWithMessages(candidate: readonly ChatMessage[], prefix: readonly ChatMessage[]): boolean {
   if (candidate.length < prefix.length) return false
   return prefix.every((message, index) => deepEqual(message, candidate[index]))
@@ -580,6 +591,39 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     if (metaNeedsWrite) writeMetaFile(sessionDir(id), meta)
   }
 
+  /**
+   * Empty the transcript of `id` in place: same session directory, same id,
+   * name, colour, model, folder, archived flag and `runs` provenance — only the
+   * messages go. `events.jsonl` is replaced atomically by an empty file, so the
+   * old turns are unlinked from disk instead of merely being hidden behind a
+   * trailing `snapshot`. The next append starts again at `ord 0`.
+   *
+   * A session that is already empty is left byte-for-byte untouched, including
+   * its `updatedAt`: `/clear` on a fresh conversation must not reorder the
+   * session list.
+   */
+  const clear = (id: string): void => {
+    const dir = sessionDir(id)
+    const meta = readMetaFile(join(dir, META_FILE), id)
+    if (meta === undefined) throw unknownSession(id)
+    const eventsFile = join(dir, EVENTS_FILE)
+    // Same refusal as `replayEvents`: writing empty bytes through a link would
+    // truncate a file this store does not own.
+    if (isSymlink(eventsFile)) {
+      throw new SessionCorruptError(eventsFile, 'events file is a symbolic link')
+    }
+    // Trust the file, not the count: a stale `messageCount` must not leave old
+    // turns behind. An absent file already reads back as zero messages.
+    if (meta.messageCount === 0 && isFileEmpty(eventsFile)) return
+    const now = Date.now()
+    // Transcript first, meta second, as in `appendTurn`: a crash in between
+    // leaves an empty log with a stale count, which the next load repairs.
+    // `writeFileAtomic` creates its temp file 0600, so the emptied transcript
+    // keeps the private mode the append path enforces.
+    writeFileAtomic(eventsFile, '')
+    writeMetaFile(dir, { ...meta, messageCount: 0, updatedAt: now })
+  }
+
   const setMeta = (id: string, patch: SessionMetaPatch): void => {
     const meta = readMeta(id)
     if (meta === undefined) throw unknownSession(id)
@@ -654,6 +698,7 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     load,
     create,
     appendTurn,
+    clear,
     setMeta,
     rename,
     archive,

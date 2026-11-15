@@ -5,6 +5,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -202,6 +203,121 @@ describe('transcript', () => {
     expect(healed?.tornTail).toBe(false)
     expect(healed?.messages.at(-1)).toEqual(user('three'))
     expect(healed?.messages).toHaveLength(5)
+  })
+})
+
+describe('clear', () => {
+  test('empties the transcript in place and keeps the session', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = store.create({
+      cwd,
+      name: 'clear me',
+      model: { provider: 'river', model: 'deepseek-ai/test' },
+      contextWindow: 131_072,
+      maxSteps: 64,
+      color: 42,
+    })
+    const id = session.meta.id
+    store.appendTurn(id, [user('one'), assistant('1')], { runId: 'run_a' })
+    store.appendTurn(id, [user('one'), assistant('1'), user('two'), assistant('2')])
+    store.setMeta(id, { updatedAt: 1_000 })
+    const before = store.load(id)
+    expect(before?.messages).toHaveLength(4)
+    expect(before?.meta.messageCount).toBe(4)
+
+    store.clear(id)
+
+    const after = store.load(id)
+    expect(after?.messages).toEqual([])
+    expect(after?.tornTail).toBe(false)
+    // Identity and provenance survive: only the messages were cleared.
+    expect(after?.meta.id).toBe(id)
+    expect(after?.meta.name).toBe('clear me')
+    expect(after?.meta.color).toBe(42)
+    expect(after?.meta.model).toEqual({ provider: 'river', model: 'deepseek-ai/test' })
+    expect(after?.meta.createdAt).toBe(before?.meta.createdAt)
+    expect(after?.meta.cwd).toBe(before?.meta.cwd)
+    expect(after?.meta.repoRoot).toBe(before?.meta.repoRoot)
+    expect(after?.meta.contextWindow).toBe(131_072)
+    expect(after?.meta.maxSteps).toBe(64)
+    expect(after?.meta.archived).toBe(false)
+    expect(after?.meta.runs).toEqual(['run_a'])
+    expect(after?.meta.messageCount).toBe(0)
+    expect(after?.meta.updatedAt).toBeGreaterThan(1_000)
+
+    // The old turns are gone from disk, not hidden behind a snapshot line.
+    const dir = join(store.root, 'sessions', id)
+    const file = join(dir, 'events.jsonl')
+    expect(readFileSync(file, 'utf8')).toBe('')
+    expect(statSync(file).size).toBe(0)
+    expect(statSync(file).mode & 0o777).toBe(0o600)
+    // The atomic write leaves no temp file behind.
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([])
+
+    expect(store.list().find((entry) => entry.id === id)?.messageCount).toBe(0)
+    expect(store.latest()?.id).toBe(id)
+  })
+
+  test('a cleared session appends again from ord 0', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    const id = session.meta.id
+    store.appendTurn(id, [user('one'), assistant('1'), user('two'), assistant('2')])
+    store.clear(id)
+
+    store.appendTurn(id, [user('fresh')])
+    const lines = eventLines(store, id)
+    expect(lines).toHaveLength(1)
+    expect((JSON.parse(lines[0] ?? '{}') as { ord: number }).ord).toBe(0)
+    expect(store.load(id)?.messages).toEqual([user('fresh')])
+    expect(store.load(id)?.meta.messageCount).toBe(1)
+    expect(store.load(id)?.tornTail).toBe(false)
+
+    store.appendTurn(id, [user('fresh'), assistant('ok')])
+    expect(eventLines(store, id)).toHaveLength(2)
+    expect((JSON.parse(eventLines(store, id)[1] ?? '{}') as { ord: number }).ord).toBe(1)
+    expect(store.load(id)?.messages).toEqual([user('fresh'), assistant('ok')])
+  })
+
+  test('clearing an unknown session throws', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    expect(() => store.clear('s_20260101T000000-abcdef')).toThrow(/unknown session/)
+    expect(() => store.clear('../escape')).toThrow(/invalid session id/)
+  })
+
+  test('a symlinked events file is refused and not written through', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    store.appendTurn(session.meta.id, [user('one')])
+
+    const outside = join(tempDir('z1-outside-'), 'events.jsonl')
+    writeFileSync(outside, 'kept\n', 'utf8')
+    const file = join(store.root, 'sessions', session.meta.id, 'events.jsonl')
+    rmSync(file)
+    symlinkSync(outside, file)
+
+    expect(() => store.clear(session.meta.id)).toThrow(SessionCorruptError)
+    expect(lstatSync(file).isSymbolicLink()).toBe(true)
+    expect(readFileSync(outside, 'utf8')).toBe('kept\n')
+  })
+
+  test('clearing an already-empty session writes nothing', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    const metaFile = join(store.root, 'sessions', session.meta.id, 'meta.json')
+    store.setMeta(session.meta.id, { updatedAt: 5_000 })
+    const before = readFileSync(metaFile, 'utf8')
+
+    store.clear(session.meta.id)
+
+    expect(readFileSync(metaFile, 'utf8')).toBe(before)
+    expect((JSON.parse(before) as { updatedAt: number }).updatedAt).toBe(5_000)
+    expect(store.load(session.meta.id)?.meta.updatedAt).toBe(5_000)
   })
 })
 

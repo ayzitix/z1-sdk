@@ -106,6 +106,16 @@ export interface SessionStore {
   load(id: string): Session | undefined
   create(input: NewSessionInput): Session
   appendTurn(id: string, messages: readonly ChatMessage[], options?: AppendTurnOptions): void
+  /**
+   * Empty this session's transcript and keep the session: same `id`, name,
+   * colour, model, folder, `archived` flag and `runs` provenance, with
+   * `messageCount: 0`. `events.jsonl` is truncated atomically (the old turns are
+   * gone from disk, not shadowed by a snapshot) so the next `appendTurn` starts
+   * at `ord 0`. Throws `unknownSession(id)` for an unknown id and
+   * {@link SessionCorruptError} when the events file is a symbolic link. An
+   * already-empty session is a no-op, `updatedAt` included.
+   */
+  clear(id: string): void
   setMeta(id: string, patch: SessionMetaPatch): void
   rename(id: string, name: string): void
   archive(id: string, archived: boolean): void
