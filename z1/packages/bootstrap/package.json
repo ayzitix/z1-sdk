@@ -26,6 +26,7 @@
     "@z1/nodes": "workspace:*",
     "@z1/provider": "workspace:*",
     "@z1/runtime": "workspace:*",
+    "@z1/session": "workspace:*",
     "@z1/template": "workspace:*"
   }
 }

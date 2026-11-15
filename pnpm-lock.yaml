@@ -19084,6 +19084,9 @@ importers:
       '@z1/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@z1/session':
+        specifier: workspace:*
+        version: link:../session
       '@z1/template':
         specifier: workspace:*
         version: link:../template
@@ -19251,6 +19254,12 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+
+  z1/packages/session:
+    dependencies:
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
 
   z1/packages/template:
     dependencies:

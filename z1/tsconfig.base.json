@@ -49,6 +49,9 @@
       "@z1/journal": [
         "./packages/journal/src/index.ts"
       ],
+      "@z1/session": [
+        "./packages/session/src/index.ts"
+      ],
       "@z1/protocol": [
         "./packages/protocol/src/index.ts"
       ],

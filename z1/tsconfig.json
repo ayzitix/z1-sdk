@@ -27,6 +27,9 @@
       "path": "./packages/journal"
     },
     {
+      "path": "./packages/session"
+    },
+    {
       "path": "./packages/protocol"
     },
     {
