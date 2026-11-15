@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { lookup } from 'node:dns/promises'
 import { existsSync } from 'node:fs'
 import { lstat, readdir } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
@@ -7,9 +8,11 @@ import {
   checkFsReal,
   checkLlm,
   checkNet,
+  checkNetTarget,
   checkProcess,
   checkTool,
   resolveCapabilityPath,
+  type CapabilityCheck,
   type DeclaredPort,
   type ModuleCapabilities,
 } from '@z1/module'
@@ -486,8 +489,11 @@ function parseNodeInfo(raw: unknown, index: number): WorkerNodeInfo {
   }
 }
 
-async function readBody(response: Response): Promise<{ body: string; truncated: boolean }> {
-  if (response.body === null) return { body: '', truncated: false }
+/** Bodies above this size are cut; the cut is reported through `truncated`. */
+async function readBody(
+  response: Response,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  if (response.body === null) return { bytes: new Uint8Array(0), truncated: false }
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
@@ -517,7 +523,112 @@ async function readBody(response: Response): Promise<{ body: string; truncated: 
     merged.set(chunk, offset)
     offset += chunk.byteLength
   }
-  return { body: new TextDecoder().decode(merged), truncated }
+  return { bytes: merged, truncated }
+}
+
+/** How much of a body the `<meta charset>` sniff reads. */
+const CHARSET_SNIFF_BYTES = 2048
+
+/** `charset=` from a `Content-Type` value, if it carries one. */
+function charsetFromContentType(contentType: string | null): string | undefined {
+  if (contentType === null) return undefined
+  const match = /;\s*charset\s*=\s*"?\s*([^";\s]+)/i.exec(contentType)
+  return match?.[1]
+}
+
+/** Latin-1 view: every byte becomes one code unit, so ASCII tags stay findable. */
+function asciiView(bytes: Uint8Array): string {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1')
+}
+
+/** A rough gate so a random binary blob is not scanned for `<meta charset>`. */
+function looksLikeHtml(bytes: Uint8Array): boolean {
+  const head = asciiView(bytes.subarray(0, CHARSET_SNIFF_BYTES)).toLowerCase()
+  return /<!doctype\s+html|<html[\s>]|<head[\s>]|<meta[\s>]|<body[\s>]/.test(head)
+}
+
+/**
+ * The charset declared by `<meta charset=...>` or by a `content` attribute,
+ * whichever comes first. Only the first couple of KiB are examined, which is
+ * where HTML parsers require the declaration to be.
+ */
+function sniffMetaCharset(bytes: Uint8Array): string | undefined {
+  const head = asciiView(bytes.subarray(0, CHARSET_SNIFF_BYTES))
+  const match = /<meta[^>]*?charset\s*=\s*["']?\s*([a-z0-9_:.+-]+)/i.exec(head)
+  return match?.[1]
+}
+
+/**
+ * Strip a byte-order mark and let it correct the label: a UTF-8 BOM in front of
+ * a body labelled `windows-1251` is stronger evidence than the server header.
+ */
+function stripBom(bytes: Uint8Array, label: string): { bytes: Uint8Array; label: string } {
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return { bytes: bytes.subarray(3), label: 'utf-8' }
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return { bytes: bytes.subarray(2), label: 'utf-16le' }
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return { bytes: bytes.subarray(2), label: 'utf-16be' }
+  }
+  return { bytes, label }
+}
+
+/** Never throws: an unknown charset label falls back to UTF-8. */
+function decoderFor(label: string): TextDecoder {
+  try {
+    return new TextDecoder(label)
+  } catch {
+    return new TextDecoder('utf-8')
+  }
+}
+
+/**
+ * Decode a body with the charset the response declares: `Content-Type`, then a
+ * `<meta>` sniff for HTML, then UTF-8. Bodies are always returned as strings
+ * with replacement characters for bytes the charset cannot express, so binary
+ * responses stay readable rather than throwing. A body cut at the 1 MiB limit
+ * can end in a lone replacement character (`U+FFFD`) when the cut splits a
+ * multi-byte sequence; nothing before it is affected.
+ */
+function decodeBody(bytes: Uint8Array, contentType: string | null): string {
+  const declared =
+    charsetFromContentType(contentType) ??
+    (looksLikeHtml(bytes) ? sniffMetaCharset(bytes) : undefined) ??
+    'utf-8'
+  const prepared = stripBom(bytes, declared)
+  return decoderFor(prepared.label).decode(prepared.bytes)
+}
+
+/**
+ * Resolve `host` and refuse private targets that were not explicitly granted.
+ *
+ * `dns.lookup` is what the request will use, so checking its answer is what
+ * makes the guard meaningful. The answer is **not** pinned: `fetch` resolves
+ * the name again when it connects, so a hostile resolver can answer public for
+ * this lookup and loopback for the connection (DNS rebinding). Closing that
+ * would mean either an `undici` dispatcher with a fixed `lookup`, which this
+ * workspace does not depend on, or hand-rolling HTTP over `net`/`tls`, which
+ * would lose streaming, redirects and TLS handling. The residual window is
+ * documented instead of pretended away: it is narrow (two lookups milliseconds
+ * apart, module-controlled DNS is already trusted) but real.
+ */
+async function guardNetTarget(
+  capabilities: ModuleCapabilities | undefined,
+  host: string,
+): Promise<CapabilityCheck> {
+  const name = host.replace(/^\[/, '').replace(/\]$/, '')
+  let addresses: string[]
+  try {
+    const records = await lookup(name, { all: true })
+    addresses = records.map((record) => record.address)
+  } catch (error) {
+    throw new Error(
+      `net.request cannot resolve "${name}": ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  return checkNetTarget(capabilities, host, addresses)
 }
 
 function headersRecord(headers: Headers): Record<string, string> {
@@ -1716,6 +1827,13 @@ export class ModuleWorker {
       if (!check.ok) {
         throw this.#denied(nodeId, 'net.request', current.hostname, check.reason)
       }
+      // The allowlist says which names are in scope; this says where they may
+      // resolve. Re-checked per hop so an allowlisted host cannot bounce the
+      // request into the LAN, loopback or the cloud metadata service.
+      const target = await guardNetTarget(this.#capabilities, current.hostname)
+      if (!target.ok) {
+        throw this.#denied(nodeId, 'net.request', current.hostname, target.reason)
+      }
 
       const hopHeaders = { ...headers }
       if (current.hostname.toLowerCase() !== originalHost) {
@@ -1745,11 +1863,11 @@ export class ModuleWorker {
         response.status === 307 ||
         response.status === 308
       if (!isRedirect || location === null) {
-        const { body: text, truncated } = await readBody(response)
+        const { bytes, truncated } = await readBody(response)
         return {
           status: response.status,
           headers: headersRecord(response.headers),
-          body: text,
+          body: decodeBody(bytes, response.headers.get('content-type')),
           truncated,
         }
       }

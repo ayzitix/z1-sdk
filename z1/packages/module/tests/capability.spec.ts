@@ -6,7 +6,10 @@ import {
   checkFs,
   checkFsReal,
   checkNet,
+  checkNetTarget,
   checkProcess,
+  classifyNetTarget,
+  isPrivateAddress,
   matchPath,
   resolveCapabilityPath,
 } from '../src/index.ts'
@@ -205,6 +208,104 @@ describe('checkNet', () => {
     expect(checkNet({ net: { hosts: ['api.example.com'] } }, 'api.example.com.evil.test').ok).toBe(
       false,
     )
+  })
+})
+
+describe('isPrivateAddress', () => {
+  test('classifies the special-purpose ranges and hostnames', () => {
+    const table: Array<[string, boolean]> = [
+      ['127.0.0.1', true],
+      ['10.0.0.1', true],
+      ['172.16.0.1', true],
+      ['172.32.0.1', false],
+      ['192.168.1.1', true],
+      ['169.254.169.254', true],
+      ['0.0.0.0', true],
+      ['224.0.0.1', true],
+      ['::', true],
+      ['::1', true],
+      ['fc00::1', true],
+      ['fd12:3456::1', true],
+      ['fe80::1', true],
+      ['ff02::1', true],
+      ['::ffff:127.0.0.1', true],
+      ['::ffff:8.8.8.8', false],
+      ['[::1]', true],
+      ['93.184.216.34', false],
+      ['142.250.185.78', false],
+      ['localhost', true],
+      ['api.localhost', true],
+      ['metadata.google.internal', true],
+      ['example.com', false],
+      ['searx.lan', false],
+      ['', true],
+    ]
+    for (const [value, expected] of table) {
+      expect([value, isPrivateAddress(value)]).toEqual([value, expected])
+    }
+  })
+
+  test('names the class it found', () => {
+    expect(classifyNetTarget('10.1.2.3')).toBe('private')
+    expect(classifyNetTarget('172.20.0.1')).toBe('private')
+    expect(classifyNetTarget('172.32.0.1')).toBe('public')
+    expect(classifyNetTarget('169.254.169.254')).toBe('link-local')
+    expect(classifyNetTarget('fe80::1')).toBe('link-local')
+    expect(classifyNetTarget('fc00::1')).toBe('ula')
+    expect(classifyNetTarget('::1')).toBe('loopback')
+    expect(classifyNetTarget('::')).toBe('unspecified')
+    expect(classifyNetTarget('239.1.1.1')).toBe('multicast')
+    expect(classifyNetTarget('240.0.0.1')).toBe('reserved')
+    expect(classifyNetTarget('93.184.216.34')).toBe('public')
+  })
+})
+
+describe('checkNetTarget', () => {
+  const loopbackGrant: ModuleCapabilities = { net: { hosts: ['127.0.0.1'] } }
+
+  test('public targets need no special grant', () => {
+    expect(checkNetTarget({ net: { hosts: ['*'] } }, 'example.com', ['93.184.216.34'])).toEqual({
+      ok: true,
+    })
+  })
+
+  test('an explicit host entry unlocks a private target', () => {
+    expect(checkNetTarget(loopbackGrant, '127.0.0.1', ['127.0.0.1'])).toEqual({ ok: true })
+    expect(checkNetTarget({ net: { hosts: ['searx.lan'] } }, 'searx.lan', ['192.168.1.5'])).toEqual(
+      { ok: true },
+    )
+    expect(checkNetTarget({ net: { hosts: ['localhost'] } }, 'localhost', ['::1'])).toEqual({
+      ok: true,
+    })
+  })
+
+  test('a wildcard never unlocks a private target', () => {
+    const noExplicit: ModuleCapabilities = { net: { hosts: ['*'] } }
+    const denied = checkNetTarget(noExplicit, '127.0.0.1', ['127.0.0.1'])
+    expect(denied.ok).toBe(false)
+    if (!denied.ok) expect(denied.reason).toMatch(/explicit net\.hosts entry/)
+    expect(checkNetTarget(noExplicit, '192.168.1.5', ['192.168.1.5']).ok).toBe(false)
+    expect(checkNetTarget(noExplicit, 'metadata.google.internal', []).ok).toBe(false)
+    // `*` plus one literal: the literal is granted, the rest of the LAN is not.
+    const mixed: ModuleCapabilities = { net: { hosts: ['*', '127.0.0.1'] } }
+    expect(checkNetTarget(mixed, '127.0.0.1', ['127.0.0.1'])).toEqual({ ok: true })
+    expect(checkNetTarget(mixed, '192.168.1.5', ['192.168.1.5']).ok).toBe(false)
+    // A wildcard pattern that is not `*` is still a wildcard.
+    expect(checkNetTarget({ net: { hosts: ['10.*'] } }, '10.0.0.1', ['10.0.0.1']).ok).toBe(false)
+  })
+
+  test('one private address in the answer blocks the name', () => {
+    const mixed = checkNetTarget(
+      { net: { hosts: ['*'] } },
+      'rebind.example',
+      ['93.184.216.34', '127.0.0.1'],
+    )
+    expect(mixed.ok).toBe(false)
+    if (!mixed.ok) expect(mixed.reason).toContain('127.0.0.1')
+  })
+
+  test('an explicit grant for another host does not cover this one', () => {
+    expect(checkNetTarget(loopbackGrant, '127.0.0.2', ['127.0.0.2']).ok).toBe(false)
   })
 })
 

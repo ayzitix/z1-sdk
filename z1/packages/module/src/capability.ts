@@ -244,6 +244,189 @@ export function checkNet(
 }
 
 /**
+ * How a host or resolved address is classified by the SSRF guard.
+ *
+ * Only `public` is reachable without an explicit grant. `reserved` covers the
+ * blocks that are neither routable nor a documented special case (for example
+ * `240.0.0.0/4`), because a request to them is never a legitimate page fetch.
+ */
+export type NetAddressClass =
+  | 'public'
+  | 'loopback'
+  | 'private'
+  | 'link-local'
+  | 'ula'
+  | 'unspecified'
+  | 'multicast'
+  | 'reserved'
+
+/** Cloud metadata endpoints that must never be reachable through a wildcard. */
+const METADATA_HOSTNAMES = new Set([
+  'metadata',
+  'metadata.google.internal',
+  'metadata.goog',
+  'instance-data',
+])
+
+/** Lower-case, drop brackets and the root-label dot, so `[::1]` and `::1` compare. */
+function normalizeHost(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, '')
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+}
+
+function parseIPv4(value: string): number[] | undefined {
+  const parts = value.split('.')
+  if (parts.length !== 4) return undefined
+  const octets: number[] = []
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return undefined
+    const octet = Number(part)
+    if (octet > 255) return undefined
+    octets.push(octet)
+  }
+  return octets
+}
+
+/** Eight hextets, or `undefined` when `value` is not an IPv6 literal. */
+function parseIPv6(value: string): number[] | undefined {
+  let text = value
+  const zone = text.indexOf('%')
+  if (zone >= 0) text = text.slice(0, zone)
+  if (!text.includes(':')) return undefined
+
+  // A trailing dotted quad is two hextets: `::ffff:127.0.0.1`.
+  const lastColon = text.lastIndexOf(':')
+  const tail = text.slice(lastColon + 1)
+  if (tail.includes('.')) {
+    const v4 = parseIPv4(tail)
+    if (v4 === undefined) return undefined
+    const high = ((v4[0]! << 8) | v4[1]!).toString(16)
+    const low = ((v4[2]! << 8) | v4[3]!).toString(16)
+    text = `${text.slice(0, lastColon + 1)}${high}:${low}`
+  }
+
+  const halves = text.split('::')
+  if (halves.length > 2) return undefined
+  const groups = (part: string): number[] | undefined => {
+    if (part.length === 0) return []
+    const out: number[] = []
+    for (const group of part.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return undefined
+      out.push(parseInt(group, 16))
+    }
+    return out
+  }
+  const head = groups(halves[0] ?? '')
+  if (head === undefined) return undefined
+  if (halves.length === 1) return head.length === 8 ? head : undefined
+  const rest = groups(halves[1] ?? '')
+  if (rest === undefined) return undefined
+  const fill = 8 - head.length - rest.length
+  if (fill < 0) return undefined
+  return [...head, ...Array<number>(fill).fill(0), ...rest]
+}
+
+function classifyIPv4(octets: readonly number[]): NetAddressClass {
+  const [a, b] = octets as [number, number, number, number]
+  if (a === 0) return 'unspecified'
+  if (a === 127) return 'loopback'
+  if (a === 10) return 'private'
+  if (a === 172 && b >= 16 && b <= 31) return 'private'
+  if (a === 192 && b === 168) return 'private'
+  if (a === 169 && b === 254) return 'link-local'
+  if (a >= 224 && a <= 239) return 'multicast'
+  if (a >= 240) return 'reserved'
+  return 'public'
+}
+
+function classifyIPv6(hextets: readonly number[]): NetAddressClass {
+  const [h0, h1, h2, h3, h4, h5, h6, h7] = hextets as [
+    number, number, number, number, number, number, number, number,
+  ]
+  const leadingZero = h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0
+  // `::ffff:a.b.c.d` is an IPv4 address wearing an IPv6 hat; classify the v4.
+  if (leadingZero && h5 === 0xffff) {
+    return classifyIPv4([h6 >> 8, h6 & 0xff, h7 >> 8, h7 & 0xff])
+  }
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0 && h6 === 0) {
+    // `::` is unspecified, `::1` loopback, everything else in `::/64` reserved.
+    if (h7 === 0) return 'unspecified'
+    if (h7 === 1) return 'loopback'
+    return 'reserved'
+  }
+  if ((h0 & 0xfe00) === 0xfc00) return 'ula'
+  if ((h0 & 0xffc0) === 0xfe80) return 'link-local'
+  if ((h0 & 0xff00) === 0xff00) return 'multicast'
+  return 'public'
+}
+
+/**
+ * Classify one address literal or hostname. Hostnames are only judged on the
+ * names that are private by definition (`localhost`, cloud metadata aliases);
+ * everything else needs a DNS answer, which is the caller's job.
+ */
+export function classifyNetTarget(value: string): NetAddressClass {
+  const host = normalizeHost(value)
+  if (host.length === 0) return 'reserved'
+  if (host === 'localhost' || host.endsWith('.localhost')) return 'loopback'
+  if (METADATA_HOSTNAMES.has(host)) return 'link-local'
+
+  const v4 = parseIPv4(host)
+  if (v4 !== undefined) return classifyIPv4(v4)
+  const v6 = parseIPv6(host)
+  if (v6 !== undefined) return classifyIPv6(v6)
+  return 'public'
+}
+
+/** True when the address is not publicly routable and needs an explicit grant. */
+export function isPrivateAddress(value: string): boolean {
+  return classifyNetTarget(value) !== 'public'
+}
+
+/**
+ * The SSRF half of the network gate: refuse a target that resolves somewhere
+ * private unless the module asked for **that exact host**.
+ *
+ * A wildcard is a statement about the public internet ("any site"), never a
+ * statement about the operator's machine, so `*` cannot unlock loopback, the
+ * LAN, link-local or the cloud metadata service. `hosts: ['*', '127.0.0.1']`
+ * reaches a local service at `http://127.0.0.1:8888` and still fails for
+ * `http://192.168.1.5`.
+ *
+ * `resolved` is every address the name resolved to; the target is blocked if
+ * *any* of them is private, so a DNS answer with one public and one private
+ * record cannot be used to smuggle the request past the check.
+ */
+export function checkNetTarget(
+  capabilities: ModuleCapabilities | undefined,
+  host: string,
+  resolved: readonly string[],
+): CapabilityCheck {
+  const normalizedHost = normalizeHost(host)
+  const privateAddresses = resolved.filter((address) => isPrivateAddress(address))
+  const hostIsPrivate = isPrivateAddress(normalizedHost)
+  if (!hostIsPrivate && privateAddresses.length === 0) return { ok: true }
+
+  const patterns = capabilities?.net?.hosts ?? []
+  for (const pattern of patterns) {
+    const normalizedPattern = normalizeHost(pattern)
+    if (normalizedPattern.length === 0) continue
+    // Wildcards are not an explicit grant, even when they happen to match.
+    if (/[*?]/.test(normalizedPattern)) continue
+    if (normalizedPattern === normalizedHost) return { ok: true }
+  }
+
+  const target = privateAddresses.length > 0 ? privateAddresses.join(', ') : normalizedHost
+  return deny(
+    `private, loopback, link-local or metadata target ${normalizedHost} (${target}) needs an explicit net.hosts entry; a wildcard does not grant it`,
+  )
+}
+
+/**
  * Gate `ctx.process.run` on the declared command allowlist.
  *
  * `process.spawn` is a list of command globs. A command matches either its
