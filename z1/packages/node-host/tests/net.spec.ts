@@ -200,6 +200,46 @@ async function bodyFrom(
   }
 }
 
+describe('net.request final URL', () => {
+  test('a direct request reports its own URL', async () => {
+    const server = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('direct')
+    })
+    try {
+      const worker = workerWith(['127.0.0.1'])
+      await worker.start()
+      const outputs = await fetchText(worker, `${server.url}/direct`)
+      expect(outputs['body']).toBe('direct')
+      expect(outputs['url']).toBe(`${server.url}/direct`)
+    } finally {
+      await server.close()
+    }
+  }, 20_000)
+
+  test('a redirect reports the URL of the final hop', async () => {
+    const server = await serve((request, response) => {
+      if (request.url === '/a') {
+        response.writeHead(302, { location: '/b' })
+        response.end()
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('at b')
+    })
+    try {
+      const worker = workerWith(['127.0.0.1'])
+      await worker.start()
+      const outputs = await fetchText(worker, `${server.url}/a`)
+      expect(outputs['status']).toBe(200)
+      expect(outputs['body']).toBe('at b')
+      expect(outputs['url']).toBe(`${server.url}/b`)
+    } finally {
+      await server.close()
+    }
+  }, 20_000)
+})
+
 describe('net.request charset handling', () => {
   test('honours Content-Type charset', async () => {
     const body = await bodyFrom('text/html; charset=windows-1251', WINDOWS_1251_PRIVET)

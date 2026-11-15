@@ -31,6 +31,11 @@ privileged operation back to host services.
   stderr, defaults to 1 MiB (max 5 MiB), and hitting it (or the timeout) kills
   the child. The result is
   `{ code, signal, stdout, stderr, truncated, durationMs }`.
+- `ctx.net.request({ url, method?, headers?, body? })` follows up to 5 redirects
+  itself, re-checking the allowlist and the resolved address at every hop. The
+  result is `{ status, url, headers, body, truncated }`, where `url` is the
+  absolute address of the response actually served (the last hop), so callers
+  can resolve relative links against it.
 - `moduleNodeDefinition` adapts a declaration plus a live worker into a runtime
   `NodeDefinition`, so the executor handles validation, caching and approval.
 

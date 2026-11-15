@@ -142,11 +142,12 @@ export const nodes = [
     inputs: [{ kind: 'data', id: 'url', schema: { type: 'string' }, required: true }],
     outputs: [
       { kind: 'data', id: 'status', schema: { type: 'number' } },
+      { kind: 'data', id: 'url', schema: { type: 'string' } },
       { kind: 'data', id: 'body', schema: { type: 'string' } },
     ],
     async execute(ctx) {
       const response = await ctx.net.request({ url: String(ctx.inputs.url), method: 'GET' })
-      return { status: response.status, body: response.body }
+      return { status: response.status, url: response.url, body: response.body }
     },
   },
   {

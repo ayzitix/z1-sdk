@@ -1866,6 +1866,10 @@ export class ModuleWorker {
         const { bytes, truncated } = await readBody(response)
         return {
           status: response.status,
+          // The absolute address of the page actually served: callers resolve
+          // relative links and cite the real page from it. `fetch` reports the
+          // hop it answered; the input URL is the fallback.
+          url: response.url === '' ? current.href : response.url,
           headers: headersRecord(response.headers),
           body: decodeBody(bytes, response.headers.get('content-type')),
           truncated,

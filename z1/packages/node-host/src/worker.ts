@@ -52,6 +52,8 @@ interface NetRequest {
 
 interface NetResponse {
   status: number
+  /** Absolute URL of the response, after any redirects were followed. */
+  url: string
   headers: Record<string, string>
   body: string
   truncated: boolean

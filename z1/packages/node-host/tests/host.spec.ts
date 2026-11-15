@@ -176,7 +176,7 @@ test('net requests are denied unless the host is declared', async () => {
     if (address === null || typeof address === 'string') throw new Error('no server address')
     const url = `http://127.0.0.1:${address.port}/`
     const outputs = await worker.execute('com.example.echo.fetcher', {}, { url }, null)
-    expect(outputs).toEqual({ status: 200, body: 'hello net' })
+    expect(outputs).toEqual({ status: 200, url, body: 'hello net' })
   } finally {
     await new Promise<void>((settle) => server.close(() => settle()))
   }
@@ -241,7 +241,7 @@ test('a redirect between allowlisted hosts is followed', async () => {
       { url: `http://localhost:${port}/redir` },
       null,
     )
-    expect(outputs).toEqual({ status: 200, body: 'final body' })
+    expect(outputs).toEqual({ status: 200, url: `http://127.0.0.1:${port}/final`, body: 'final body' })
   } finally {
     await new Promise<void>((settle) => server.close(() => settle()))
   }
