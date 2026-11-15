@@ -47,6 +47,7 @@ import { loadCassette } from './cassette.ts'
 import type { RuntimeConfig } from './config.ts'
 import { createLocalFsService } from './fs-local.ts'
 import { createAgentTemplateRegistry, createTemplateRegistry } from './templates.ts'
+import { composeToolService, type ToolServiceMember } from './tool-composite.ts'
 
 export interface RunOverrides {
   /**
@@ -133,17 +134,39 @@ interface ProvidedService {
 }
 
 /**
- * Pick one service per kind. Highest module version wins across host and
- * worker providers; equal versions keep the lower module id. Every decision is
- * logged to stderr so a `--json` run still shows which provider was chosen.
+ * The chosen adapter of one kind. Only `instance` is read downstream: the
+ * record's module id and mode matter for the selection log inside
+ * {@link chooseServices}, not for a run. `tools` may be a composite, which no
+ * single `ProvidedService` describes.
+ */
+interface ChosenService {
+  instance: unknown
+}
+
+/**
+ * Decide each kind for one run. Every kind keeps one provider — highest module
+ * version wins across host and worker providers; equal versions keep the lower
+ * module id. `tools` is the exception: every candidate composes into one
+ * service, in candidate order (host modules first, then workers), so a
+ * filesystem module and a web module both reach the agent.
+ *
+ * Every decision is logged to stderr so a `--json` run still shows which
+ * provider was chosen, and duplicates are warned about instead of silently
+ * shadowed.
  */
 function chooseServices(
   candidates: readonly ProvidedService[],
   log: ModuleServiceLog,
-): Partial<Record<ModuleServiceKind, ProvidedService>> {
-  const chosen: Partial<Record<ModuleServiceKind, ProvidedService>> = {}
+): Partial<Record<ModuleServiceKind, ChosenService>> {
+  const picked = new Map<ModuleServiceKind, ProvidedService>()
+  const toolProviders: ProvidedService[] = []
+
   for (const service of candidates) {
-    const current = chosen[service.kind]
+    if (service.kind === 'tools') {
+      toolProviders.push(service)
+      continue
+    }
+    const current = picked.get(service.kind)
     if (current !== undefined) {
       const order = compareVersions(service.version, current.version)
       if (order < 0 || (order === 0 && service.moduleId >= current.moduleId)) {
@@ -154,11 +177,38 @@ function chooseServices(
         continue
       }
     }
-    chosen[service.kind] = service
+    picked.set(service.kind, service)
     log('info', `service ${service.kind} from ${service.moduleId}@${service.version} (${service.mode})`, {
       id: service.serviceId,
     })
   }
+
+  const chosen: Partial<Record<ModuleServiceKind, ChosenService>> = {}
+  for (const [kind, service] of picked) chosen[kind] = { instance: service.instance }
+
+  // A lone tool provider keeps today's behaviour exactly: the same instance,
+  // no wrapper, the same single-provider log line.
+  const [only] = toolProviders
+  if (toolProviders.length === 1 && only !== undefined) {
+    chosen.tools = { instance: only.instance }
+    log('info', `service tools from ${only.moduleId}@${only.version} (${only.mode})`, {
+      id: only.serviceId,
+    })
+  } else if (toolProviders.length > 1) {
+    const members: ToolServiceMember[] = toolProviders.map((provider) => ({
+      moduleId: provider.moduleId,
+      version: provider.version,
+      instance: provider.instance as ToolService,
+    }))
+    chosen.tools = { instance: composeToolService(members, log) }
+    log(
+      'info',
+      `service tools composed from ${toolProviders
+        .map((provider) => `${provider.moduleId}@${provider.version}`)
+        .join(', ')}`,
+    )
+  }
+
   return chosen
 }
 
@@ -468,7 +518,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
    */
   async function selectServices(
     runId: string | undefined,
-  ): Promise<Partial<Record<ModuleServiceKind, ProvidedService>>> {
+  ): Promise<Partial<Record<ModuleServiceKind, ChosenService>>> {
     const candidates: ProvidedService[] = []
     candidates.push(...(await ensureHostServices()))
     if (closed) throw new Error('runtime is closed')
