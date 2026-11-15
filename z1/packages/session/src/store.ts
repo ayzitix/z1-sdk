@@ -633,10 +633,9 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
       try {
         const meta = readMetaFile(join(sessionsDir, pointer.id, META_FILE), pointer.id)
         if (meta !== undefined && !meta.archived) return summarize(meta)
-      } catch (error) {
-        // A newer/corrupt pointed session must not make boot fail; fall through
-        // to the newest readable active session.
-        if (!(error instanceof SessionTooNewError)) throw error
+      } catch {
+        // A newer/corrupt/symlinked pointed session must not make boot fail;
+        // fall through to the newest readable active session.
       }
     }
     return list({ includeArchived: false })[0] ?? list({ includeArchived: true })[0]
