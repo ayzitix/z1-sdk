@@ -158,6 +158,10 @@ function readMetaFile(file: string): SessionMeta | undefined {
   if (gitBranch !== undefined) meta.gitBranch = gitBranch
   const toolPolicyRevision = num(raw['toolPolicyRevision'])
   if (toolPolicyRevision !== undefined) meta.toolPolicyRevision = toolPolicyRevision
+  const color = num(raw['color'])
+  if (color !== undefined && Number.isInteger(color) && color >= 0 && color <= 255) {
+    meta.color = color
+  }
   const parent = raw['parent']
   if (isRecord(parent)) {
     const parentId = str(parent['id'])
@@ -271,6 +275,7 @@ function summarize(meta: SessionMeta): SessionSummary {
     model: meta.model,
     cwd: meta.cwd,
     archived: meta.archived,
+    ...(meta.color === undefined ? {} : { color: meta.color }),
   }
 }
 
@@ -284,6 +289,7 @@ function applyPatch(meta: SessionMeta, patch: SessionMetaPatch): SessionMeta {
   if (patch.contextWindow !== undefined) next.contextWindow = patch.contextWindow
   if (patch.maxSteps !== undefined) next.maxSteps = patch.maxSteps
   if (patch.toolPolicyRevision !== undefined) next.toolPolicyRevision = patch.toolPolicyRevision
+  if (patch.color !== undefined) next.color = patch.color
   if (patch.runs !== undefined) next.runs = [...patch.runs]
   if (patch.parent !== undefined) next.parent = { id: patch.parent.id, atOrdinal: patch.parent.atOrdinal }
   if (patch.archived !== undefined) next.archived = patch.archived
@@ -394,6 +400,9 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     const gitBranch = input.gitBranch?.trim()
     if (gitBranch !== undefined && gitBranch !== '') meta.gitBranch = gitBranch
     if (input.toolPolicyRevision !== undefined) meta.toolPolicyRevision = input.toolPolicyRevision
+    if (input.color !== undefined && Number.isInteger(input.color) && input.color >= 0 && input.color <= 255) {
+      meta.color = input.color
+    }
     writeMetaFile(dir, meta)
     return { meta, messages: [], tornTail: false }
   }

@@ -338,6 +338,25 @@ describe('management', () => {
   })
 })
 
+describe('colour', () => {
+  test('create, list and patch keep the session hexagon colour', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = store.create({
+      cwd,
+      model: { provider: 'river', model: 'deepseek-ai/test' },
+      contextWindow: 131_072,
+      maxSteps: 64,
+      color: 123,
+    })
+    expect(session.meta.color).toBe(123)
+    expect(store.list()[0]?.color).toBe(123)
+    store.setMeta(session.meta.id, { color: 45 })
+    expect(store.load(session.meta.id)?.meta.color).toBe(45)
+    expect(store.list()[0]?.color).toBe(45)
+  })
+})
+
 describe('root resolution', () => {
   test('Z1_SESSIONS_DIR overrides and expands ~', () => {
     const cwd = tempDir()

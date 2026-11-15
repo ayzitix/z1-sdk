@@ -39,6 +39,8 @@ export interface SessionMeta {
   /** Where the conversation happened. Metadata, never a key. */
   cwd: string
   repoRoot: string
+  /** ANSI-256 colour of the session's hexagon; stable across restarts. */
+  color?: number
   gitBranch?: string
   model: SessionModel
   contextWindow: number
@@ -67,6 +69,8 @@ export interface SessionSummary {
   model: SessionModel
   cwd: string
   archived: boolean
+  /** ANSI-256 colour of the session's hexagon, when one was stored. */
+  color?: number
 }
 
 export interface NewSessionInput {
@@ -78,6 +82,8 @@ export interface NewSessionInput {
   contextWindow: number
   maxSteps: number
   toolPolicyRevision?: number
+  /** ANSI-256 colour; the console picks one when it creates the session. */
+  color?: number
 }
 
 export interface AppendTurnOptions {
