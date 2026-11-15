@@ -39,7 +39,7 @@ export const DEFAULT_SECTIONS: readonly PromptSection[] = [
     '## Working context',
     '- Work from the current workspace and the tools this run exposes. Read before asking; the repository and the user are the source of truth.',
     '- When an output is machine-consumed, return exactly the declared value: no prose, no markdown fences.',
-    '- If a capability you need is missing, name it in one sentence before you start. Do not explore first, do not promise the blocked result, and do not substitute a different deliverable unless the user asks.',
+    '- If a capability the request needs is missing, say so before you start — in your first sentence, or in the JSON field your output contract provides. Do not start work that depends on it, promise its result, or substitute a different deliverable unless the user asks.',
   ]),
   core('autonomy', 40, [
     '## Autonomy',
