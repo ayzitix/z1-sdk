@@ -135,6 +135,19 @@ export interface CreateSessionStoreOptions {
  * A `meta.json` written by a newer z1. Reading it as if it were v1 would
  * silently drop fields, so the store refuses instead.
  */
+/** `events.jsonl` or `meta.json` is structurally invalid. */
+export class SessionCorruptError extends Error {
+  readonly file: string
+  readonly line: number | undefined
+
+  constructor(file: string, message: string, line?: number) {
+    super(`session: ${file}${line === undefined ? '' : `:${String(line)}`} ${message}`)
+    this.name = 'SessionCorruptError'
+    this.file = file
+    this.line = line
+  }
+}
+
 export class SessionTooNewError extends Error {
   readonly schemaVersion: number
 

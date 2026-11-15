@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -67,7 +68,9 @@ function isDirectory(path: string): boolean {
 }
 
 function isSessionRoot(dir: string): boolean {
-  return existsSync(join(dir, MARKER_FILE)) || isDirectory(join(dir, SESSIONS_DIR))
+  // Only the owner marker makes a directory ours. A bare `sessions/` can be a
+  // project's own fixtures or game saves; claiming it would rewrite their tree.
+  return existsSync(join(dir, MARKER_FILE))
 }
 
 function isEmptyDirectory(dir: string): boolean {
@@ -92,13 +95,31 @@ export function ensureSessionRoot(root: string): void {
   writeIfMissing(join(root, MARKER_FILE), MARKER_CONTENT)
   writeIfMissing(join(root, GITIGNORE_FILE), GITIGNORE_CONTENT)
   mkdirSync(join(root, SESSIONS_DIR), { recursive: true, mode: DIR_MODE })
+  // `mkdir`/`write` modes only apply on creation; a copied or older tree can be
+  // world-readable. Enforce the private modes on every open.
+  try {
+    chmodSync(root, DIR_MODE)
+    chmodSync(join(root, SESSIONS_DIR), DIR_MODE)
+    chmodSync(join(root, MARKER_FILE), FILE_MODE)
+    chmodSync(join(root, GITIGNORE_FILE), FILE_MODE)
+  } catch {
+    // A read-only or exotic filesystem may refuse; the caller still gets a root.
+  }
 }
 
 /** First ancestor of `cwd` holding `.git`, or `undefined` outside a repo. */
 export function findRepoRoot(cwd: string): string | undefined {
   let dir = resolve(cwd)
   for (;;) {
-    if (existsSync(join(dir, '.git'))) return dir
+    const git = join(dir, '.git')
+    if (isDirectory(git)) return dir
+    try {
+      // A worktree has a `.git` file with `gitdir: <path>`; a random file with
+      // that name is not a repository and must not capture the session root.
+      if (readFileSync(git, 'utf8').trimStart().startsWith('gitdir:')) return dir
+    } catch {
+      // No `.git` here.
+    }
     const parent = dirname(dir)
     if (parent === dir) return undefined
     dir = parent
@@ -113,7 +134,14 @@ export function findRepoRoot(cwd: string): string | undefined {
 function excludeFromGit(root: string, repoRoot: string): void {
   const rel = relative(repoRoot, root)
   if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return
-  const pattern = `/${rel.split(sep).join('/')}/`
+  // A newline would inject another line into .git/info/exclude; a glob
+  // character would make the pattern match something else (or nothing).
+  if (/[\u0000\n\r]/.test(rel)) return
+  const escaped = rel
+    .split(sep)
+    .map((part) => part.replace(/[\\*?\[\]!# ]/g, (char) => `\\${char}`))
+    .join('/')
+  const pattern = `/${escaped}/`
   let excludePath: string
   try {
     const gitPath = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
@@ -160,7 +188,12 @@ function claimCandidate(dir: string): boolean {
 function fallbackRoot(cwd: string, env: Env): string {
   const key = createHash('sha1').update(cwd).digest('hex').slice(0, 8)
   const name = cwd.split(sep).filter((part) => part !== '').pop() ?? 'root'
-  return join(homeOf(env), '.local', 'share', 'z1', 'projects', `${name}-${key}`, 'z1')
+  const override = env.XDG_DATA_HOME?.trim()
+  const dataHome =
+    override !== undefined && override !== ''
+      ? resolve(expandHome(override, env))
+      : join(homeOf(env), '.local', 'share')
+  return join(dataHome, 'z1', 'projects', `${name}-${key}`, 'z1')
 }
 
 /**
@@ -186,9 +219,14 @@ export function resolveSessionRoot(options: ResolveSessionRootOptions): Resolved
 
   const candidate = join(repoRoot, 'z1')
   if (claimCandidate(candidate)) {
-    ensureSessionRoot(candidate)
-    excludeFromGit(candidate, repoRoot)
-    return { root: candidate, mode: 'project', repoRoot }
+    try {
+      ensureSessionRoot(candidate)
+      excludeFromGit(candidate, repoRoot)
+      return { root: candidate, mode: 'project', repoRoot }
+    } catch {
+      // A read-only checkout can have an empty/owned z1/ but no writable files.
+      // Fall through to the per-project data directory instead of failing boot.
+    }
   }
 
   const root = fallbackRoot(repoRoot, env)

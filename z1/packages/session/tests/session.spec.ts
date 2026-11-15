@@ -1,6 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  appendFileSync,
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -8,8 +11,8 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
-  appendFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -19,6 +22,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 import {
   PACKAGE,
+  SessionCorruptError,
   SessionTooNewError,
   createSessionStore,
   resolveSessionRoot,
@@ -171,8 +175,10 @@ describe('transcript', () => {
 
     const after = statSync(join(store.root, 'sessions', session.meta.id, 'events.jsonl')).size
     expect(after).toBe(before)
-    expect(store.load(session.meta.id)?.meta.updatedAt).toBe(metaBefore)
-    expect(store.load(session.meta.id)?.meta.runs).toEqual([])
+    // The transcript is unchanged, but a late run link must not be thrown away:
+    // this is the crash-window repair from the review.
+    expect(store.load(session.meta.id)?.meta.runs).toEqual(['run_late'])
+    expect(store.load(session.meta.id)?.meta.updatedAt).toBeGreaterThanOrEqual(metaBefore ?? 0)
   })
 
   test('a truncated final line is dropped and reported', () => {
@@ -354,6 +360,142 @@ describe('colour', () => {
     store.setMeta(session.meta.id, { color: 45 })
     expect(store.load(session.meta.id)?.meta.color).toBe(45)
     expect(store.list()[0]?.color).toBe(45)
+  })
+})
+
+describe('integrity regressions', () => {
+  test('JSON-unsafe message fields still append as deltas, not snapshots', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    const odd: ChatMessage = {
+      role: 'assistant',
+      content: 'x',
+      toolCalls: [{ id: 'c1', name: 'echo', arguments: { value: Number.NaN } }],
+    }
+    store.appendTurn(session.meta.id, [odd])
+    store.appendTurn(session.meta.id, [odd, user('next')])
+    const lines = eventLines(store, session.meta.id)
+    expect(lines).toHaveLength(2)
+    expect(lastEvent(store, session.meta.id)['type']).toBe('message')
+  })
+
+  test('a crash after events but before meta is repaired on load and late runIds survive', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    store.appendTurn(session.meta.id, [user('one')])
+    const file = join(store.root, 'sessions', session.meta.id, 'events.jsonl')
+    appendFileSync(
+      file,
+      `${JSON.stringify({ v: 1, ord: 1, ts: Date.now(), type: 'message', message: assistant('two') })}\n`,
+    )
+    const loaded = store.load(session.meta.id)
+    expect(loaded?.messages).toHaveLength(2)
+    expect(loaded?.meta.messageCount).toBe(2)
+    store.appendTurn(session.meta.id, loaded?.messages ?? [], { runId: 'run_late' })
+    expect(store.load(session.meta.id)?.meta.runs).toContain('run_late')
+    expect(eventLines(store, session.meta.id)).toHaveLength(2)
+  })
+
+  test('setMeta rejects values the reader would reject and keeps the session readable', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    expect(() => store.setMeta(session.meta.id, { updatedAt: Number.NaN })).toThrow()
+    expect(() => store.setMeta(session.meta.id, { name: '' })).toThrow()
+    expect(() => store.setMeta(session.meta.id, { messageCount: -1 })).toThrow()
+    expect(store.load(session.meta.id)).toBeDefined()
+  })
+
+  test('a foreign z1/sessions is not claimed', () => {
+    const repo = tempDir('z1-foreign-')
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    mkdirSync(join(repo, 'z1', 'sessions', 'fixtures'), { recursive: true })
+    writeFileSync(join(repo, 'z1', 'sessions', 'fixtures', 'case.json'), '{}')
+    const home = tempDir('z1-home-')
+    const resolved = resolveSessionRoot({ cwd: repo, env: { HOME: home } })
+    expect(resolved.mode).toBe('fallback')
+    expect(readdirSync(join(repo, 'z1'))).toEqual(['sessions'])
+  })
+
+  test('latest does not throw on a newer pointed session', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    store.setCurrent(session.meta.id)
+    const file = join(store.root, 'sessions', session.meta.id, 'meta.json')
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+    raw['schemaVersion'] = 2
+    writeFileSync(file, JSON.stringify(raw))
+    expect(() => store.latest()).not.toThrow()
+    expect(store.latest()).toBeUndefined()
+  })
+
+  test('duplicate ordinals are a corrupt log, not reordered history', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    store.appendTurn(session.meta.id, [user('one')])
+    const file = join(store.root, 'sessions', session.meta.id, 'events.jsonl')
+    appendFileSync(
+      file,
+      `${JSON.stringify({ v: 1, ord: 0, ts: Date.now(), type: 'message', message: assistant('two') })}\n`,
+    )
+    expect(() => store.load(session.meta.id)).toThrow(SessionCorruptError)
+  })
+
+  test('symlinked session directories are refused', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const outside = tempDir('z1-outside-')
+    const id = 's_20260101T000000-abcdef'
+    symlinkSync(outside, join(store.root, 'sessions', id))
+    expect(() => store.load(id)).toThrow(SessionCorruptError)
+  })
+
+  test('meta.id must match its directory', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const first = newSession(store, cwd, 'first')
+    const second = newSession(store, cwd, 'second')
+    copyFileSync(
+      join(store.root, 'sessions', first.meta.id, 'meta.json'),
+      join(store.root, 'sessions', second.meta.id, 'meta.json'),
+    )
+    expect(store.load(second.meta.id)).toBeUndefined()
+  })
+})
+
+describe('permissions and exclude', () => {
+  test('append tightens an old 0644 transcript and 0755 directories', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    store.appendTurn(session.meta.id, [user('one')])
+    const dir = join(store.root, 'sessions', session.meta.id)
+    chmodSync(store.root, 0o755)
+    chmodSync(dir, 0o755)
+    chmodSync(join(dir, 'events.jsonl'), 0o644)
+    store.appendTurn(session.meta.id, [user('one'), assistant('two')])
+    const mode = (path: string): number => statSync(path).mode & 0o777
+    expect(mode(store.root)).toBe(0o700)
+    expect(mode(dir)).toBe(0o700)
+    expect(mode(join(dir, 'events.jsonl'))).toBe(0o600)
+  })
+
+  test('a bracket in an overridden root is escaped in .git/info/exclude', () => {
+    const repo = tempDir('z1-git-bracket-')
+    execFileSync('git', ['init', '--quiet', repo], { stdio: 'ignore' })
+    const custom = join(repo, 'sess[1]')
+    const resolved = resolveSessionRoot({
+      cwd: repo,
+      env: { HOME: tempDir('z1-home-'), Z1_SESSIONS_DIR: custom },
+    })
+    expect(resolved.mode).toBe('override')
+    const exclude = readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8')
+    expect(exclude).toContain('/sess\\[1\\]/')
+    expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' })).toBe('')
   })
 })
 

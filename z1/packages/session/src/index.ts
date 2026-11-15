@@ -13,6 +13,7 @@ export const PACKAGE = '@z1/session'
 
 export {
   SESSION_SCHEMA_VERSION,
+  SessionCorruptError,
   SessionTooNewError,
   type AppendTurnOptions,
   type CreateSessionStoreOptions,

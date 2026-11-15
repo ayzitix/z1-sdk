@@ -8,7 +8,16 @@
  * @module @z1/session/store
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+} from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { join, resolve } from 'node:path'
 
@@ -26,6 +35,7 @@ import {
 } from './paths.ts'
 import {
   SESSION_SCHEMA_VERSION,
+  SessionCorruptError,
   SessionTooNewError,
   type AppendTurnOptions,
   type CreateSessionStoreOptions,
@@ -45,6 +55,7 @@ const MAX_LISTED = 500
 const ID_PATTERN = /^s_[0-9A-Za-zT-]{8,64}$/
 
 const DIR_MODE = 0o700
+const NAME_MAX = 120
 
 type Json = unknown
 
@@ -71,6 +82,65 @@ function num(value: Json): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+function integer(value: Json): number | undefined {
+  const parsed = num(value)
+  return parsed !== undefined && Number.isInteger(parsed) ? parsed : undefined
+}
+
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+/** One rule-set for values written by `create`/`appendTurn`/`setMeta` and read back. */
+function validateMeta(meta: SessionMeta): string | undefined {
+  if (meta.schemaVersion !== SESSION_SCHEMA_VERSION) return 'unsupported schemaVersion'
+  if (!ID_PATTERN.test(meta.id) || meta.id.includes('..')) return 'invalid id'
+  const name = meta.name.trim()
+  if (name.length === 0 || name.length > NAME_MAX || /[\u0000-\u001f\u007f]/.test(meta.name)) {
+    return 'invalid name'
+  }
+  for (const [field, value] of [
+    ['createdAt', meta.createdAt],
+    ['updatedAt', meta.updatedAt],
+    ['messageCount', meta.messageCount],
+    ['contextWindow', meta.contextWindow],
+    ['maxSteps', meta.maxSteps],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 0) return `invalid ${field}`
+  }
+  if (meta.contextWindow < 1 || meta.maxSteps < 1) return 'invalid limits'
+  if (meta.cwd.trim() === '' || meta.repoRoot.trim() === '') return 'invalid path'
+  if (meta.model.provider.trim() === '' || meta.model.model.trim() === '') return 'invalid model'
+  if (!meta.runs.every((run) => typeof run === 'string')) return 'invalid runs'
+  if (meta.color !== undefined && (!Number.isInteger(meta.color) || meta.color < 0 || meta.color > 255)) {
+    return 'invalid color'
+  }
+  if (meta.parent !== undefined) {
+    if (meta.parent.id.trim() === '' || !Number.isInteger(meta.parent.atOrdinal) || meta.parent.atOrdinal < 0) {
+      return 'invalid parent'
+    }
+  }
+  return undefined
+}
+
+function normalizeName(raw: string): string {
+  return raw
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, NAME_MAX)
+    .trim()
+}
+
+/** JSON round-trip is the storage canonical form; compare/write that form. */
+function canonicalMessage(message: ChatMessage): ChatMessage {
+  return JSON.parse(JSON.stringify(message)) as ChatMessage
+}
+
 /** Structural equality; key order must not decide between delta and snapshot. */
 export function deepEqual(left: Json, right: Json): boolean {
   if (left === right) return true
@@ -87,7 +157,10 @@ export function deepEqual(left: Json, right: Json): boolean {
   return false
 }
 
-function readMetaFile(file: string): SessionMeta | undefined {
+function readMetaFile(file: string, expectedId?: string): SessionMeta | undefined {
+  if (isSymlink(file)) {
+    throw new SessionCorruptError(file, 'metadata file is a symbolic link')
+  }
   let text: string
   try {
     text = readFileSync(file, 'utf8')
@@ -107,15 +180,16 @@ function readMetaFile(file: string): SessionMeta | undefined {
   if (version !== SESSION_SCHEMA_VERSION) return undefined
 
   const id = str(raw['id'])
+  if (expectedId !== undefined && id !== expectedId) return undefined
   const name = str(raw['name'])
-  const createdAt = num(raw['createdAt'])
-  const updatedAt = num(raw['updatedAt'])
+  const createdAt = integer(raw['createdAt'])
+  const updatedAt = integer(raw['updatedAt'])
   const cwd = str(raw['cwd'])
   const repoRoot = str(raw['repoRoot'])
-  const contextWindow = num(raw['contextWindow'])
-  const maxSteps = num(raw['maxSteps'])
+  const contextWindow = integer(raw['contextWindow'])
+  const maxSteps = integer(raw['maxSteps'])
   const archived = raw['archived']
-  const messageCount = num(raw['messageCount'])
+  const messageCount = integer(raw['messageCount'])
   const modelRaw = raw['model']
   const runsRaw = raw['runs']
   if (
@@ -138,6 +212,9 @@ function readMetaFile(file: string): SessionMeta | undefined {
   const model = str(modelRaw['model'])
   if (provider === undefined || model === undefined) return undefined
   if (!runsRaw.every((entry): entry is string => typeof entry === 'string')) return undefined
+  if (name.trim().length === 0 || name.length > NAME_MAX || /[\u0000-\u001f\u007f]/.test(name)) {
+    return undefined
+  }
 
   const meta: SessionMeta = {
     schemaVersion: 1,
@@ -165,15 +242,17 @@ function readMetaFile(file: string): SessionMeta | undefined {
   const parent = raw['parent']
   if (isRecord(parent)) {
     const parentId = str(parent['id'])
-    const atOrdinal = num(parent['atOrdinal'])
+    const atOrdinal = integer(parent['atOrdinal'])
     if (parentId !== undefined && atOrdinal !== undefined) {
       meta.parent = { id: parentId, atOrdinal }
     }
   }
-  return meta
+  return validateMeta(meta) === undefined ? meta : undefined
 }
 
 function writeMetaFile(dir: string, meta: SessionMeta): void {
+  const problem = validateMeta(meta)
+  if (problem !== undefined) throw new Error(`session: refusing to write invalid metadata (${problem})`)
   writeFileAtomic(join(dir, META_FILE), `${JSON.stringify(meta, null, 2)}\n`)
 }
 
@@ -200,6 +279,7 @@ function isMessage(value: Json): value is ChatMessage {
  * its newline never finished being written and is dropped, not fatal.
  */
 function replayEvents(file: string): Replay {
+  if (isSymlink(file)) throw new SessionCorruptError(file, 'events file is a symbolic link')
   let text: string
   try {
     text = readFileSync(file, 'utf8')
@@ -230,28 +310,33 @@ function replayEvents(file: string): Replay {
     try {
       raw = JSON.parse(line)
     } catch {
-      throw new Error(`session: ${file}:${index + 1} is not valid JSON`)
+      throw new SessionCorruptError(file, 'is not valid JSON', index + 1)
     }
     if (!isRecord(raw) || raw['v'] !== 1) {
-      throw new Error(`session: ${file}:${index + 1} is not a v1 event`)
+      throw new SessionCorruptError(file, 'is not a v1 event', index + 1)
     }
-    const ord = num(raw['ord'])
-    if (ord === undefined) throw new Error(`session: ${file}:${index + 1} has no ord`)
-    nextOrd = Math.max(nextOrd, ord + 1)
+    const ord = integer(raw['ord'])
+    if (ord === undefined) throw new SessionCorruptError(file, 'has no integer ord', index + 1)
+    if (ord !== nextOrd) {
+      throw new SessionCorruptError(file, `expected ord ${String(nextOrd)}, found ${String(ord)}`, index + 1)
+    }
+    nextOrd = ord + 1
     const type = raw['type']
     if (type === 'message') {
       const message = raw['message']
-      if (!isMessage(message)) throw new Error(`session: ${file}:${index + 1} has no message`)
-      messages.push(message)
+      if (!isMessage(message)) throw new SessionCorruptError(file, 'has no message', index + 1)
+      // The log is a transcript of non-system turns; a hand-edited system line
+      // must not make the message count disagree with the store contract.
+      if (message.role !== 'system') messages.push(message)
     } else if (type === 'snapshot') {
       const snapshot = raw['messages']
       if (!Array.isArray(snapshot) || !snapshot.every(isMessage)) {
-        throw new Error(`session: ${file}:${index + 1} has no messages array`)
+        throw new SessionCorruptError(file, 'has no messages array', index + 1)
       }
       messages.length = 0
-      messages.push(...snapshot)
+      messages.push(...snapshot.filter((message) => message.role !== 'system'))
     } else {
-      throw new Error(`session: ${file}:${index + 1} has unknown type ${JSON.stringify(type)}`)
+      throw new SessionCorruptError(file, `has unknown type ${JSON.stringify(type)}`, index + 1)
     }
   }
   return { messages, tornTail, nextOrd }
@@ -316,17 +401,35 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
   const sessionsDir = join(root, SESSIONS_DIR)
   const defaultRepoRoot = resolved.repoRoot ?? resolve(options.cwd)
 
-  const sessionDir = (id: string): string => join(sessionsDir, assertSessionId(id))
+  const sessionDir = (id: string): string => {
+    const dir = join(sessionsDir, assertSessionId(id))
+    if (isSymlink(dir)) {
+      throw new SessionCorruptError(dir, 'session directory is a symbolic link')
+    }
+    return dir
+  }
 
   /** Metadata only: renaming must not re-read a multi-megabyte transcript. */
   const readMeta = (id: string): SessionMeta | undefined =>
-    readMetaFile(join(sessionDir(id), META_FILE))
+    readMetaFile(join(sessionDir(id), META_FILE), id)
 
   const loadSession = (id: string): LoadedSession | undefined => {
     const dir = sessionDir(id)
-    const meta = readMetaFile(join(dir, META_FILE))
+    let meta = readMetaFile(join(dir, META_FILE), id)
     if (meta === undefined) return undefined
     const replay = replayEvents(join(dir, EVENTS_FILE))
+    if (meta.messageCount !== replay.messages.length) {
+      // A crash after the events append but before the meta write leaves the
+      // transcript complete and the count stale. Repair on the next read so a
+      // caller never sees a self-inconsistent Session; a read-only file is
+      // still readable with the count corrected in memory.
+      meta = { ...meta, messageCount: replay.messages.length }
+      try {
+        writeMetaFile(dir, meta)
+      } catch {
+        // The in-memory correction is enough for this caller.
+      }
+    }
     return { meta, messages: replay.messages, tornTail: replay.tornTail, nextOrd: replay.nextOrd }
   }
 
@@ -354,7 +457,7 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
       try {
         // A session from a newer z1 is skipped: showing a guessed-at subset
         // would be silently wrong data.
-        meta = readMetaFile(join(sessionsDir, entry.name, META_FILE))
+        meta = readMetaFile(join(sessionsDir, entry.name, META_FILE), entry.name)
       } catch {
         meta = undefined
       }
@@ -381,11 +484,12 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     const dir = join(sessionsDir, id)
     if (existsSync(dir)) throw new Error(`session: id ${id} already exists`)
     mkdirSync(dir, { recursive: true, mode: DIR_MODE })
-    const name = input.name?.trim()
+    const requested = input.name === undefined ? '' : normalizeName(input.name)
+    const name = requested !== '' ? requested : defaultName(createdAt)
     const meta: SessionMeta = {
       schemaVersion: 1,
       id,
-      name: name !== undefined && name !== '' ? name : defaultName(createdAt),
+      name,
       createdAt,
       updatedAt: createdAt,
       cwd: resolve(input.cwd),
@@ -419,29 +523,61 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
   ): void => {
     const loaded = loadSession(id)
     if (loaded === undefined) throw unknownSession(id)
-    const incoming = messages.filter((message) => message.role !== 'system')
+    // The log stores JSON; compare the same canonical shape or a field such as
+    // `toolCallId: undefined` (dropped on write) would defeat the prefix test
+    // forever and turn every turn into a full snapshot.
+    const incoming = messages
+      .filter((message) => message.role !== 'system')
+      .map(canonicalMessage)
     const grows = startsWithMessages(incoming, loaded.messages)
     const delta = grows ? incoming.slice(loaded.messages.length) : []
-    if (grows && delta.length === 0) return
+    const runId = turnOptions.runId
+    const metaNeedsWrite =
+      !grows ||
+      delta.length > 0 ||
+      loaded.tornTail ||
+      loaded.meta.messageCount !== incoming.length ||
+      (runId !== undefined && !loaded.meta.runs.includes(runId))
+    if (grows && delta.length === 0 && !metaNeedsWrite) return
 
     const now = Date.now()
-    const lines = grows
-      ? delta.map((message, index) =>
-          JSON.stringify({ v: 1, ord: loaded.nextOrd + index, ts: now, type: 'message', message }),
+    const dir = sessionDir(id)
+    const eventsFile = join(dir, EVENTS_FILE)
+    // An old/copied tree can be world-readable; tighten it before appending.
+    try {
+      chmodSync(root, DIR_MODE)
+      chmodSync(dir, DIR_MODE)
+    } catch {
+      // Best effort; the transcript itself is chmod'ed by appendLines.
+    }
+    if (loaded.tornTail) dropTornTail(eventsFile)
+    if (grows) {
+      if (delta.length > 0) {
+        appendLines(
+          eventsFile,
+          delta.map((message, index) =>
+            JSON.stringify({ v: 1, ord: loaded.nextOrd + index, ts: now, type: 'message', message }),
+          ),
         )
-      : [JSON.stringify({ v: 1, ord: loaded.nextOrd, ts: now, type: 'snapshot', messages: incoming })]
+      }
+    } else {
+      appendLines(eventsFile, [
+        JSON.stringify({ v: 1, ord: loaded.nextOrd, ts: now, type: 'snapshot', messages: incoming }),
+      ])
+    }
 
     // Transcript first, meta second: a crash between them leaves the messages
-    // complete and only `updatedAt`/`messageCount` stale, which is recoverable.
-    const eventsFile = join(sessionDir(id), EVENTS_FILE)
-    if (loaded.tornTail) dropTornTail(eventsFile)
-    appendLines(eventsFile, lines)
-
-    const meta: SessionMeta = { ...loaded.meta, updatedAt: now, messageCount: incoming.length }
-    if (turnOptions.runId !== undefined && !meta.runs.includes(turnOptions.runId)) {
-      meta.runs = [...meta.runs, turnOptions.runId]
+    // complete and only `updatedAt`/`messageCount` stale. The next load repairs
+    // the count; a late `runId` is still written even when there is no delta.
+    const meta: SessionMeta = {
+      ...loaded.meta,
+      updatedAt: metaNeedsWrite ? now : loaded.meta.updatedAt,
+      messageCount: incoming.length,
     }
-    writeMetaFile(sessionDir(id), meta)
+    if (runId !== undefined && !meta.runs.includes(runId)) {
+      meta.runs = [...meta.runs, runId]
+    }
+    if (metaNeedsWrite) writeMetaFile(sessionDir(id), meta)
   }
 
   const setMeta = (id: string, patch: SessionMetaPatch): void => {
@@ -451,7 +587,7 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
   }
 
   const rename = (id: string, name: string): void => {
-    const trimmed = name.trim()
+    const trimmed = normalizeName(name)
     if (trimmed === '') throw new Error('session: a session name must not be empty')
     setMeta(id, { name: trimmed })
   }
@@ -469,6 +605,12 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     let target = join(trash, base)
     for (let suffix = 1; existsSync(target); suffix += 1) target = join(trash, `${base}-${suffix}`)
     renameSync(dir, target)
+    try {
+      const pointer = JSON.parse(readFileSync(join(root, LATEST_FILE), 'utf8')) as unknown
+      if (isRecord(pointer) && pointer['id'] === id) unlinkSync(join(root, LATEST_FILE))
+    } catch {
+      // No pointer, or another process already replaced it.
+    }
   }
 
   const readPointer = (): LatestPointer | undefined => {
@@ -488,10 +630,16 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
   const latest = (): SessionSummary | undefined => {
     const pointer = readPointer()
     if (pointer !== undefined) {
-      const meta = readMetaFile(join(sessionsDir, pointer.id, META_FILE))
-      if (meta !== undefined) return summarize(meta)
+      try {
+        const meta = readMetaFile(join(sessionsDir, pointer.id, META_FILE), pointer.id)
+        if (meta !== undefined && !meta.archived) return summarize(meta)
+      } catch (error) {
+        // A newer/corrupt pointed session must not make boot fail; fall through
+        // to the newest readable active session.
+        if (!(error instanceof SessionTooNewError)) throw error
+      }
     }
-    return list({ includeArchived: true })[0]
+    return list({ includeArchived: false })[0] ?? list({ includeArchived: true })[0]
   }
 
   const setCurrent = (id: string): void => {

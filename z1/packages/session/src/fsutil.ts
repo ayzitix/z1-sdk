@@ -8,18 +8,33 @@
 import { randomBytes } from 'node:crypto'
 import {
   closeSync,
+  existsSync,
+  fchmodSync,
   fsyncSync,
+  ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
-  ftruncateSync,
   writeSync,
 } from 'node:fs'
 import { dirname } from 'node:path'
 
 const DIR_MODE = 0o700
 const FILE_MODE = 0o600
+
+/** Best-effort directory fsync: makes a rename/new dirent durable on power loss. */
+function fsyncDir(dir: string): void {
+  let fd: number | undefined
+  try {
+    fd = openSync(dir, 'r')
+    fsyncSync(fd)
+  } catch {
+    // Some platforms/filesystems refuse directory fsync; the data is still written.
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
 
 /**
  * Write `data` so a reader sees either the old file or the new one: temp file
@@ -36,6 +51,7 @@ export function writeFileAtomic(file: string, data: string): void {
     closeSync(fd)
   }
   renameSync(temporary, file)
+  fsyncDir(dirname(file))
 }
 
 /**
@@ -44,13 +60,22 @@ export function writeFileAtomic(file: string, data: string): void {
  */
 export function appendLines(file: string, lines: readonly string[]): void {
   if (lines.length === 0) return
+  const existed = existsSync(file)
   const fd = openSync(file, 'a', FILE_MODE)
   try {
+    // `'a'` ignores the mode after creation; a copied 0644 transcript must be
+    // tightened before more content is added.
+    try {
+      fchmodSync(fd, FILE_MODE)
+    } catch {
+      // Read-only/odd mounts still append if the OS allows it.
+    }
     writeSync(fd, lines.map((line) => `${line}\n`).join(''))
     fsyncSync(fd)
   } finally {
     closeSync(fd)
   }
+  if (!existed) fsyncDir(dirname(file))
 }
 
 /**
@@ -86,6 +111,11 @@ export function dropTornTail(file: string): void {
   const fd = openSync(file, 'r+')
   try {
     ftruncateSync(fd, Buffer.byteLength(text.slice(0, cut), 'utf8'))
+    try {
+      fchmodSync(fd, FILE_MODE)
+    } catch {
+      // Best effort; append enforces it again.
+    }
     fsyncSync(fd)
   } finally {
     closeSync(fd)
