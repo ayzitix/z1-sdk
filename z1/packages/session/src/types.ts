@@ -51,6 +51,13 @@ export interface SessionMeta {
   parent?: SessionParent
   archived: boolean
   messageCount: number
+  /**
+   * Transcript generation, advanced by `clear`. A caller that read messages at
+   * generation *N* passes *N* to `appendTurn`; once the transcript has been
+   * cleared the store rejects that append instead of re-inserting turns the
+   * user deleted. Missing in older files, and then it means `0`.
+   */
+  generation?: number
 }
 
 export interface Session {
@@ -66,6 +73,8 @@ export interface SessionSummary {
   name: string
   updatedAt: number
   messageCount: number
+  /** `SessionMeta.generation`, normalised so a missing value reads as 0. */
+  generation: number
   model: SessionModel
   cwd: string
   archived: boolean
@@ -89,6 +98,14 @@ export interface NewSessionInput {
 export interface AppendTurnOptions {
   /** Links this turn to the journal run that produced it. */
   runId?: string
+  /**
+   * The `SessionMeta.generation` the caller's `messages` were read from. When
+   * it does not match, the transcript was cleared since that read and the
+   * append is rejected with {@link SessionClearedError}: re-`load` the session
+   * and append again. Omitting it keeps the old behaviour (append whatever the
+   * caller holds), which is what a fresh transcript-less writer needs.
+   */
+  generation?: number
 }
 
 /** The mutable half of {@link SessionMeta}; identity and birth stay fixed. */
@@ -111,9 +128,12 @@ export interface SessionStore {
    * colour, model, folder, `archived` flag and `runs` provenance, with
    * `messageCount: 0`. `events.jsonl` is truncated atomically (the old turns are
    * gone from disk, not shadowed by a snapshot) so the next `appendTurn` starts
-   * at `ord 0`. Throws `unknownSession(id)` for an unknown id and
+   * at `ord 0`. `generation` is incremented in the same metadata write, which is
+   * what makes a stale caller's append fail instead of resurrecting the cleared
+   * turns. Throws `unknownSession(id)` for an unknown id and
    * {@link SessionCorruptError} when the events file is a symbolic link. An
-   * already-empty session is a no-op, `updatedAt` included.
+   * already-empty session is a no-op, `updatedAt` *and* `generation` included:
+   * nothing changed, so nothing is announced as changed.
    */
   clear(id: string): void
   setMeta(id: string, patch: SessionMetaPatch): void
@@ -167,5 +187,26 @@ export class SessionTooNewError extends Error {
     )
     this.name = 'SessionTooNewError'
     this.schemaVersion = schemaVersion
+  }
+}
+
+/**
+ * The caller appended a transcript from before a `clear`: the session's
+ * `generation` moved on, so its messages are not a prefix of anything on disk
+ * and re-appending them would resurrect turns the user deleted.
+ */
+export class SessionClearedError extends Error {
+  readonly id: string
+  /** The generation now on disk, i.e. the one the caller must reload at. */
+  readonly generation: number
+
+  constructor(id: string, generation: number) {
+    super(
+      `session: ${id} transcript was cleared (now generation ${String(generation)}); ` +
+        'reload the session before appending',
+    )
+    this.name = 'SessionClearedError'
+    this.id = id
+    this.generation = generation
   }
 }

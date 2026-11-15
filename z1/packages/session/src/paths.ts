@@ -37,6 +37,8 @@ export const TRASH_DIR = '.trash'
 export const LATEST_FILE = 'latest.json'
 export const META_FILE = 'meta.json'
 export const EVENTS_FILE = 'events.jsonl'
+/** Held (created with `wx`) while a writer mutates one session. */
+export const LOCK_FILE = '.lock'
 
 /** Written on create: the transcript is uncommittable by default. */
 const GITIGNORE_CONTENT = '*\n!.gitignore\n'

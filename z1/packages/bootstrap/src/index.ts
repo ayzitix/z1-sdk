@@ -14,6 +14,7 @@ export { createTemplateRegistry } from './templates.ts'
 export {
   PACKAGE as SESSION_PACKAGE,
   SESSION_SCHEMA_VERSION,
+  SessionClearedError,
   SessionTooNewError,
   createSessionStore,
   findRepoRoot,

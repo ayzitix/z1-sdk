@@ -1,6 +1,7 @@
 /**
- * The three filesystem primitives the store needs: an atomic rename for small
- * state, an fsync'd line append for the transcript, and the session id.
+ * The filesystem primitives the store needs: an atomic rename for small state,
+ * an fsync'd line append for the transcript, a per-session lock, and the
+ * session id.
  *
  * @module @z1/session/fsutil
  */
@@ -16,6 +17,8 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  statSync,
+  unlinkSync,
   writeSync,
 } from 'node:fs'
 import { dirname } from 'node:path'
@@ -92,6 +95,123 @@ export function sessionId(now: Date): string {
 export function timestampStamp(now: Date): string {
   const iso = now.toISOString()
   return `${iso.slice(0, 10).replace(/-/g, '')}T${iso.slice(11, 19).replace(/:/g, '')}`
+}
+
+/** How long a caller waits for a per-session lock. */
+export interface LockOptions {
+  /** Tries before giving up. Default 50, i.e. roughly one second of waiting. */
+  attempts?: number
+  /** Busy-wait between tries, in milliseconds. Default 20. */
+  retryMs?: number
+  /** A lock file older than this was left by a crash, not by a holder. Default 10 s. */
+  staleMs?: number
+  /** Clock, injectable for tests. Default `Date.now`. */
+  now?: () => number
+}
+
+const LOCK_ATTEMPTS = 50
+const LOCK_RETRY_MS = 20
+const LOCK_STALE_MS = 10_000
+
+/**
+ * Sleep without a dependency and without a busy loop. The store is synchronous
+ * by design, so waiting for a lock cannot be async; `Atomics.wait` on a buffer
+ * nobody shares is the one available blocking sleep.
+ */
+function sleepSync(ms: number): void {
+  if (ms <= 0) return
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+interface LockStamp {
+  mtimeMs: number
+  ino: number
+}
+
+function lockStamp(file: string): LockStamp | undefined {
+  try {
+    const stats = statSync(file)
+    return { mtimeMs: stats.mtimeMs, ino: stats.ino }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Remove a lock nobody is holding any more. Two observations are required: the
+ * first decides that the lock is old, the second proves it is still the *same*
+ * old file. A holder that released and re-created it in between has a different
+ * mtime/inode and is left alone — we never delete a lock we did not see stale.
+ */
+function reclaimIfStale(file: string, staleMs: number, now: () => number): void {
+  const observed = lockStamp(file)
+  if (observed === undefined) return
+  // A clock that moved backwards leaves a future mtime; that is not staleness.
+  if (now() - observed.mtimeMs <= staleMs) return
+  const confirmed = lockStamp(file)
+  if (confirmed === undefined) return
+  if (confirmed.mtimeMs !== observed.mtimeMs || confirmed.ino !== observed.ino) return
+  try {
+    unlinkSync(file)
+  } catch {
+    // Someone else reclaimed it first; the next attempt simply tries again.
+  }
+}
+
+/**
+ * Take `<session dir>/.lock`, exclusively, or throw after ~1 s of trying.
+ *
+ * `openSync(…, 'wx')` is atomic on every platform this store supports, so two
+ * processes cannot both create the lock. The returned function releases it and
+ * is safe to call twice. A lock left behind by a crash is reclaimed once its
+ * mtime is older than `staleMs`, which is why no PID check (and no platform
+ * specific `flock`) is needed.
+ */
+export function acquireLock(file: string, options: LockOptions = {}): () => void {
+  const attempts = options.attempts ?? LOCK_ATTEMPTS
+  const retryMs = options.retryMs ?? LOCK_RETRY_MS
+  const staleMs = options.staleMs ?? LOCK_STALE_MS
+  const now = options.now ?? Date.now
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) sleepSync(retryMs)
+    let fd: number
+    try {
+      fd = openSync(file, 'wx', FILE_MODE)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'EEXIST') {
+        reclaimIfStale(file, staleMs, now)
+        continue
+      }
+      throw error
+    }
+    try {
+      // The body is for whoever debugs a stuck lock; holding the file is the
+      // lock itself, so a failed write must not undo the acquisition.
+      writeSync(fd, `${String(process.pid)}\n`)
+    } catch {
+      // A lock with no body still locks.
+    } finally {
+      closeSync(fd)
+    }
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      try {
+        unlinkSync(file)
+      } catch {
+        // ENOENT is the normal "already gone". Any other failure (a read-only
+        // mount) is covered by the stale rule, and throwing from a release that
+        // runs in `finally` would mask the caller's own error.
+      }
+    }
+  }
+  throw new Error(
+    `session: could not acquire ${file} after ${String(attempts)} attempts; ` +
+      'another writer holds it, or a stale lock is newer than the reclaim window',
+  )
 }
 
 /**

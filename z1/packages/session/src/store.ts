@@ -24,10 +24,11 @@ import { join, resolve } from 'node:path'
 
 import type { ChatMessage } from '@z1/node'
 
-import { appendLines, dropTornTail, sessionId, timestampStamp, writeFileAtomic } from './fsutil.ts'
+import { appendLines, dropTornTail, acquireLock, sessionId, timestampStamp, writeFileAtomic } from './fsutil.ts'
 import {
   EVENTS_FILE,
   LATEST_FILE,
+  LOCK_FILE,
   META_FILE,
   SESSIONS_DIR,
   TRASH_DIR,
@@ -36,6 +37,7 @@ import {
 } from './paths.ts'
 import {
   SESSION_SCHEMA_VERSION,
+  SessionClearedError,
   SessionCorruptError,
   SessionTooNewError,
   type AppendTurnOptions,
@@ -116,6 +118,9 @@ function validateMeta(meta: SessionMeta): string | undefined {
   if (meta.contextWindow < 1 || meta.maxSteps < 1) return 'invalid limits'
   if (meta.cwd.trim() === '' || meta.repoRoot.trim() === '') return 'invalid path'
   if (meta.model.provider.trim() === '' || meta.model.model.trim() === '') return 'invalid model'
+  if (meta.generation !== undefined && (!Number.isInteger(meta.generation) || meta.generation < 0)) {
+    return 'invalid generation'
+  }
   if (!meta.runs.every((run) => typeof run === 'string')) return 'invalid runs'
   if (meta.color !== undefined && (!Number.isInteger(meta.color) || meta.color < 0 || meta.color > 255)) {
     return 'invalid color'
@@ -248,12 +253,23 @@ function readMetaFile(file: string, expectedId?: string): SessionMeta | undefine
       meta.parent = { id: parentId, atOrdinal }
     }
   }
+  // Absent means 0 (a file written before the guard existed). Present but not a
+  // non-negative integer is corrupt, not silently zero: that would be a guard
+  // that fails open.
+  const generationRaw = raw['generation']
+  if (generationRaw !== undefined) {
+    const generation = integer(generationRaw)
+    if (generation === undefined || generation < 0) return undefined
+    meta.generation = generation
+  }
   return validateMeta(meta) === undefined ? meta : undefined
 }
 
 function writeMetaFile(dir: string, meta: SessionMeta): void {
   const problem = validateMeta(meta)
   if (problem !== undefined) throw new Error(`session: refusing to write invalid metadata (${problem})`)
+  // `JSON.stringify` drops an absent `generation`, so a v1 file that never
+  // needed one stays byte-identical after an unrelated `setMeta`.
   writeFileAtomic(join(dir, META_FILE), `${JSON.stringify(meta, null, 2)}\n`)
 }
 
@@ -353,6 +369,31 @@ function isFileEmpty(file: string): boolean {
   }
 }
 
+/**
+ * Identity of a file's current contents, cheap enough to take around a read.
+ * `writeFileAtomic` renames a fresh temp file into place, so a replace and a
+ * truncate both change the inode as well as the size.
+ */
+interface FileStamp {
+  size: number
+  ino: number
+  mtimeMs: number
+}
+
+function stampOf(file: string): FileStamp | undefined {
+  try {
+    const stats = statSync(file)
+    return { size: stats.size, ino: stats.ino, mtimeMs: stats.mtimeMs }
+  } catch {
+    return undefined
+  }
+}
+
+function sameStamp(left: FileStamp | undefined, right: FileStamp | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right
+  return left.size === right.size && left.ino === right.ino && left.mtimeMs === right.mtimeMs
+}
+
 function startsWithMessages(candidate: readonly ChatMessage[], prefix: readonly ChatMessage[]): boolean {
   if (candidate.length < prefix.length) return false
   return prefix.every((message, index) => deepEqual(message, candidate[index]))
@@ -368,6 +409,7 @@ function summarize(meta: SessionMeta): SessionSummary {
     name: meta.name,
     updatedAt: meta.updatedAt,
     messageCount: meta.messageCount,
+    generation: meta.generation ?? 0,
     model: meta.model,
     cwd: meta.cwd,
     archived: meta.archived,
@@ -390,6 +432,10 @@ function applyPatch(meta: SessionMeta, patch: SessionMetaPatch): SessionMeta {
   if (patch.parent !== undefined) next.parent = { id: patch.parent.id, atOrdinal: patch.parent.atOrdinal }
   if (patch.archived !== undefined) next.archived = patch.archived
   if (patch.messageCount !== undefined) next.messageCount = patch.messageCount
+  // `clear` is the only intended writer of `generation`; a patch may carry one
+  // (it is a plain field of `SessionMeta`) and is written as given, under the
+  // same lock, so the on-disk value always matches what a reader validated.
+  if (patch.generation !== undefined) next.generation = patch.generation
   next.updatedAt = patch.updatedAt ?? Date.now()
   return next
 }
@@ -424,28 +470,52 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
   const readMeta = (id: string): SessionMeta | undefined =>
     readMetaFile(join(sessionDir(id), META_FILE), id)
 
+  /**
+   * Run `run` with the session's lock held. Every writer of `events.jsonl` or
+   * `meta.json` goes through here, so an append can no longer load a transcript
+   * that `clear` truncates before the write lands — the bug that left a log
+   * whose first line was `ord 1` and made every later read throw. Reads
+   * (`load`, `list`, `latest`) stay lock-free: they cannot corrupt anything and
+   * a reader must not wait a second for a writer.
+   */
+  const withSessionLock = <T,>(id: string, run: (dir: string) => T): T => {
+    const dir = sessionDir(id)
+    // `acquireLock` would fail with ENOENT here; the contract is a named error.
+    if (!existsSync(dir)) throw unknownSession(id)
+    const release = acquireLock(join(dir, LOCK_FILE))
+    try {
+      return run(dir)
+    } finally {
+      release()
+    }
+  }
+
   const loadSession = (id: string): LoadedSession | undefined => {
     const dir = sessionDir(id)
     let meta = readMetaFile(join(dir, META_FILE), id)
     if (meta === undefined) return undefined
-    const replay = replayEvents(join(dir, EVENTS_FILE))
+    const eventsFile = join(dir, EVENTS_FILE)
+    const before = stampOf(eventsFile)
+    const replay = replayEvents(eventsFile)
     if (meta.messageCount !== replay.messages.length) {
       // A crash after the events append but before the meta write leaves the
       // transcript complete and the count stale. Repair on the next read so a
       // caller never sees a self-inconsistent Session; a read-only file is
       // still readable with the count corrected in memory.
       meta = { ...meta, messageCount: replay.messages.length }
-      try {
-        writeMetaFile(dir, meta)
-      } catch {
-        // The in-memory correction is enough for this caller.
+      // Only repair a transcript that did not move under us. A `clear` that
+      // landed during the replay would otherwise have its fresh `generation`
+      // and zero count overwritten by this stale copy, which is exactly the
+      // state the generation guard exists to prevent.
+      if (sameStamp(before, stampOf(eventsFile))) {
+        try {
+          writeMetaFile(dir, meta)
+        } catch {
+          // The in-memory correction is enough for this caller.
+        }
       }
     }
     return { meta, messages: replay.messages, tornTail: replay.tornTail, nextOrd: replay.nextOrd }
-  }
-
-  const writeMeta = (id: string, meta: SessionMeta): void => {
-    writeMetaFile(sessionDir(id), meta)
   }
 
   const load = (id: string): Session | undefined => {
@@ -526,69 +596,82 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
    * Append a turn. The caller passes the *whole* transcript it now holds: if
    * the current one is a prefix, only the new tail is written; otherwise the
    * transcript was rewritten and one `snapshot` line carries it.
+   *
+   * The whole load-append-decide sequence runs under the session lock, so a
+   * `clear` can only land entirely before or entirely after it; there is no
+   * window in which `ord` is computed against a transcript that has since been
+   * truncated. `options.generation` adds the second half of the guard for a
+   * caller whose read happened outside this call.
    */
   const appendTurn = (
     id: string,
     messages: readonly ChatMessage[],
     turnOptions: AppendTurnOptions = {},
   ): void => {
-    const loaded = loadSession(id)
-    if (loaded === undefined) throw unknownSession(id)
-    // The log stores JSON; compare the same canonical shape or a field such as
-    // `toolCallId: undefined` (dropped on write) would defeat the prefix test
-    // forever and turn every turn into a full snapshot.
-    const incoming = messages
-      .filter((message) => message.role !== 'system')
-      .map(canonicalMessage)
-    const grows = startsWithMessages(incoming, loaded.messages)
-    const delta = grows ? incoming.slice(loaded.messages.length) : []
-    const runId = turnOptions.runId
-    const metaNeedsWrite =
-      !grows ||
-      delta.length > 0 ||
-      loaded.tornTail ||
-      loaded.meta.messageCount !== incoming.length ||
-      (runId !== undefined && !loaded.meta.runs.includes(runId))
-    if (grows && delta.length === 0 && !metaNeedsWrite) return
-
-    const now = Date.now()
-    const dir = sessionDir(id)
-    const eventsFile = join(dir, EVENTS_FILE)
-    // An old/copied tree can be world-readable; tighten it before appending.
-    try {
-      chmodSync(root, DIR_MODE)
-      chmodSync(dir, DIR_MODE)
-    } catch {
-      // Best effort; the transcript itself is chmod'ed by appendLines.
-    }
-    if (loaded.tornTail) dropTornTail(eventsFile)
-    if (grows) {
-      if (delta.length > 0) {
-        appendLines(
-          eventsFile,
-          delta.map((message, index) =>
-            JSON.stringify({ v: 1, ord: loaded.nextOrd + index, ts: now, type: 'message', message }),
-          ),
-        )
+    withSessionLock(id, (dir) => {
+      const loaded = loadSession(id)
+      if (loaded === undefined) throw unknownSession(id)
+      // The generation is only meaningful as "what the caller read": an absent
+      // value keeps the old, unguarded behaviour a fresh writer relies on.
+      const generation = loaded.meta.generation ?? 0
+      if (turnOptions.generation !== undefined && turnOptions.generation !== generation) {
+        throw new SessionClearedError(id, generation)
       }
-    } else {
-      appendLines(eventsFile, [
-        JSON.stringify({ v: 1, ord: loaded.nextOrd, ts: now, type: 'snapshot', messages: incoming }),
-      ])
-    }
+      // The log stores JSON; compare the same canonical shape or a field such as
+      // `toolCallId: undefined` (dropped on write) would defeat the prefix test
+      // forever and turn every turn into a full snapshot.
+      const incoming = messages
+        .filter((message) => message.role !== 'system')
+        .map(canonicalMessage)
+      const grows = startsWithMessages(incoming, loaded.messages)
+      const delta = grows ? incoming.slice(loaded.messages.length) : []
+      const runId = turnOptions.runId
+      const metaNeedsWrite =
+        !grows ||
+        delta.length > 0 ||
+        loaded.tornTail ||
+        loaded.meta.messageCount !== incoming.length ||
+        (runId !== undefined && !loaded.meta.runs.includes(runId))
+      if (grows && delta.length === 0 && !metaNeedsWrite) return
 
-    // Transcript first, meta second: a crash between them leaves the messages
-    // complete and only `updatedAt`/`messageCount` stale. The next load repairs
-    // the count; a late `runId` is still written even when there is no delta.
-    const meta: SessionMeta = {
-      ...loaded.meta,
-      updatedAt: metaNeedsWrite ? now : loaded.meta.updatedAt,
-      messageCount: incoming.length,
-    }
-    if (runId !== undefined && !meta.runs.includes(runId)) {
-      meta.runs = [...meta.runs, runId]
-    }
-    if (metaNeedsWrite) writeMetaFile(sessionDir(id), meta)
+      const now = Date.now()
+      const eventsFile = join(dir, EVENTS_FILE)
+      // An old/copied tree can be world-readable; tighten it before appending.
+      try {
+        chmodSync(root, DIR_MODE)
+        chmodSync(dir, DIR_MODE)
+      } catch {
+        // Best effort; the transcript itself is chmod'ed by appendLines.
+      }
+      if (loaded.tornTail) dropTornTail(eventsFile)
+      if (grows) {
+        if (delta.length > 0) {
+          appendLines(
+            eventsFile,
+            delta.map((message, index) =>
+              JSON.stringify({ v: 1, ord: loaded.nextOrd + index, ts: now, type: 'message', message }),
+            ),
+          )
+        }
+      } else {
+        appendLines(eventsFile, [
+          JSON.stringify({ v: 1, ord: loaded.nextOrd, ts: now, type: 'snapshot', messages: incoming }),
+        ])
+      }
+
+      // Transcript first, meta second: a crash between them leaves the messages
+      // complete and only `updatedAt`/`messageCount` stale. The next load repairs
+      // the count; a late `runId` is still written even when there is no delta.
+      const meta: SessionMeta = {
+        ...loaded.meta,
+        updatedAt: metaNeedsWrite ? now : loaded.meta.updatedAt,
+        messageCount: incoming.length,
+      }
+      if (runId !== undefined && !meta.runs.includes(runId)) {
+        meta.runs = [...meta.runs, runId]
+      }
+      if (metaNeedsWrite) writeMetaFile(dir, meta)
+    })
   }
 
   /**
@@ -598,36 +681,52 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
    * old turns are unlinked from disk instead of merely being hidden behind a
    * trailing `snapshot`. The next append starts again at `ord 0`.
    *
+   * `generation` advances in the same metadata write as `messageCount: 0`. It is
+   * the only thing that can tell a client holding a pre-clear message array that
+   * its array is no longer the transcript: an empty log is a prefix of every
+   * array, so a prefix test alone would happily re-append everything the user
+   * had just deleted.
+   *
    * A session that is already empty is left byte-for-byte untouched, including
-   * its `updatedAt`: `/clear` on a fresh conversation must not reorder the
-   * session list.
+   * its `updatedAt` and its `generation`: `/clear` on a fresh conversation must
+   * not reorder the session list, and nothing changed there for a stale client
+   * to be wrong about.
    */
   const clear = (id: string): void => {
-    const dir = sessionDir(id)
-    const meta = readMetaFile(join(dir, META_FILE), id)
-    if (meta === undefined) throw unknownSession(id)
-    const eventsFile = join(dir, EVENTS_FILE)
-    // Same refusal as `replayEvents`: writing empty bytes through a link would
-    // truncate a file this store does not own.
-    if (isSymlink(eventsFile)) {
-      throw new SessionCorruptError(eventsFile, 'events file is a symbolic link')
-    }
-    // Trust the file, not the count: a stale `messageCount` must not leave old
-    // turns behind. An absent file already reads back as zero messages.
-    if (meta.messageCount === 0 && isFileEmpty(eventsFile)) return
-    const now = Date.now()
-    // Transcript first, meta second, as in `appendTurn`: a crash in between
-    // leaves an empty log with a stale count, which the next load repairs.
-    // `writeFileAtomic` creates its temp file 0600, so the emptied transcript
-    // keeps the private mode the append path enforces.
-    writeFileAtomic(eventsFile, '')
-    writeMetaFile(dir, { ...meta, messageCount: 0, updatedAt: now })
+    withSessionLock(id, (dir) => {
+      const meta = readMetaFile(join(dir, META_FILE), id)
+      if (meta === undefined) throw unknownSession(id)
+      const eventsFile = join(dir, EVENTS_FILE)
+      // Same refusal as `replayEvents`: writing empty bytes through a link would
+      // truncate a file this store does not own.
+      if (isSymlink(eventsFile)) {
+        throw new SessionCorruptError(eventsFile, 'events file is a symbolic link')
+      }
+      // Trust the file, not the count: a stale `messageCount` must not leave old
+      // turns behind. An absent file already reads back as zero messages.
+      if (meta.messageCount === 0 && isFileEmpty(eventsFile)) return
+      const now = Date.now()
+      // Transcript first, meta second, as in `appendTurn`: a crash in between
+      // leaves an empty log with a stale count, which the next load repairs.
+      // `writeFileAtomic` creates its temp file 0600, so the emptied transcript
+      // keeps the private mode the append path enforces.
+      writeFileAtomic(eventsFile, '')
+      writeMetaFile(dir, {
+        ...meta,
+        messageCount: 0,
+        updatedAt: now,
+        generation: (meta.generation ?? 0) + 1,
+      })
+    })
   }
 
+  /** Rename/archive land here, so a patch cannot interleave with an append. */
   const setMeta = (id: string, patch: SessionMetaPatch): void => {
-    const meta = readMeta(id)
-    if (meta === undefined) throw unknownSession(id)
-    writeMeta(id, applyPatch(meta, patch))
+    withSessionLock(id, (dir) => {
+      const meta = readMetaFile(join(dir, META_FILE), id)
+      if (meta === undefined) throw unknownSession(id)
+      writeMetaFile(dir, applyPatch(meta, patch))
+    })
   }
 
   const rename = (id: string, name: string): void => {
@@ -649,6 +748,13 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     let target = join(trash, base)
     for (let suffix = 1; existsSync(target); suffix += 1) target = join(trash, `${base}-${suffix}`)
     renameSync(dir, target)
+    // A live or stale `.lock` travels with the directory; it must not follow the
+    // session into `.trash` and it must never make `remove` fail.
+    try {
+      unlinkSync(join(target, LOCK_FILE))
+    } catch {
+      // Absent, or already released by its holder.
+    }
     try {
       const pointer = JSON.parse(readFileSync(join(root, LATEST_FILE), 'utf8')) as unknown
       if (isRecord(pointer) && pointer['id'] === id) unlinkSync(join(root, LATEST_FILE))
