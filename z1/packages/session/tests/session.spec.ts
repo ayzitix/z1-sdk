@@ -392,6 +392,18 @@ describe('root resolution', () => {
     expect(lines).toHaveLength(1)
   })
 
+  test('an in-repo override is excluded from git too', () => {
+    const repo = tempDir('z1-git-override-')
+    execFileSync('git', ['init', '--quiet', repo], { stdio: 'ignore' })
+    const custom = join(repo, 'sessions-custom')
+    const resolved = resolveSessionRoot({ cwd: repo, env: { Z1_SESSIONS_DIR: custom } })
+    expect(resolved.mode).toBe('override')
+    expect(existsSync(join(custom, 'sessions'))).toBe(true)
+    expect(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain(
+      '/sessions-custom/',
+    )
+  })
+
   test('a pre-existing non-session z1/ falls back outside the project', () => {
     const repo = tempDir('z1-collision-')
     const home = tempDir('z1-home-')

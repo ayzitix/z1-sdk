@@ -179,6 +179,8 @@ export function resolveSessionRoot(options: ResolveSessionRootOptions): Resolved
   if (override !== undefined && override !== '') {
     const root = resolve(cwd, expandHome(override, env))
     ensureSessionRoot(root)
+    // An override inside the repository must not dirty `git status` either.
+    excludeFromGit(root, repoRoot)
     return { root, mode: 'override', repoRoot }
   }
 
