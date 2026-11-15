@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "com.example.env",
+  "version": "1.0.0",
+  "title": "Env probe",
+  "description": "Reports the environment its worker sees, to prove the spawn allowlist.",
+  "license": "MIT",
+  "engines": { "z1": ">=0.1.0" },
+  "entry": "index.js",
+  "nodes": [
+    {
+      "id": "com.example.env.read",
+      "version": "1.0.0",
+      "title": "Read env",
+      "category": "example",
+      "inputs": [],
+      "outputs": [{ "kind": "data", "id": "env", "schema": { "type": "string" } }]
+    }
+  ]
+}

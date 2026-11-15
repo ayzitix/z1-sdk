@@ -52,6 +52,13 @@ export interface ModuleRuntimeOptions {
    * over `services.approvalFor` when both are present.
    */
   approvalFor?: (runId: string) => ApprovalService | undefined
+  /**
+   * Environment handed to every module child (nodes and worker services).
+   * The composition root passes `workerEnvironment(...)` rather than
+   * `process.env`: module code must not read a secret it was never granted.
+   * Omitted keeps the historical behaviour — `PATH` only.
+   */
+  env?: Record<string, string>
 }
 
 /** One service a module provides, as the host sees it. */
@@ -307,6 +314,7 @@ export class ModuleRuntime {
       loadServices: slot.loadServices,
       capabilities: slot.capabilities,
       services: this.#services(),
+      ...(this.#options.env === undefined ? {} : { env: this.#options.env }),
       moduleId,
       moduleVersion: version,
       ...(limits?.timeoutMs !== undefined ? { timeoutMs: limits.timeoutMs } : {}),

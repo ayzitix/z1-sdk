@@ -25,6 +25,7 @@ import {
   StartedServiceRegistry,
   cloneRegistry,
   declarationRegistry,
+  workerEnvironment,
 } from '@z1/node-host'
 import type { ModuleServiceLog, WorkerCapabilityDenial } from '@z1/node-host'
 import { createBuiltinRegistry } from '@z1/nodes'
@@ -335,6 +336,10 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
       store: modules,
       // Module code sees the same workspace and fs backend as the process.
       workspace: config.cwd,
+      // Only the worker allowlist — never all of `process.env` — so a module
+      // cannot read provider keys or unrelated secrets. Host-mode services
+      // stay in-process and keep the full environment.
+      env: workerEnvironment(config.env ?? process.env),
       services: {
         llm,
         llmFor: (runId: string) => runLlm.get(runId),

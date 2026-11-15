@@ -70,12 +70,17 @@ async function installModule(
 
 async function makeRuntime(
   modulesPath: string,
-  overrides: { useModules?: boolean; useServiceModules?: boolean } = {},
+  overrides: {
+    useModules?: boolean
+    useServiceModules?: boolean
+    /** Process environment the config resolves from (defaults to empty). */
+    env?: Record<string, string | undefined>
+  } = {},
 ): Promise<Runtime> {
   const runtime = await createRuntime(
     loadRuntimeConfig({
       cwd: root,
-      env: {},
+      env: overrides.env ?? {},
       overrides: {
         dbPath: join(root, `runs-${randomUUID()}.db`),
         graphsPath: join(root, 'graphs'),
@@ -609,4 +614,92 @@ export const services = {
       }),
     ).rejects.toThrow(/not available for run/)
   })
+})
+
+describe('module environment', () => {
+  test('a worker sees the allowlist; a host service sees the whole process env', async () => {
+    const modulesPath = join(root, 'store-env')
+    const source = await moduleSource(
+      {
+        id: 'com.example.env',
+        version: '1.0.0',
+        title: 'env',
+        entry: 'index.js',
+        nodes: [
+          {
+            id: 'com.example.env.read',
+            version: '1.0.0',
+            title: 'Read env',
+            category: 'example',
+            inputs: [],
+            outputs: [
+              { kind: 'data', id: 'value' },
+              { kind: 'flow', id: 'out' },
+            ],
+          },
+        ],
+        // Trusted, so it runs in-process: host mode is deliberately unfiltered.
+        services: [{ id: 'llm', kind: 'llm', trusted: true }],
+      },
+      `export const nodes = [{
+  id: 'com.example.env.read',
+  version: '1.0.0',
+  title: 'Read env',
+  category: 'example',
+  inputs: [],
+  outputs: [{ kind: 'data', id: 'value' }, { kind: 'flow', id: 'out' }],
+  async execute() {
+    return {
+      value: JSON.stringify({
+        searxUrl: process.env['Z1_SEARX_URL'] ?? null,
+        riverApiKey: process.env['RIVER_API_KEY'] ?? null,
+      }),
+      out: true,
+    }
+  },
+}]
+export const services = {
+  llm() {
+    return {
+      async chat() {
+        return {
+          message: {
+            role: 'assistant',
+            content: 'host-env: ' + (process.env['RIVER_API_KEY'] ?? 'none'),
+          },
+          toolCalls: [],
+          stopReason: 'stop',
+        }
+      },
+    }
+  },
+}
+`,
+    )
+    await installModule(modulesPath, source, { id: 'com.example.env', version: '1.0.0' })
+
+    // A secret only the host process holds, never the resolved config env.
+    const previous = process.env['RIVER_API_KEY']
+    process.env['RIVER_API_KEY'] = 'river-secret'
+    try {
+      const runtime = await makeRuntime(modulesPath, {
+        env: { Z1_SEARX_URL: 'http://127.0.0.1:8888' },
+      })
+
+      // Host mode: the same process, so the secret is visible.
+      expect(await runText(runtime, { useServiceModules: true })).toBe(
+        'host-env: river-secret',
+      )
+
+      // Worker mode: only the allowlisted searx URL crossed the process line.
+      const node = await run(runtime, moduleNodeGraph('com.example.env.read'))
+      expect(node.status).toBe('completed')
+      const seen = JSON.parse(String(node.outputs['output'])) as Record<string, unknown>
+      expect(seen['searxUrl']).toBe('http://127.0.0.1:8888')
+      expect(seen['riverApiKey']).toBeNull()
+    } finally {
+      if (previous === undefined) delete process.env['RIVER_API_KEY']
+      else process.env['RIVER_API_KEY'] = previous
+    }
+  }, 30_000)
 })

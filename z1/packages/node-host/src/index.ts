@@ -12,6 +12,7 @@ export type {
 } from './host.ts'
 export { ModuleWorker, bootstrapPackageRoot, resolveWorkerBootstrap } from './host.ts'
 export { DEFAULT_SERVICE_CALL_TIMEOUT_MS } from './host.ts'
+export { workerEnvironment } from './worker-env.ts'
 export { DEFAULT_TASK_OUTPUT_CHARS, ProcessTaskError, ProcessTasks } from './process-tasks.ts'
 export {
   cloneRegistry,
