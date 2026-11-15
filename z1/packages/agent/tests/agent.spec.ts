@@ -56,6 +56,18 @@ function systemMessage(fixture: Fixture, index = 0): string {
   return message?.content ?? ''
 }
 
+/** The value of a node looked up by id, so a reordered graph does not break a test. */
+function nodeConfig(graph: GraphDocument, id: string): Record<string, unknown> {
+  const found = graph.nodes.find((item) => item.id === id)
+  if (found === undefined) throw new Error(`node "${id}" is missing`)
+  return found.config as unknown as Record<string, unknown>
+}
+
+/** `seedEmpty`'s constant: the history the graph puts before the user turn. */
+function seedValue(graph: GraphDocument): unknown {
+  return nodeConfig(graph, 'seedEmpty')['value']
+}
+
 /**
  * A stub model that answers the first request with two tool calls in a single
  * assistant message and every later request with a final answer. The mock
@@ -145,6 +157,107 @@ describe('buildAgentGraph', () => {
 
     expect(systemMessage(fixture)).toContain('## Ancestors')
     expect(fixture.services.lastChatRequest?.messages).toHaveLength(2)
+  })
+
+  test('seeds the previous transcript from history, in order', () => {
+    const graph = buildAgentGraph({
+      model: MODEL,
+      history: [
+        { role: 'user', content: 'first ask' },
+        { role: 'assistant', content: 'first answer' },
+      ],
+    })
+
+    expect(seedValue(graph)).toEqual([
+      { role: 'user', content: 'first ask' },
+      { role: 'assistant', content: 'first answer' },
+    ])
+  })
+
+  test('drops a system message from history and keeps the prompt path', () => {
+    const graph = buildAgentGraph({
+      model: MODEL,
+      history: [
+        { role: 'system', content: 'OLD SYSTEM' },
+        { role: 'user', content: 'first ask' },
+      ],
+    })
+
+    expect(seedValue(graph)).toEqual([{ role: 'user', content: 'first ask' }])
+    // The history constant is still only the `a` of `seedUser`, so the freshly
+    // built system message cannot be replaced by the caller's old one.
+    expect(nodeConfig(graph, 'promptEmpty')['value']).toEqual([])
+  })
+
+  test('keeps tool messages and their toolCallId in order', () => {
+    const graph = buildAgentGraph({
+      model: MODEL,
+      history: [
+        { role: 'user', content: 'call it' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'call_1', name: 'echo', arguments: { q: 1 } }],
+        },
+        { role: 'tool', content: 'result', toolCallId: 'call_1' },
+      ],
+    })
+
+    expect(seedValue(graph)).toEqual([
+      { role: 'user', content: 'call it' },
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'call_1', name: 'echo', arguments: { q: 1 } }],
+      },
+      { role: 'tool', content: 'result', toolCallId: 'call_1' },
+    ])
+    expect(validateGraphTree(graph, createBuiltinRegistry())).toEqual([])
+  })
+
+  test('seeds an empty constant when no history is given', () => {
+    expect(seedValue(buildAgentGraph({ model: MODEL }))).toEqual([])
+  })
+
+  test('the loop seed still starts at promptHead, not at the history', () => {
+    const graph = buildAgentGraph({
+      model: MODEL,
+      history: [{ role: 'user', content: 'first ask' }],
+    })
+    const from = (to: string, port: string): string | undefined =>
+      graph.edges.find((edge) => edge.to.node === to && edge.to.port === port)?.from.node
+
+    expect(from('loop', 'seed')).toBe('seed')
+    expect(from('seed', 'a')).toBe('promptHead')
+    expect(from('seed', 'b')).toBe('seedUser')
+    expect(from('seedUser', 'a')).toBe('seedEmpty')
+    expect(from('seedUser', 'b')).toBe('userMessage')
+    expect(from('promptHead', 'a')).toBe('promptEmpty')
+    expect(from('promptHead', 'b')).toBe('promptMessage')
+  })
+
+  test('a request carries the fresh system prompt, then history, then the user turn', async () => {
+    const fixture = await run(
+      {
+        model: MODEL,
+        history: [
+          { role: 'system', content: 'OLD SYSTEM' },
+          { role: 'user', content: 'first ask' },
+          { role: 'assistant', content: 'first answer' },
+        ],
+      },
+      'second ask',
+    )
+
+    const messages = fixture.services.lastChatRequest?.messages ?? []
+    expect(messages[0]?.role).toBe('system')
+    expect(messages[0]?.content).toContain('You are z1')
+    expect(messages[0]?.content).not.toContain('OLD SYSTEM')
+    expect(messages.slice(1)).toEqual([
+      { role: 'user', content: 'first ask' },
+      { role: 'assistant', content: 'first answer' },
+      { role: 'user', content: 'second ask' },
+    ])
   })
 
   test('appends a custom system section at the end of the prompt', async () => {

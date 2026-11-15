@@ -1,5 +1,5 @@
 import type { GraphDocument, GraphEdge, GraphNode } from '@z1/graph'
-import type { Json, ModelHandle, ToolSchema } from '@z1/node'
+import type { ChatMessage, Json, ModelHandle, ToolSchema } from '@z1/node'
 import {
   DEFAULT_SECTIONS,
   ROLE_SECTIONS,
@@ -38,6 +38,12 @@ export interface AgentGraphOptions {
   reserveTokens?: number
   /** Autonomy policy exposed to the prompt as `{{autonomy}}`. Defaults to `auto`. */
   autonomyPolicy?: string
+  /**
+   * Previous conversation turns, placed in the seed before the user prompt.
+   * `system` entries are ignored: the prompt stack supplies the current system
+   * message, so a caller may pass a whole loop transcript verbatim.
+   */
+  history?: readonly ChatMessage[]
 }
 
 function node(id: string, type: string, x: number, y: number, config: Json = {}): GraphNode {
@@ -111,6 +117,28 @@ function toolsJson(tools: readonly ToolSchema[]): Json {
     if (tool.description !== undefined) entry['description'] = tool.description
     return entry
   })
+}
+
+/**
+ * History as node config. `ChatMessage` is an interface without an index
+ * signature, so it is not assignable to `Json` (a cast through `unknown` would
+ * only hide that). Copying field by field, like `toolsJson`, keeps the config
+ * JSON-only: no `undefined` values and no host-only fields a caller may have
+ * attached. Stale `system` messages are dropped here, once, for every caller.
+ */
+function historyJson(history: readonly ChatMessage[]): Json {
+  return history
+    .filter((message) => message.role !== 'system')
+    .map((message): Json => {
+      const entry: Record<string, Json> = { role: message.role, content: message.content }
+      if (message.toolCallId !== undefined) entry['toolCallId'] = message.toolCallId
+      if (message.toolCalls !== undefined) {
+        entry['toolCalls'] = message.toolCalls.map(
+          (call): Json => ({ id: call.id, name: call.name, arguments: call.arguments }),
+        )
+      }
+      return entry
+    })
 }
 
 /**
@@ -393,6 +421,10 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
     throw new Error('maxSteps must be >= 1')
   }
   const prompt = promptChain(options)
+  // The transcript is data the caller owns, so it is put in the seed here where
+  // that node is built, instead of a post-hoc patch of the finished document.
+  // Only `seedEmpty` is filled; `promptHead` (the system message) is untouched.
+  const seedValue = historyJson(options.history ?? [])
   return {
     schemaVersion: 1,
     id: 'agent.loop',
@@ -407,7 +439,7 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
       node('promptMessage', 'z1.core.message', 880, -300, { role: 'system' }),
       node('promptEmpty', 'z1.core.const', 660, -300, { value: [] }),
       node('promptHead', 'z1.core.concat', 1100, -300),
-      node('seedEmpty', 'z1.core.const', 660, 120, { value: [] }),
+      node('seedEmpty', 'z1.core.const', 660, 120, { value: seedValue }),
       node('seedUser', 'z1.core.concat', 880, 120),
       node('seed', 'z1.core.concat', 1320, 0),
       node('loop', 'z1.flow.loop', 1540, 0, {
