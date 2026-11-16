@@ -14,13 +14,25 @@
  *   hold <cwd> <id> <ms> <barrierFile>
  *     Take the session lock without writing anything, report via the barrier
  *     file, hold it for `ms`, release. The parent times a `clear` across it.
+ *   hold-exit <cwd> <id> <barrierFile> <releaseFile> [capMs]
+ *     Take the session lock, report via the barrier file, then wait for the
+ *     parent to create `releaseFile` and exit **without releasing**: the parent
+ *     holds a writer off a lock whose holder is guaranteed alive (no sleep to
+ *     outlast), and the lock it leaves behind has a dead pid. `capMs` (default
+ *     15 s) keeps a failing parent from stranding the child.
+ *   heartbeat-exit <cwd> <id> <barrierFile> <waitMs>
+ *     Take the lock with a 20 ms heartbeat, age its mtime to prove the
+ *     heartbeat really refreshes it, report via the barrier file, wait `waitMs`
+ *     on this process's own timer, then let the event loop drain: no release,
+ *     no `process.exit`. If the heartbeat were not unref'd the process would
+ *     never exit, and the lock it leaves behind has a dead pid.
  *
  * Any outcome the store documents as clean (SessionClearedError, a lock
  * timeout) is a pass; only an unexpected error is a failure, and it is reported
  * through the exit code because that is what the parent reads.
  */
 
-import { writeFileSync } from 'node:fs'
+import { existsSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { createSessionStore } from '../src/index.ts'
@@ -41,10 +53,14 @@ const [mode, cwd, id, ...rest] = process.argv.slice(2)
 if (mode === undefined || cwd === undefined || id === undefined) {
   console.error('child: usage: race-child.ts rounds <cwd> <id> <rounds> <gapMs> <chunk>')
   console.error('child:        race-child.ts hold <cwd> <id> <ms> <barrierFile>')
+  console.error('child:        race-child.ts hold-exit <cwd> <id> <barrierFile> <releaseFile> [capMs]')
   process.exit(2)
 }
 
 const store = createSessionStore({ cwd, env: {} })
+
+/** `heartbeat-exit` must let the event loop decide when to exit. */
+let explicitExit = true
 
 if (mode === 'hold') {
   const holdMs = Number(rest[0] ?? '250')
@@ -58,6 +74,36 @@ if (mode === 'hold') {
   } finally {
     release()
   }
+} else if (mode === 'hold-exit') {
+  const barrier = rest[0]
+  const releaseFile = rest[1]
+  const capMs = Number(rest[2] ?? '15000')
+  if (barrier === undefined || releaseFile === undefined) fail('hold-exit needs a barrier and a release file')
+  const lock = join(store.root, 'sessions', id, LOCK_FILE)
+  // Deliberately never released: the lock the parent reclaims afterwards has a
+  // dead holder, which is the half of the liveness rule this mode proves.
+  acquireLock(lock)
+  writeFileSync(barrier, `${String(process.pid)}\n`)
+  const deadline = Date.now() + capMs
+  while (!existsSync(releaseFile) && Date.now() < deadline) sleep(2)
+  // No `process.exit`: the unref'd heartbeat must not keep this alive.
+  explicitExit = false
+} else if (mode === 'heartbeat-exit') {
+  const barrier = rest[0]
+  const waitMs = Number(rest[1] ?? '120')
+  if (barrier === undefined) fail('heartbeat-exit needs a barrier file')
+  const lock = join(store.root, 'sessions', id, LOCK_FILE)
+  // Deliberately never released and never explicitly released later either: the
+  // heartbeat timer is the only thing that could keep the loop alive.
+  acquireLock(lock, { heartbeatMs: 20 })
+  // Old on purpose: only the heartbeat can make it look fresh again.
+  const aged = new Date(Date.now() - 120_000)
+  utimesSync(lock, aged, aged)
+  writeFileSync(barrier, `${String(process.pid)}\n`)
+  explicitExit = false
+  setTimeout(() => {
+    process.stdout.write('done\n')
+  }, waitMs)
 } else if (mode === 'rounds') {
   const rounds = Number(rest[0] ?? '10')
   const gap = Number(rest[1] ?? '10')
@@ -91,4 +137,4 @@ if (mode === 'hold') {
   fail(`unknown mode ${JSON.stringify(mode)}`)
 }
 
-process.exit(0)
+if (explicitExit) process.exit(0)

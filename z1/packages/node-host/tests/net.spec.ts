@@ -200,6 +200,104 @@ async function bodyFrom(
   }
 }
 
+describe('net.request port grants', () => {
+  test('a host:port grant reaches that listener', async () => {
+    const server = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('one port')
+    })
+    try {
+      const worker = workerWith([`127.0.0.1:${server.port}`])
+      await worker.start()
+      const outputs = await fetchText(worker, `${server.url}/`)
+      expect(outputs['status']).toBe(200)
+      expect(outputs['body']).toBe('one port')
+    } finally {
+      await server.close()
+    }
+  }, 20_000)
+
+  test('a second port on the same host is denied before the request is sent', async () => {
+    let hits = 0
+    const granted = await serve((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('granted')
+    })
+    const other = await serve((_request, response) => {
+      hits += 1
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('OTHER-LISTENER')
+    })
+    try {
+      const worker = workerWith([`127.0.0.1:${granted.port}`])
+      await worker.start()
+      expect((await fetchText(worker, `${granted.url}/`))['body']).toBe('granted')
+      await expect(fetchText(worker, `${other.url}/`)).rejects.toThrow(
+        new RegExp(
+          `capability denied for net\\.request "127\\.0\\.0\\.1".*127\\.0\\.0\\.1:${String(other.port)}`,
+        ),
+      )
+      expect(hits).toBe(0)
+    } finally {
+      await granted.close()
+      await other.close()
+    }
+  }, 20_000)
+
+  test('a redirect to another port on the granted host is denied', async () => {
+    let secretHits = 0
+    const secret = await serve((_request, response) => {
+      secretHits += 1
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('SECRET')
+    })
+    const front = await serve((request, response) => {
+      if (request.url === '/redir') {
+        response.writeHead(302, { location: `${secret.url}/secret` })
+        response.end()
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('front')
+    })
+    try {
+      // Only the front listener is granted; the hop is the same host, a
+      // different port, so only the port check can stop it.
+      const worker = workerWith([`127.0.0.1:${front.port}`])
+      await worker.start()
+      expect((await fetchText(worker, `${front.url}/`))['body']).toBe('front')
+      await expect(fetchText(worker, `${front.url}/redir`)).rejects.toThrow(
+        new RegExp(
+          `capability denied for net\\.request "127\\.0\\.0\\.1".*127\\.0\\.0\\.1:${String(secret.port)}`,
+        ),
+      )
+      expect(secretHits).toBe(0)
+    } finally {
+      await front.close()
+      await secret.close()
+    }
+  }, 20_000)
+
+  test('a wildcard still denies loopback at the port it grants', async () => {
+    let hits = 0
+    const server = await serve((_request, response) => {
+      hits += 1
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('INTERNAL-ONLY')
+    })
+    try {
+      const worker = workerWith(['*'])
+      await worker.start()
+      await expect(fetchText(worker, `${server.url}/`)).rejects.toThrow(
+        /capability denied for net\.request .*needs an explicit net\.hosts entry/,
+      )
+      expect(hits).toBe(0)
+    } finally {
+      await server.close()
+    }
+  }, 20_000)
+})
+
 describe('net.request final URL', () => {
   test('a direct request reports its own URL', async () => {
     const server = await serve((_request, response) => {

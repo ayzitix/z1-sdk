@@ -9,8 +9,10 @@ import {
   checkNetTarget,
   checkProcess,
   classifyNetTarget,
+  describeCapabilityRisks,
   isPrivateAddress,
   matchPath,
+  parseHostPattern,
   resolveCapabilityPath,
 } from '../src/index.ts'
 import type { ModuleCapabilities } from '../src/types.ts'
@@ -211,6 +213,90 @@ describe('checkNet', () => {
   })
 })
 
+describe('parseHostPattern', () => {
+  test('splits host:port, brackets an IPv6 port, and never breaks a bare IPv6 literal', () => {
+    expect(parseHostPattern(' example.com:443 ')).toEqual({ host: 'example.com', port: 443 })
+    expect(parseHostPattern('Example.COM:443')).toEqual({ host: 'example.com', port: 443 })
+    expect(parseHostPattern('[::1]:8888')).toEqual({ host: '::1', port: 8888 })
+    expect(parseHostPattern('[::1]')).toEqual({ host: '::1' })
+    expect(parseHostPattern('::1')).toEqual({ host: '::1' })
+    // A bare IPv6 literal is a host, never `host:port`.
+    expect(parseHostPattern('2001:db8::1')).toEqual({ host: '2001:db8::1' })
+  })
+
+  test('rejects unusable entries instead of granting them', () => {
+    for (const value of [
+      '',
+      '   ',
+      '127.0.0.1:0',
+      '127.0.0.1:65536',
+      '127.0.0.1:',
+      'example.com:https',
+      '[::1',
+      '[::1]x',
+      '[::1]:',
+      '[::1]:70000',
+      ':8888',
+    ]) {
+      expect([value, parseHostPattern(value)]).toEqual([value, undefined])
+    }
+  })
+})
+
+describe('port-scoped net grants', () => {
+  const onePort: ModuleCapabilities = { net: { hosts: ['127.0.0.1:8888'] } }
+
+  test('a host:port entry grants that port only', () => {
+    expect(checkNet(onePort, '127.0.0.1', 8888)).toEqual({ ok: true })
+    const denied = checkNet(onePort, '127.0.0.1', 35545)
+    expect(denied.ok).toBe(false)
+    if (!denied.ok) expect(denied.reason).toContain('127.0.0.1:35545')
+    // A port-scoped grant cannot be honoured without knowing the port.
+    expect(checkNet(onePort, '127.0.0.1').ok).toBe(false)
+    // A bare host keeps the pre-port any-port meaning.
+    expect(checkNet({ net: { hosts: ['127.0.0.1'] } }, '127.0.0.1', 35545)).toEqual({ ok: true })
+  })
+
+  test('brackets, hostnames and a trailing dot keep their port', () => {
+    const v6: ModuleCapabilities = { net: { hosts: ['[::1]:8888'] } }
+    expect(checkNet(v6, '::1', 8888)).toEqual({ ok: true })
+    expect(checkNet(v6, '[::1]', 8888)).toEqual({ ok: true })
+    expect(checkNet(v6, '::1', 8889).ok).toBe(false)
+    expect(checkNet(v6, '::1').ok).toBe(false)
+
+    const named: ModuleCapabilities = { net: { hosts: ['localhost:8888'] } }
+    expect(checkNet(named, 'localhost', 8888)).toEqual({ ok: true })
+    expect(checkNet(named, 'LOCALHOST.', 8888)).toEqual({ ok: true })
+    expect(checkNet(named, 'localhost.', 8889).ok).toBe(false)
+  })
+
+  test('the SSRF half honours a port-scoped private grant', () => {
+    expect(checkNetTarget(onePort, '127.0.0.1', ['127.0.0.1'], 8888)).toEqual({ ok: true })
+    const denied = checkNetTarget(onePort, '127.0.0.1', ['127.0.0.1'], 35545)
+    expect(denied.ok).toBe(false)
+    if (!denied.ok) expect(denied.reason).toContain('127.0.0.1:35545')
+    // Port unknown: a port grant does not cover it.
+    expect(checkNetTarget(onePort, '127.0.0.1', ['127.0.0.1']).ok).toBe(false)
+
+    const named = checkNetTarget(
+      { net: { hosts: ['localhost:8888'] } },
+      'localhost.',
+      ['::1'],
+      8888,
+    )
+    expect(named).toEqual({ ok: true })
+  })
+
+  test('a wildcard still denies every private target, port or not', () => {
+    const wildcard: ModuleCapabilities = { net: { hosts: ['*'] } }
+    for (const port of [8888, 35545]) {
+      const denied = checkNetTarget(wildcard, '127.0.0.1', ['127.0.0.1'], port)
+      expect(denied.ok).toBe(false)
+      if (!denied.ok) expect(denied.reason).toMatch(/explicit net\.hosts entry/)
+    }
+  })
+})
+
 describe('isPrivateAddress', () => {
   test('classifies the special-purpose ranges and hostnames', () => {
     const table: Array<[string, boolean]> = [
@@ -257,6 +343,31 @@ describe('isPrivateAddress', () => {
     expect(classifyNetTarget('239.1.1.1')).toBe('multicast')
     expect(classifyNetTarget('240.0.0.1')).toBe('reserved')
     expect(classifyNetTarget('93.184.216.34')).toBe('public')
+  })
+
+  test('the special-purpose blocks a naive range check calls public', () => {
+    const table: Array<[string, string]> = [
+      // RFC 6598 carrier-grade NAT: container networks and vendor metadata.
+      ['100.64.0.1', 'private'],
+      // Alibaba Cloud's metadata service, by name and by address.
+      ['100.100.100.200', 'link-local'],
+      // RFC 2544 benchmarking range.
+      ['198.18.0.1', 'reserved'],
+      // RFC 5737 documentation range.
+      ['192.0.2.1', 'reserved'],
+      // NAT64 `64:ff9b::/96` with 127.0.0.1 embedded.
+      ['64:ff9b::7f00:1', 'loopback'],
+      // RFC 6052 IPv4-translated `::ffff:0:0/96` with 127.0.0.1 embedded.
+      ['::ffff:0:127.0.0.1', 'loopback'],
+      // 6to4 `2002::/16` with 127.0.0.1 embedded.
+      ['2002:7f00:1::', 'loopback'],
+      // `2001:db8::/32` documentation prefix.
+      ['2001:db8::1', 'reserved'],
+    ]
+    for (const [value, expected] of table) {
+      expect([value, classifyNetTarget(value)]).toEqual([value, expected])
+      expect([value, isPrivateAddress(value)]).toEqual([value, true])
+    }
   })
 })
 
@@ -339,5 +450,52 @@ describe('checkProcess', () => {
 
   test('rejects empty commands', () => {
     expect(checkProcess({ process: { spawn: ['*'] } }, '   ').ok).toBe(false)
+  })
+})
+
+describe('describeCapabilityRisks', () => {
+  test('a narrow grant says nothing', () => {
+    expect(describeCapabilityRisks(undefined)).toEqual([])
+    expect(describeCapabilityRisks({})).toEqual([])
+    expect(
+      describeCapabilityRisks({ fs: { read: ['/**'] }, net: { hosts: ['api.example.com'] } }),
+    ).toEqual([])
+  })
+
+  test('any spawn grant is described as full host access', () => {
+    const narrow = describeCapabilityRisks({ process: { spawn: ['/opt/bin/convert'] } })
+    expect(narrow).toHaveLength(1)
+    expect(narrow[0]).toContain('spawn is full host access')
+    expect(narrow[0]).toContain('bypasses fs/net grants')
+  })
+
+  test('an interpreter, shell, VCS tool or wildcard adds the specific warning', () => {
+    const node = describeCapabilityRisks({ process: { spawn: ['node'] } })
+    expect(node).toHaveLength(2)
+    expect(node[1]).toContain('grants an interpreter, shell or wildcard (node)')
+    expect(node[1]).toContain('only grant commands whose entire behaviour is acceptable')
+
+    const shell = describeCapabilityRisks({ process: { spawn: ['/bin/bash', 'git'] } })
+    expect(shell).toHaveLength(2)
+    expect(shell[1]).toContain('/bin/bash, git')
+
+    const star = describeCapabilityRisks({ process: { spawn: ['*'] } })
+    expect(star).toHaveLength(2)
+    expect(star[1]).toContain('(*)')
+  })
+
+  test('net wildcards are called out without overclaiming what `*` reaches', () => {
+    const pattern = describeCapabilityRisks({ net: { hosts: ['*.example.com'] } })
+    expect(pattern).toHaveLength(1)
+    expect(pattern[0]).toContain('wildcard pattern')
+
+    const star = describeCapabilityRisks({ net: { hosts: ['*'] } })
+    expect(star).toHaveLength(1)
+    expect(star[0]).toContain('never private/metadata targets')
+
+    for (const host of ['0.0.0.0', '::']) {
+      const other = describeCapabilityRisks({ net: { hosts: [host] } })
+      expect(other[0]).toContain('never private/metadata targets')
+    }
   })
 })

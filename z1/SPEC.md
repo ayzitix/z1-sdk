@@ -655,10 +655,20 @@ A manifest declares the brokered calls its nodes and worker services may use
 | --- | --- |
 | `fs.read` | glob list for `ctx.fs.read` and `ctx.fs.list` |
 | `fs.write` | glob list for `ctx.fs.write` |
-| `net.hosts` | host glob list for `ctx.net.request` (HTTP(S) only) |
+| `net.hosts` | host or `host:port` glob list for `ctx.net.request` (HTTP(S) only) |
 | `process.spawn` | command glob list for `ctx.process.run` |
 | `llm.providers` / `true` | model providers for `ctx.llm.chat` |
 | `tools.names` / `true` | tools for `ctx.tools.call` |
+
+`net.hosts` entries are `host`, `host:port`, `[ipv6]` or `[ipv6]:port`. Matching
+is case-insensitive and ignores the root-label dot and IPv6 brackets. An entry
+without a port matches every port; an entry with one matches only that
+listener, judged against the **effective** port of each hop (explicit, or the
+80/443 scheme default), so `hosts: ['127.0.0.1:8888']` reaches exactly one local
+backend and a redirect to another loopback port is denied. `'*'` is a statement
+about the public internet only: it never unlocks loopback, private, link-local,
+metadata or reserved targets. A literal `host:port` grant is therefore the only
+way to allow a local service.
 
 `fs.list` lists one directory level: `{ path, entries: [{ name, path, type,
 size? }] }`, sorted by name, with `type` one of `file | dir | symlink`.
@@ -674,7 +684,10 @@ absent or empty list denies every command. An explicit `cwd` must be inside
 30 000 ms and is capped at 300 000 ms; `maxOutputBytes` is a shared
 stdout+stderr budget, defaults to 1 MiB, and is capped at 5 MiB. Hitting either
 limit kills the child, and `truncated` reports an output overrun. The child
-environment is minimal `{ PATH, ...request.env }`.
+environment is minimal `{ PATH, ...request.env }`. `process.spawn` is host
+access, not a narrow grant: `node -e`, `python -c` or `git` with an alias can
+read files and open sockets the fs/net grants would otherwise deny, so only
+commands whose entire behaviour is acceptable should be granted.
 
 The entry exports factories alongside any `nodes`:
 

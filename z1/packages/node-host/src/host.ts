@@ -617,6 +617,7 @@ function decodeBody(bytes: Uint8Array, contentType: string | null): string {
 async function guardNetTarget(
   capabilities: ModuleCapabilities | undefined,
   host: string,
+  port?: number,
 ): Promise<CapabilityCheck> {
   const name = host.replace(/^\[/, '').replace(/\]$/, '')
   let addresses: string[]
@@ -628,7 +629,18 @@ async function guardNetTarget(
       `net.request cannot resolve "${name}": ${error instanceof Error ? error.message : String(error)}`,
     )
   }
-  return checkNetTarget(capabilities, host, addresses)
+  return checkNetTarget(capabilities, host, addresses, port)
+}
+
+/**
+ * The port the request will actually connect to: the explicit one, or the
+ * scheme default. `URL.port` is `''` for `http://host/`, and a `host:port`
+ * grant must be matched against the port a connection really uses, not
+ * against the empty string.
+ */
+function effectivePort(url: URL): number {
+  if (url.port !== '') return Number(url.port)
+  return url.protocol === 'https:' ? 443 : 80
 }
 
 function headersRecord(headers: Headers): Record<string, string> {
@@ -1823,14 +1835,18 @@ export class ModuleWorker {
     // would let an allowlisted host bounce the request to any other host and
     // return its body. Every hop is checked against the same allowlist.
     for (let hop = 0; ; hop += 1) {
-      const check = checkNet(this.#capabilities, current.hostname)
+      // The effective port is checked per hop: a `host:port` grant is a single
+      // listener, so a redirect to `127.0.0.1:<other port>` must fail even when
+      // the first hop was granted.
+      const port = effectivePort(current)
+      const check = checkNet(this.#capabilities, current.hostname, port)
       if (!check.ok) {
         throw this.#denied(nodeId, 'net.request', current.hostname, check.reason)
       }
       // The allowlist says which names are in scope; this says where they may
       // resolve. Re-checked per hop so an allowlisted host cannot bounce the
       // request into the LAN, loopback or the cloud metadata service.
-      const target = await guardNetTarget(this.#capabilities, current.hostname)
+      const target = await guardNetTarget(this.#capabilities, current.hostname, port)
       if (!target.ok) {
         throw this.#denied(nodeId, 'net.request', current.hostname, target.reason)
       }

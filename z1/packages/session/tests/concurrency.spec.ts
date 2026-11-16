@@ -356,40 +356,237 @@ describe('lock', () => {
     expect(readFileSync(outside, 'utf8')).toBe('kept\n')
   })
 
-  test('a stale lock is reclaimed; a fresh one is left alone and blocks the store', () => {
+  test('a lock is reclaimed only when its holder is dead; a live holder keeps it', () => {
     const cwd = tempDir()
     const store = open(cwd)
     const id = newSession(store, cwd).meta.id
     const lock = lockPath(store, id)
+    const old = new Date(Date.now() - 120_000)
 
-    // 11 s old: older than the 10 s crash window, so the next writer takes it.
+    // A dead pid: reclaimed immediately, and the append that reclaimed it
+    // released at the end.
     writeFileSync(lock, '99999\n', { mode: 0o600 })
-    const stale = new Date(Date.now() - 11_000)
-    utimesSync(lock, stale, stale)
+    utimesSync(lock, old, old)
     store.appendTurn(id, [user('one')])
     expect(store.load(id)?.messages).toEqual([user('one')])
-    // Released by the append that reclaimed it.
     expect(existsSync(lock)).toBe(false)
 
-    // Fresh: not stale, so it must not be deleted. Two identical stats are not
-    // enough to prove it abandoned.
+    // Dead pid with a *fresh* mtime: age is no longer what decides.
     writeFileSync(lock, '99999\n', { mode: 0o600 })
+    store.appendTurn(id, [user('one'), assistant('1')])
+    expect(store.load(id)?.messages).toHaveLength(2)
+    expect(existsSync(lock)).toBe(false)
+
+    // A live holder (`process.pid`): never reclaimed, however old the file is.
+    const liveBody = `${String(process.pid)}\n`
+    writeFileSync(lock, liveBody, { mode: 0o600 })
+    utimesSync(lock, old, old)
     const inode = statSync(lock).ino
+    const agedMtime = statSync(lock).mtimeMs
     expect(() => acquireLock(lock, { attempts: 3, retryMs: 5 })).toThrow(/could not acquire/)
+    // The very same file is still there: no unlink-and-recreate.
     expect(statSync(lock).ino).toBe(inode)
-    expect(readFileSync(lock, 'utf8')).toBe('99999\n')
+    expect(statSync(lock).mtimeMs).toBe(agedMtime)
+    expect(readFileSync(lock, 'utf8')).toBe(liveBody)
 
     // Reads are lock-free: a held lock does not block `load`.
     const started = performance.now()
-    expect(store.load(id)?.messages).toEqual([user('one')])
+    expect(store.load(id)?.messages).toHaveLength(2)
     expect(performance.now() - started).toBeLessThan(500)
 
     // A held lock is a clean, named refusal for a writer, not corruption.
-    expect(() => store.appendTurn(id, [user('one'), assistant('1')])).toThrow(/could not acquire/)
-    expect(readFileSync(lock, 'utf8')).toBe('99999\n')
+    expect(() =>
+      store.appendTurn(id, [user('one'), assistant('1'), user('two')]),
+    ).toThrow(/could not acquire/)
+    expect(readFileSync(lock, 'utf8')).toBe(liveBody)
     unlinkSync(lock)
+
+    // No readable pid at all: the mtime fallback decides, and it is two
+    // observations on the same inode, not "delete whatever looks old".
+    writeFileSync(lock, '', { mode: 0o600 })
+    const bodylessIno = statSync(lock).ino
+    expect(() => acquireLock(lock, { attempts: 3, retryMs: 5 })).toThrow(/could not acquire/)
+    expect(statSync(lock).ino).toBe(bodylessIno)
+    expect(readFileSync(lock, 'utf8')).toBe('')
+
+    // Old enough, still unowned: now it is reclaimed by the next writer.
+    utimesSync(lock, old, old)
+    const release = acquireLock(lock, { attempts: 3, retryMs: 5 })
+    expect(readFileSync(lock, 'utf8').startsWith(`${String(process.pid)}\n`)).toBe(true)
+    release()
+    expect(existsSync(lock)).toBe(false)
+
+    store.appendTurn(id, [user('one'), assistant('1'), user('two')])
+    expect(store.load(id)?.messages).toHaveLength(3)
+  })
+
+  test(
+    'a spawned live holder keeps its lock even when the file looks old',
+    { timeout: 30_000 },
+    async () => {
+      const cwd = tempDir()
+      const store = open(cwd)
+      const id = newSession(store, cwd).meta.id
+      const lock = lockPath(store, id)
+      const barrier = join(tempDir('z1-barrier-'), 'held')
+      const releaseFile = join(tempDir('z1-barrier-'), 'release')
+
+      // The holder stays alive until this test releases it, so the writer below
+      // spends its whole bounded wait against a *live* holder rather than
+      // racing a fixed sleep.
+      const runner = spawnChild(['hold-exit', cwd, id, barrier, releaseFile])
+      waitForFile(barrier, 10_000)
+      const body = readFileSync(lock, 'utf8')
+      const holder = Number(body.split('\n')[0])
+      expect(holder).toBeGreaterThan(0)
+
+      // Age the file: liveness, not mtime, is what keeps this lock alive.
+      const old = new Date(Date.now() - 3_600_000)
+      utimesSync(lock, old, old)
+      const inode = statSync(lock).ino
+      expect(() => acquireLock(lock, { attempts: 3, retryMs: 5 })).toThrow(/could not acquire/)
+      // A full default wait (~1 s of retries) still finds the holder alive: a
+      // mtime an hour in the past never decides. The refusal is clean and the
+      // lock is untouched, not deleted and re-created.
+      expect(() => store.appendTurn(id, [user('one')])).toThrow(/could not acquire/)
+      expect(statSync(lock).ino).toBe(inode)
+      expect(readFileSync(lock, 'utf8')).toBe(body)
+
+      writeFileSync(releaseFile, 'go\n')
+      expect(runner.err()).toBe('')
+      expect(await runner.exited).toBe(0)
+
+      // Its pid is dead now, so the lock is reclaimed immediately even though a
+      // human would call it ancient.
+      store.appendTurn(id, [user('one')])
+      expect(store.load(id)?.messages).toEqual([user('one')])
+      expect(existsSync(lock)).toBe(false)
+    },
+  )
+
+  test(
+    'a heartbeat is unref\'d: the holder exits while its timer is still armed',
+    { timeout: 30_000 },
+    async () => {
+      const cwd = tempDir()
+      const store = open(cwd)
+      const id = newSession(store, cwd).meta.id
+      const lock = lockPath(store, id)
+      const barrier = join(tempDir('z1-barrier-'), 'held')
+
+      // The child ages the lock, waits on its own timer, and then lets the
+      // event loop drain. A ref'd heartbeat would keep it alive forever.
+      const runner = spawnChild(['heartbeat-exit', cwd, id, barrier, '160'])
+      waitForFile(barrier, 10_000)
+      const code = await runner.exited
+      expect(runner.err()).toBe('')
+      expect(runner.out()).toContain('done')
+      expect(code).toBe(0)
+
+      // The heartbeat fired at least once: the mtime the child aged to an hour
+      // ago is fresh again, and the child never released the lock.
+      expect(existsSync(lock)).toBe(true)
+      expect(Date.now() - statSync(lock).mtimeMs).toBeLessThan(30_000)
+
+      // Dead pid: reclaimed immediately by the next writer.
+      store.appendTurn(id, [user('one')])
+      expect(store.load(id)?.messages).toEqual([user('one')])
+      expect(existsSync(lock)).toBe(false)
+    },
+  )
+
+  test('a release refuses a lock that is no longer ours', () => {
+    const dir = tempDir()
+    const lock = join(dir, LOCK_FILE)
+
+    // Stolen: same path, different inode, another owner's body.
+    const first = acquireLock(lock, { heartbeatMs: 0 })
+    const stolen = `${String(process.pid)}\n${'ab'.repeat(8)}\n`
+    unlinkSync(lock)
+    writeFileSync(lock, stolen, { mode: 0o600 })
+    first()
+    expect(existsSync(lock)).toBe(true)
+    expect(readFileSync(lock, 'utf8')).toBe(stolen)
+
+    // Rewritten in place: same inode, somebody else's token.
+    unlinkSync(lock)
+    const second = acquireLock(lock, { heartbeatMs: 0 })
+    const rewritten = `${String(process.pid)}\n${'cd'.repeat(8)}\n`
+    writeFileSync(lock, rewritten, { mode: 0o600 })
+    second()
+    expect(existsSync(lock)).toBe(true)
+    expect(readFileSync(lock, 'utf8')).toBe(rewritten)
+
+    unlinkSync(lock)
+  })
+
+  test('a heartbeat never refreshes a lock that was stolen', async () => {
+    const dir = tempDir()
+    const lock = join(dir, LOCK_FILE)
+    const release = acquireLock(lock, { heartbeatMs: 20 })
+    const stolen = `${String(process.pid)}\n${'ef'.repeat(8)}\n`
+    const aged = new Date(Date.now() - 120_000)
+    unlinkSync(lock)
+    writeFileSync(lock, stolen, { mode: 0o600 })
+    utimesSync(lock, aged, aged)
+    const inode = statSync(lock).ino
+    const mtime = statSync(lock).mtimeMs
+
+    // Let the timer fire several times: it must see a foreign inode and stop.
+    await new Promise<void>((settle) => setTimeout(settle, 120))
+
+    expect(statSync(lock).ino).toBe(inode)
+    expect(statSync(lock).mtimeMs).toBe(mtime)
+    expect(readFileSync(lock, 'utf8')).toBe(stolen)
+
+    release()
+    expect(existsSync(lock)).toBe(true)
+    expect(readFileSync(lock, 'utf8')).toBe(stolen)
+    unlinkSync(lock)
+  })
+
+  test('a count repair under the lock keeps a name, an archive and the runs list', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const id = newSession(store, cwd).meta.id
     store.appendTurn(id, [user('one'), assistant('1')])
-    expect(store.load(id)?.messages).toHaveLength(2)
+    const metaFile = join(sessionDir(store, id), 'meta.json')
+    const raw = JSON.parse(readFileSync(metaFile, 'utf8')) as Record<string, unknown>
+
+    // A crash after the events append: only the count is stale, and a rename
+    // and an archive landed in the meantime.
+    const staged = { ...raw, messageCount: 0, name: 'renamed', archived: true }
+    writeFileSync(metaFile, `${JSON.stringify(staged, null, 2)}\n`)
+
+    const loaded = store.load(id)
+    expect(loaded?.messages).toHaveLength(2)
+    expect(loaded?.meta.messageCount).toBe(2)
+    expect(loaded?.meta.name).toBe('renamed')
+    expect(loaded?.meta.archived).toBe(true)
+
+    // The repair re-read the file under the lock and merged one field.
+    const repaired = JSON.parse(readFileSync(metaFile, 'utf8')) as Record<string, unknown>
+    expect(repaired['messageCount']).toBe(2)
+    expect(repaired['name']).toBe('renamed')
+    expect(repaired['archived']).toBe(true)
+    expect(repaired['runs']).toEqual(raw['runs'])
+
+    // A live holder blocks the repair: the read is still consistent in memory,
+    // and nobody writes meta.json under a writer that owns the lock.
+    writeFileSync(metaFile, `${JSON.stringify({ ...raw, messageCount: 0 }, null, 2)}\n`)
+    const lock = lockPath(store, id)
+    writeFileSync(lock, `${String(process.pid)}\n`, { mode: 0o600 })
+    const during = store.load(id)
+    expect(during?.messages).toHaveLength(2)
+    expect(during?.meta.messageCount).toBe(2)
+    const untouched = JSON.parse(readFileSync(metaFile, 'utf8')) as Record<string, unknown>
+    expect(untouched['messageCount']).toBe(0)
+    unlinkSync(lock)
+
+    // Once the holder is gone, the same read repairs the file.
+    expect(store.load(id)?.meta.messageCount).toBe(2)
+    const after = JSON.parse(readFileSync(metaFile, 'utf8')) as Record<string, unknown>
+    expect(after['messageCount']).toBe(2)
   })
 
   test('a release is idempotent', () => {

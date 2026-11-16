@@ -36,6 +36,34 @@ privileged operation back to host services.
   result is `{ status, url, headers, body, truncated }`, where `url` is the
   absolute address of the response actually served (the last hop), so callers
   can resolve relative links against it.
+
+### `net.hosts` patterns and port scoping
+
+Each `net.hosts` entry is one of:
+
+| entry | matches |
+| --- | --- |
+| `api.example.com` | that host on **any** port |
+| `api.example.com:8443` | that host on port 8443 only |
+| `*.internal.test` | glob over hostnames, any port |
+| `[::1]` | the IPv6 loopback on any port |
+| `[::1]:8888` | the IPv6 loopback on 8888 only |
+| `::1` | a bare IPv6 literal is a host, never `host:port` |
+
+Hosts are compared case-insensitively, with the root-label trailing dot dropped,
+and brackets removed, so `[::1]`, `::1` and `[::1]:8888` all compare against the
+same address. The port used for matching is the **effective** port of the hop —
+the explicit `url.port`, or the scheme default (80/443) — so a grant without a
+port keeps its old any-port meaning and a grant with one unlocks exactly one
+listener.
+
+A literal port grant is the **only** way to allow a loopback backend. `hosts:
+['*']` reaches the public internet and is deliberately not a statement about the
+operator's machine: it never unlocks loopback, the LAN, link-local, cloud
+metadata or reserved ranges, whatever port is asked for. To let a module talk to
+a local service, grant that service's exact address and port, e.g.
+`hosts: ['127.0.0.1:8888']` — not `127.0.0.1`, which would allow every listener
+on the loopback interface.
 - `moduleNodeDefinition` adapts a declaration plus a live worker into a runtime
   `NodeDefinition`, so the executor handles validation, caching and approval.
 

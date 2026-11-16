@@ -490,7 +490,57 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     }
   }
 
-  const loadSession = (id: string): LoadedSession | undefined => {
+  /**
+   * Repair a `messageCount` left stale by a crash between the events append and
+   * the meta write.
+   *
+   * This runs under the session lock, and it re-reads `meta.json` there, so it
+   * can only ever patch the *current* file: a rename/archive/`runs` entry that
+   * landed between this reader's first read and its repair survives. It also
+   * only writes while `events.jsonl` is still the file that was replayed —
+   * under the lock that is stable, so the count cannot describe a transcript
+   * that has since changed. Returns the fresh metadata when it read one.
+   *
+   * Waiting for the lock is bounded and short: a read must not block on a
+   * writer, and the in-memory correction is enough for this caller either way.
+   */
+  const repairMessageCount = (
+    dir: string,
+    id: string,
+    before: FileStamp | undefined,
+    count: number,
+  ): SessionMeta | undefined => {
+    let release: (() => void) | undefined
+    try {
+      release = acquireLock(join(dir, LOCK_FILE), { attempts: 10, retryMs: 10 })
+    } catch {
+      return undefined
+    }
+    try {
+      const eventsFile = join(dir, EVENTS_FILE)
+      // A writer that won the lock before us has already written a meta that
+      // matches the transcript on disk; our replay is not authoritative.
+      if (!sameStamp(before, stampOf(eventsFile))) return undefined
+      const fresh = readMetaFile(join(dir, META_FILE), id)
+      if (fresh === undefined) return undefined
+      if (fresh.messageCount === count) return fresh
+      // Merge exactly one field. Everything else stays whatever is on disk now.
+      writeMetaFile(dir, { ...fresh, messageCount: count })
+      return { ...fresh, messageCount: count }
+    } catch {
+      // A read-only file is still readable with the count corrected in memory.
+      return undefined
+    } finally {
+      release()
+    }
+  }
+
+  /**
+   * Replay a session. `lockHeld` says the caller already owns the session lock
+   * (every writer does): taking it again would deadlock, and a writer rewrites
+   * `meta.json` itself, so there is nothing to repair from inside one.
+   */
+  const loadSession = (id: string, lockHeld = false): LoadedSession | undefined => {
     const dir = sessionDir(id)
     let meta = readMetaFile(join(dir, META_FILE), id)
     if (meta === undefined) return undefined
@@ -507,12 +557,8 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
       // landed during the replay would otherwise have its fresh `generation`
       // and zero count overwritten by this stale copy, which is exactly the
       // state the generation guard exists to prevent.
-      if (sameStamp(before, stampOf(eventsFile))) {
-        try {
-          writeMetaFile(dir, meta)
-        } catch {
-          // The in-memory correction is enough for this caller.
-        }
+      if (!lockHeld && sameStamp(before, stampOf(eventsFile))) {
+        meta = repairMessageCount(dir, id, before, replay.messages.length) ?? meta
       }
     }
     return { meta, messages: replay.messages, tornTail: replay.tornTail, nextOrd: replay.nextOrd }
@@ -609,7 +655,7 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     turnOptions: AppendTurnOptions = {},
   ): void => {
     withSessionLock(id, (dir) => {
-      const loaded = loadSession(id)
+      const loaded = loadSession(id, true)
       if (loaded === undefined) throw unknownSession(id)
       // The generation is only meaningful as "what the caller read": an absent
       // value keeps the old, unguarded behaviour a fresh writer relies on.
@@ -800,6 +846,7 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
   return {
     root,
     mode: resolved.mode,
+    ...(resolved.warning === undefined ? {} : { warning: resolved.warning }),
     list,
     load,
     create,

@@ -118,6 +118,8 @@ export interface ListSessionsOptions {
 export interface SessionStore {
   readonly root: string
   readonly mode: SessionRootMode
+  /** Why `Z1_SESSIONS_DIR` was refused, when it was and `mode` is `fallback`. */
+  readonly warning?: string
   list(options?: ListSessionsOptions): readonly SessionSummary[]
   /** `undefined` when the id is unknown; throws {@link SessionTooNewError} past v1. */
   load(id: string): Session | undefined
@@ -148,17 +150,23 @@ export interface SessionStore {
 export interface ResolveSessionRootOptions {
   cwd: string
   env?: Record<string, string | undefined>
+  /** Receives a human-readable reason when a rejected claim forced a fallback. */
+  onWarning?: (message: string) => void
 }
 
 export interface ResolvedSessionRoot {
   root: string
   mode: SessionRootMode
   repoRoot?: string
+  /** Set when `Z1_SESSIONS_DIR` was refused and the per-project store is used. */
+  warning?: string
 }
 
 export interface CreateSessionStoreOptions {
   cwd: string
   env?: Record<string, string | undefined>
+  /** Receives a human-readable reason when a rejected claim forced a fallback. */
+  onWarning?: (message: string) => void
 }
 
 /**

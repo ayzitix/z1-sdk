@@ -706,6 +706,56 @@ describe('root resolution', () => {
     expect(fallback.root.startsWith(join(home, '.local', 'share', 'z1', 'projects'))).toBe(true)
   })
 
+  test('a populated Z1_SESSIONS_DIR is refused, untouched, and named in a warning', () => {
+    const repo = tempDir('z1-override-foreign-')
+    mkdirSync(join(repo, '.git'), { recursive: true })
+    const foreign = tempDir('z1-foreign-dir-')
+    writeFileSync(join(foreign, 'notes.md'), 'not a session\n', 'utf8')
+    chmodSync(foreign, 0o755)
+    const home = tempDir('z1-home-')
+
+    const warnings: string[] = []
+    const store = createSessionStore({
+      cwd: repo,
+      env: { HOME: home, Z1_SESSIONS_DIR: foreign },
+      onWarning: (message) => warnings.push(message),
+    })
+
+    // The claim was refused and both channels say why, with the same reason.
+    expect(store.mode).toBe('fallback')
+    expect(store.root).not.toBe(foreign)
+    expect(store.warning).toBeDefined()
+    expect(store.warning).toContain(`Z1_SESSIONS_DIR=${foreign}`)
+    expect(store.warning).toContain('populated directory that is not a z1 session root')
+    expect(warnings).toEqual([store.warning])
+
+    // Nothing was written into a directory this store does not own: no marker,
+    // no `.gitignore`, no `sessions/` — and no chmod of the user's folder.
+    expect(readdirSync(foreign)).toEqual(['notes.md'])
+    expect(existsSync(join(foreign, '.z1-sessions'))).toBe(false)
+    expect(existsSync(join(foreign, '.gitignore'))).toBe(false)
+    expect(existsSync(join(foreign, 'sessions'))).toBe(false)
+    expect(statSync(foreign).mode & 0o777).toBe(0o755)
+
+    // The fallback is the real per-project root, under the injected HOME.
+    const key = `${repo.split('/').pop() ?? ''}-${createHash('sha1').update(resolve(repo)).digest('hex').slice(0, 8)}`
+    expect(store.root).toBe(join(home, '.local', 'share', 'z1', 'projects', key, 'z1'))
+    expect(existsSync(join(store.root, '.z1-sessions'))).toBe(true)
+    expect(store.list()).toEqual([])
+
+    // It is a working store, and the refused folder stayed untouched.
+    const session = newSession(store, repo)
+    expect(existsSync(join(store.root, 'sessions', session.meta.id, 'meta.json'))).toBe(true)
+    expect(readdirSync(foreign)).toEqual(['notes.md'])
+
+    // The documented foot-gun is the same claim: a populated checkout is not a
+    // session root, so `Z1_SESSIONS_DIR=.` lands on the same fallback.
+    const dot = resolveSessionRoot({ cwd: repo, env: { HOME: home, Z1_SESSIONS_DIR: '.' } })
+    expect(dot.mode).toBe('fallback')
+    expect(dot.repoRoot).toBe(repo)
+    expect(dot.root).toBe(store.root)
+  })
+
   test('an existing session root is reused, not re-created', () => {
     const cwd = tempDir()
     const first = open(cwd)

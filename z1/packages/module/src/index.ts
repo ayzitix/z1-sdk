@@ -35,10 +35,12 @@ export {
   checkProcess,
   checkTool,
   classifyNetTarget,
+  describeCapabilityRisks,
   isPrivateAddress,
   matchPath,
+  parseHostPattern,
   resolveCapabilityPath,
 } from './capability.ts'
-export type { CapabilityCheck, NetAddressClass } from './capability.ts'
+export type { CapabilityCheck, HostPattern, NetAddressClass } from './capability.ts'
 export { directoryIntegrity, sha256Hex, walkIntegrityFiles } from './integrity.ts'
 export type { IntegrityFile } from './integrity.ts'

@@ -221,26 +221,105 @@ export function checkFsReal(
   return deny(denied)
 }
 
-/** Gate a network request. Host matching is case-insensitive and glob-aware. */
+/**
+ * A parsed `net.hosts` entry: `host`, `host:port`, `[ipv6]`, `[ipv6]:port`.
+ * A pattern without a port matches any port (patterns written before ports
+ * existed keep working); a pattern with one matches only that port.
+ */
+export interface HostPattern {
+  host: string
+  port?: number
+}
+
+function validPort(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 65_535
+}
+
+function parsePort(text: string): number | undefined {
+  if (!/^\d{1,5}$/.test(text)) return undefined
+  const port = Number(text)
+  return validPort(port) ? port : undefined
+}
+
+/**
+ * Parse one `net.hosts` entry into `{ host, port? }`. `undefined` means the
+ * entry is not usable (empty, malformed brackets, a non-numeric or out-of-range
+ * port) and is ignored rather than granting anything.
+ *
+ * Accepted shapes: `example.com`, `example.com:443`, `[::1]`, `[::1]:8888`,
+ * `::1`. A bare IPv6 literal is always a host, never `host:port`, because its
+ * colons are the address.
+ */
+export function parseHostPattern(value: string): HostPattern | undefined {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return undefined
+
+  // `[::1]:8888` and `[::1]`: brackets are what makes an IPv6 port possible.
+  if (trimmed.startsWith('[')) {
+    const end = trimmed.indexOf(']')
+    if (end < 0) return undefined
+    const host = normalizeHost(trimmed.slice(0, end + 1))
+    if (host.length === 0) return undefined
+    const rest = trimmed.slice(end + 1)
+    if (rest === '') return { host }
+    if (!rest.startsWith(':')) return undefined
+    const port = parsePort(rest.slice(1))
+    return port === undefined ? undefined : { host, port }
+  }
+
+  const colons = trimmed.split(':').length - 1
+  // A bare IPv6 literal is a host with no port; `a:b` with a non-numeric tail is
+  // simply not a host pattern.
+  if (colons === 0) return { host: normalizeHost(trimmed) }
+  if (colons > 1) return { host: normalizeHost(trimmed) }
+  const [hostPart = '', portPart = ''] = trimmed.split(':')
+  const host = normalizeHost(hostPart)
+  if (host.length === 0) return undefined
+  const port = parsePort(portPart)
+  return port === undefined ? undefined : { host, port }
+}
+
+/** `undefined` when the caller did not supply a port (a host-only check). */
+function normalizePort(port: number | undefined): number | undefined {
+  return port !== undefined && validPort(port) ? port : undefined
+}
+
+/**
+ * Gate a network request. Host matching is case-insensitive and glob-aware.
+ *
+ * `port` is the **effective** port of the request: the explicit one, or the
+ * scheme's default (80/443). A pattern that names a port (`127.0.0.1:8888`)
+ * only matches that port, so granting a local backend one port no longer
+ * grants every listener on the loopback interface. A pattern without a port
+ * matches any port — the pre-port behaviour, unchanged.
+ */
 export function checkNet(
   capabilities: ModuleCapabilities | undefined,
   host: string,
+  port?: number,
 ): CapabilityCheck {
   const patterns = capabilities?.net?.hosts
   if (patterns === undefined || patterns.length === 0) {
     return deny('no net capability granted')
   }
 
-  const normalizedHost = host.trim().toLowerCase().replace(/\.$/, '')
+  const normalizedHost = normalizeHost(host)
   if (normalizedHost.length === 0) return deny('empty host')
+  const wantedPort = normalizePort(port)
 
   for (const pattern of patterns) {
-    const normalizedPattern = pattern.trim().toLowerCase().replace(/\.$/, '')
-    if (normalizedPattern.length === 0) continue
-    if (matchPath(normalizedPattern, normalizedHost)) return { ok: true }
+    const parsed = parseHostPattern(pattern)
+    if (parsed === undefined) continue
+    if (!matchPath(parsed.host, normalizedHost)) continue
+    if (parsed.port !== undefined) {
+      // A port-scoped grant cannot be honoured without knowing the port.
+      if (wantedPort === undefined || parsed.port !== wantedPort) continue
+    }
+    return { ok: true }
   }
 
-  return deny(`host is outside the granted patterns: ${normalizedHost}`)
+  const suffix = wantedPort === undefined ? '' : `:${String(wantedPort)}`
+  return deny(`host is outside the granted patterns: ${normalizedHost}${suffix}`)
 }
 
 /**
@@ -266,6 +345,8 @@ const METADATA_HOSTNAMES = new Set([
   'metadata.google.internal',
   'metadata.goog',
   'instance-data',
+  // Alibaba Cloud's ECS metadata service, reachable as a bare address.
+  '100.100.100.200',
 ])
 
 /** Lower-case, drop brackets and the root-label dot, so `[::1]` and `::1` compare. */
@@ -331,13 +412,23 @@ function parseIPv6(value: string): number[] | undefined {
 }
 
 function classifyIPv4(octets: readonly number[]): NetAddressClass {
-  const [a, b] = octets as [number, number, number, number]
+  const [a, b, c] = octets as [number, number, number, number]
   if (a === 0) return 'unspecified'
   if (a === 127) return 'loopback'
   if (a === 10) return 'private'
   if (a === 172 && b >= 16 && b <= 31) return 'private'
   if (a === 192 && b === 168) return 'private'
+  // RFC 6598 carrier-grade NAT. Alibaba's metadata service (100.100.100.200)
+  // and many container networks live here, and it is never a public page.
+  if (a === 100 && b >= 64 && b <= 127) return 'private'
   if (a === 169 && b === 254) return 'link-local'
+  // RFC 2544 benchmarking range: never a real destination.
+  if (a === 198 && (b === 18 || b === 19)) return 'reserved'
+  // RFC 5737 documentation ranges, and 192.0.0.0/24 (IETF protocol
+  // assignments, which includes 192.0.0.170/171 used by NAT64 discovery).
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return 'reserved'
+  if (a === 198 && b === 51 && c === 100) return 'reserved'
+  if (a === 203 && b === 0 && c === 113) return 'reserved'
   if (a >= 224 && a <= 239) return 'multicast'
   if (a >= 240) return 'reserved'
   return 'public'
@@ -352,6 +443,28 @@ function classifyIPv6(hextets: readonly number[]): NetAddressClass {
   if (leadingZero && h5 === 0xffff) {
     return classifyIPv4([h6 >> 8, h6 & 0xff, h7 >> 8, h7 & 0xff])
   }
+  // `::ffff:0:a.b.c.d` (RFC 6052 IPv4-translated, `::ffff:0:0/96`): the v4 sits
+  // in the last 32 bits behind `0:0:0:0:ffff:0`. It is not the mapped block
+  // above, and a naive parser calls `::ffff:0:127.0.0.1` public.
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0xffff && h5 === 0) {
+    const inner = classifyIPv4([h6 >> 8, h6 & 0xff, h7 >> 8, h7 & 0xff])
+    return inner === 'public' ? 'reserved' : inner
+  }
+  // `64:ff9b::/96` is the well-known NAT64 prefix: an IPv4 destination in an
+  // IPv6 coat. Judge the embedded address, and never let the coat make a
+  // translation-only route look public.
+  if (h0 === 0x64 && h1 === 0xff9b && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0) {
+    const inner = classifyIPv4([h6 >> 8, h6 & 0xff, h7 >> 8, h7 & 0xff])
+    return inner === 'public' ? 'reserved' : inner
+  }
+  // `2002::/16` is 6to4: `2002:V4HI:V4LO::/48`. Deprecated, never a page fetch;
+  // a tunnel to a private/loopback v4 is exactly the SSRF case to refuse.
+  if (h0 === 0x2002) {
+    const inner = classifyIPv4([h1 >> 8, h1 & 0xff, h2 >> 8, h2 & 0xff])
+    return inner === 'public' ? 'reserved' : inner
+  }
+  // `2001:db8::/32` is documentation-only.
+  if (h0 === 0x2001 && h1 === 0x0db8) return 'reserved'
   if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0 && h6 === 0) {
     // `::` is unspecified, `::1` loopback, everything else in `::/64` reserved.
     if (h7 === 0) return 'unspecified'
@@ -397,6 +510,11 @@ export function isPrivateAddress(value: string): boolean {
  * reaches a local service at `http://127.0.0.1:8888` and still fails for
  * `http://192.168.1.5`.
  *
+ * An explicit entry is a host, or `host:port` to scope it to one port. The
+ * `port` argument is the effective port of the request (explicit or scheme
+ * default), so `hosts: ['127.0.0.1:8888']` unlocks only 8888 while a bare
+ * `127.0.0.1` keeps the old any-port meaning.
+ *
  * `resolved` is every address the name resolved to; the target is blocked if
  * *any* of them is private, so a DNS answer with one public and one private
  * record cannot be used to smuggle the request past the check.
@@ -405,24 +523,31 @@ export function checkNetTarget(
   capabilities: ModuleCapabilities | undefined,
   host: string,
   resolved: readonly string[],
+  port?: number,
 ): CapabilityCheck {
   const normalizedHost = normalizeHost(host)
   const privateAddresses = resolved.filter((address) => isPrivateAddress(address))
   const hostIsPrivate = isPrivateAddress(normalizedHost)
   if (!hostIsPrivate && privateAddresses.length === 0) return { ok: true }
 
+  const wantedPort = normalizePort(port)
   const patterns = capabilities?.net?.hosts ?? []
   for (const pattern of patterns) {
-    const normalizedPattern = normalizeHost(pattern)
-    if (normalizedPattern.length === 0) continue
+    const parsed = parseHostPattern(pattern)
+    if (parsed === undefined) continue
     // Wildcards are not an explicit grant, even when they happen to match.
-    if (/[*?]/.test(normalizedPattern)) continue
-    if (normalizedPattern === normalizedHost) return { ok: true }
+    if (/[*?]/.test(parsed.host)) continue
+    if (parsed.host !== normalizedHost) continue
+    if (parsed.port !== undefined) {
+      if (wantedPort === undefined || parsed.port !== wantedPort) continue
+    }
+    return { ok: true }
   }
 
   const target = privateAddresses.length > 0 ? privateAddresses.join(', ') : normalizedHost
+  const suffix = wantedPort === undefined ? '' : `:${String(wantedPort)}`
   return deny(
-    `private, loopback, link-local or metadata target ${normalizedHost} (${target}) needs an explicit net.hosts entry; a wildcard does not grant it`,
+    `private, loopback, link-local or metadata target ${normalizedHost}${suffix} (${target}) needs an explicit net.hosts entry; a wildcard does not grant it`,
   )
 }
 
@@ -433,6 +558,24 @@ export function checkNetTarget(
  * full string (`/usr/local/bin/node`) or its basename (`node`), using the same
  * anchored glob as {@link matchPath}. Matching is case-sensitive, and `'*'`
  * grants every command. An absent or empty list grants nothing.
+ *
+ * ## `process.spawn` is host access, not a narrow grant
+ *
+ * There is no sandbox around the spawned command. Granting an *interpreter* or
+ * a *tool with an escape hatch* grants everything the z1 process can do:
+ *
+ * - `node -e '<code>'` (and `python -c`, `perl -e`, `ruby -e`, `deno eval`)
+ *   executes arbitrary code with no `fs`/`net`/`process` capability check;
+ * - `git -c alias.x='!sh -c …' x` runs a shell because git runs aliases;
+ * - `env`, `sh`, `bash`, `find -exec`, `xargs`, `tar --to-command`, `awk`
+ *   `system()`, and anything that launches a child are equivalent.
+ *
+ * So a `process.spawn` grant is exactly as strong as `fs.read: ['/**']` plus
+ * `net.hosts: ['*']` plus `process.spawn: ['*']`, and the per-call fs/net
+ * gates do not apply to code the child runs. Only grant commands whose *entire*
+ * behaviour is acceptable, and never grant an interpreter to a module that is
+ * not fully trusted. Closing this needs an OS-level sandbox (container, seccomp,
+ * user namespace), which this package does not provide.
  */
 export function checkProcess(
   capabilities: ModuleCapabilities | undefined,
@@ -455,6 +598,60 @@ export function checkProcess(
   }
 
   return deny(`command "${wanted}" is outside the granted process.spawn patterns`)
+}
+
+/** Commands that can run arbitrary code or launch another command themselves. */
+const INTERPRETER_PATTERNS = [
+  /(^|\/)(node|nodejs|deno|bun|tsx|ts-node|python[0-9.]*|perl|ruby|php|java|lua|Rscript|osascript)$/,
+  /(^|\/)(sh|bash|zsh|dash|fish|csh|ksh|pwsh|powershell|cmd)(\.exe)?$/,
+  /(^|\/)(env|xargs|find|awk|gawk|sed|tar|make|cmake|git|npm|npx|pnpm|yarn|cargo|go|docker|kubectl|ssh)$/,
+]
+
+/** A grant that is not a single narrow binary: an interpreter, a shell, or `*`. */
+function isBroadCommand(pattern: string): boolean {
+  const trimmed = pattern.trim()
+  if (trimmed === '') return false
+  if (trimmed === '*') return true
+  return (
+    INTERPRETER_PATTERNS.some((test) => test.test(trimmed)) ||
+    INTERPRETER_PATTERNS.some((test) => test.test(basename(trimmed)))
+  )
+}
+
+/**
+ * Human-readable warnings for a capability grant, for approval prompts and the
+ * audit trail. Empty when nothing in the grant is broader than it looks.
+ *
+ * The one that matters: `process.spawn` is host access. See
+ * {@link checkProcess} — an interpreter grant is equivalent to giving the
+ * module the user's whole account, and the fs/net capability checks stop
+ * applying to whatever the child does.
+ */
+export function describeCapabilityRisks(capabilities: ModuleCapabilities | undefined): string[] {
+  const warnings: string[] = []
+  const spawn = capabilities?.process?.spawn ?? []
+  if (spawn.length > 0) {
+    // Always say this, whatever the command: `git` runs aliases, `node -e`
+    // runs code, and both are as strong as the whole grant set.
+    warnings.push(
+      'spawn is full host access (`node -e`, `git`, `python`) — it bypasses fs/net grants',
+    )
+    const broad = spawn.filter((pattern) => isBroadCommand(pattern))
+    if (broad.length > 0) {
+      warnings.push(
+        `process.spawn grants an interpreter, shell or wildcard (${broad.join(', ')}): ` +
+          'only grant commands whose entire behaviour is acceptable',
+      )
+    }
+  }
+  const hosts = capabilities?.net?.hosts ?? []
+  if (hosts.some((host) => host.includes('*') && host.trim() !== '*')) {
+    warnings.push('net.hosts contains a wildcard pattern; prefer a literal host, or host:port for a local backend')
+  }
+  if (hosts.some((host) => /^(\*|0\.0\.0\.0|::)$/.test(host.trim()))) {
+    warnings.push('net.hosts "*" reaches the public internet but never private/metadata targets; explicit private entries are still needed')
+  }
+  return warnings
 }
 
 /**

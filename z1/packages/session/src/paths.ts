@@ -204,6 +204,13 @@ function fallbackRoot(cwd: string, env: Env): string {
  * Precedence: `Z1_SESSIONS_DIR` → `<repoRoot>/z1` → per-project fallback under
  * `~/.local/share/z1/projects`. Creating directories here is intentional: the
  * decision itself is "can this folder hold sessions", which needs the folder.
+ *
+ * The override is a *claim*, exactly like `<repoRoot>/z1`: it is accepted only
+ * when it already is a session root (marker), is empty, or does not exist yet.
+ * A populated foreign directory (`Z1_SESSIONS_DIR=.`, a notes folder, a source
+ * tree) is never chmod'ed, never given a `.gitignore`, and never written into;
+ * the store falls back to the per-project directory and says why through
+ * `onWarning` and {@link ResolvedSessionRoot.warning}.
  */
 export function resolveSessionRoot(options: ResolveSessionRootOptions): ResolvedSessionRoot {
   const env = options.env ?? process.env
@@ -212,11 +219,20 @@ export function resolveSessionRoot(options: ResolveSessionRootOptions): Resolved
 
   const override = env.Z1_SESSIONS_DIR?.trim()
   if (override !== undefined && override !== '') {
-    const root = resolve(cwd, expandHome(override, env))
+    const candidate = resolve(cwd, expandHome(override, env))
+    if (claimCandidate(candidate)) {
+      ensureSessionRoot(candidate)
+      // An override inside the repository must not dirty `git status` either.
+      excludeFromGit(candidate, repoRoot)
+      return { root: candidate, mode: 'override', repoRoot }
+    }
+    const root = fallbackRoot(repoRoot, env)
     ensureSessionRoot(root)
-    // An override inside the repository must not dirty `git status` either.
-    excludeFromGit(root, repoRoot)
-    return { root, mode: 'override', repoRoot }
+    const warning =
+      `Z1_SESSIONS_DIR=${candidate} is a populated directory that is not a z1 session root; ` +
+      `refusing to claim it (no chmod, no .gitignore) and using ${root} instead`
+    options.onWarning?.(warning)
+    return { root, mode: 'fallback', repoRoot, warning }
   }
 
   const candidate = join(repoRoot, 'z1')

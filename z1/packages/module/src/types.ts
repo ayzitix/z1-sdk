@@ -79,7 +79,20 @@ export interface ModuleNodeDeclaration {
 
 export interface ModuleCapabilities {
   fs?: { read?: string[]; write?: string[] }
+  /**
+   * Hosts `ctx.net.request` may reach. Each entry is `host`, `host:port`,
+   * `[ipv6]` or `[ipv6]:port`; an entry without a port matches every port, and
+   * one with a port matches only that listener (`127.0.0.1:8888`). `'*'` means
+   * the public internet only: it never unlocks loopback, private, link-local or
+   * metadata targets. A literal address **with its port** is the only way to
+   * allow a local backend.
+   */
   net?: { hosts?: string[] }
+  /**
+   * Commands `ctx.process.run` may spawn. This is host access, not a narrow
+   * grant: an interpreter (`node`, `python`, `sh`, `git`) can read files and
+   * open sockets that the fs/net grants would otherwise deny.
+   */
   process?: { spawn?: string[] }
   spend?: { currency: string; perCall?: number; perRun?: number }
   secrets?: string[]

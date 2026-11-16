@@ -24,6 +24,7 @@ import {
 } from '@z1/graph'
 import {
   ModuleStore,
+  describeCapabilityRisks,
   serviceMode,
   type ModuleCapabilities,
   type ModuleServiceDeclaration,
@@ -471,6 +472,15 @@ function capabilitySummary(capabilities: ModuleCapabilities | undefined): string
   return parts.length > 0 ? parts.join('  ') : 'none'
 }
 
+/**
+ * One `risk: …` line per warning the grant deserves. A `process.spawn` grant
+ * says outright that it is host access, because that is the grant most often
+ * approved without reading it (`node -e` bypasses every fs/net check).
+ */
+function capabilityRiskLines(capabilities: ModuleCapabilities | undefined): string[] {
+  return describeCapabilityRisks(capabilities).map((warning) => `risk: ${warning}\n`)
+}
+
 /** `services: llm(worker), tools(host)`; absent when the module declares none. */
 function serviceSummary(services: readonly ModuleServiceDeclaration[] | undefined): string {
   return (services ?? []).map((service) => `${service.kind}(${serviceMode(service)})`).join(', ')
@@ -608,6 +618,7 @@ async function moduleProposeCommand(args: readonly string[], io: CliIO): Promise
   const services = serviceSummary(manifest.services)
   if (services !== '') io.stdout(`services: ${services}\n`)
   io.stdout(`capabilities: ${capabilitySummary(manifest.capabilities)}\n`)
+  for (const line of capabilityRiskLines(manifest.capabilities)) io.stdout(line)
   io.stdout(`integrity: ${proposed.integrity}\n`)
   io.stdout(`directory: ${proposed.directory}\n`)
   io.stdout(`next: z1 module approve ${moduleSpec}\n`)
@@ -677,6 +688,7 @@ function moduleApproveCommand(args: readonly string[], io: CliIO): number {
 
   io.stdout(`approved ${moduleId}@${chosen}\n`)
   io.stdout(`grant: ${capabilitySummary(installed.grant.capabilities)}\n`)
+  for (const line of capabilityRiskLines(installed.grant.capabilities)) io.stdout(line)
   const services = serviceSummary(installed.grant.services)
   if (services !== '') io.stdout(`services: ${services}\n`)
   io.stdout(`integrity: ${installed.integrity}\n`)
