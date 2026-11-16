@@ -240,6 +240,17 @@ export interface RunOptions {
   journal?: Journal
   /** Execution path prefix for nested runs. Internal. */
   pathPrefix?: string
+  /**
+   * Tool names this run may dispatch. A `ctx.tools.call` for any other name is
+   * rejected before the service is reached, with `tool "name" is not available
+   * in this run`, and `ctx.tools.list` only advertises these names.
+   *
+   * Omitted, the allowlist is read from the graph itself: the names a graph
+   * declares to a `tools` port. A graph that asks the service at run time
+   * (`z1.tools.list`) leaves the gate open, because the live inventory is the
+   * declaration. `[]` means "this run may call no tool at all".
+   */
+  tools?: readonly string[]
   /** Replay completed nodes from the journal instead of executing them. */
   resume?: boolean
   /** Stop before an `ask` node and return `status: 'suspended'`. */

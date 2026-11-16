@@ -58,13 +58,28 @@ const section = defineNode({
     priority: z.number().int(),
     required: z.boolean().default(false),
     body: z.string(),
+    /**
+     * Deliver `body` untouched. Templates are for the graph's own prose; text
+     * the caller wrote (a custom system prompt) is not a template, so a
+     * `{{name}}` inside it must reach the model as those six characters.
+     */
+    literal: z.boolean().default(false),
   }),
-  defaultConfig: { id: 'custom', slot: 'custom', priority: 0, required: false, body: '' },
+  defaultConfig: {
+    id: 'custom',
+    slot: 'custom',
+    priority: 0,
+    required: false,
+    body: '',
+    literal: false,
+  },
   inputs: [dataPort('vars', jsonValue, false)],
   outputs: [dataPort('fragment', fragmentSchema)],
   execute: async (ctx) => {
     const vars = inputValues(ctx.input)['vars']
-    const text = renderTemplate(ctx.config.body, isRecord(vars) ? vars : {})
+    const text = ctx.config.literal
+      ? ctx.config.body
+      : renderTemplate(ctx.config.body, isRecord(vars) ? vars : {})
     return {
       fragment: asJson({
         id: ctx.config.id,

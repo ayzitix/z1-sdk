@@ -267,6 +267,17 @@ describe('buildAgentGraph', () => {
     expect(system.endsWith('CUSTOM RULE')).toBe(true)
   })
 
+  test('a custom system prompt with braces reaches the model literally', async () => {
+    const { services } = await run(
+      { model: MODEL, system: 'use {{name}} literally' },
+      'hello',
+    )
+
+    const system = services.lastChatRequest?.messages[0]?.content ?? ''
+    expect(system.endsWith('use {{name}} literally')).toBe(true)
+    expect(system).not.toContain('use  literally')
+  })
+
   test('includes the planner delta for the planner role', async () => {
     const { services } = await run({ model: MODEL, role: 'planner' }, 'hello')
 

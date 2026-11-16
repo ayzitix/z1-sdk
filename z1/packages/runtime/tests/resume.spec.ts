@@ -309,6 +309,29 @@ function forkBefore(
   }
   return forked
 }
+/**
+ * Copy a finished run's journal without its terminal row. The run then looks
+ * unfinished, so a resume is allowed, while every `node.completed` is still
+ * replayable. Resuming the *finished* id is refused by design.
+ */
+function forkUnfinished(
+  source: MemoryJournal,
+  sourceRunId: string,
+  forkedRunId: string,
+): MemoryJournal {
+  const forked = new MemoryJournal()
+  for (const event of source.read(sourceRunId)) {
+    if (
+      event.type === 'run.completed' ||
+      event.type === 'run.failed' ||
+      event.type === 'run.cancelled'
+    ) {
+      break
+    }
+    forked.append({ ...event, runId: forkedRunId })
+  }
+  return forked
+}
 
 
 describe('resume', () => {
@@ -327,13 +350,17 @@ describe('resume', () => {
   })
 
   test('fails with RESUME_MISMATCH when the resumed input differs', async () => {
-    const journal = new MemoryJournal()
-    const runId = 'run_resume_input_mismatch'
-    const first = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), {
+    const source = new MemoryJournal()
+    const sourceId = 'run_resume_input_mismatch'
+    const first = await runWith(source, echoGraph(), sourceId, createMockRuntimeServices(), {
       input: { prompt: 'one' },
     })
     expect(first.status).toBe('completed')
 
+    // The source run ended, and resuming an ended id is refused before the
+    // input is even compared, so fork it into a still-open run first.
+    const runId = 'run_resume_input_mismatch_fork'
+    const journal = forkUnfinished(source, sourceId, runId)
     const result = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), {
       resume: true,
       input: { prompt: 'two' },
@@ -370,10 +397,14 @@ describe('resume', () => {
   })
 
   test('resume with the same input replays as before', async () => {
-    const journal = new MemoryJournal()
-    const runId = 'run_resume_input_same'
+    const source = new MemoryJournal()
+    const sourceId = 'run_resume_input_same'
     const input = { prompt: 'same' }
-    const first = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), { input })
+    const first = await runWith(source, echoGraph(), sourceId, createMockRuntimeServices(), { input })
+
+    // Forked before the node: a resume re-executes it and must see the same seed.
+    const runId = 'run_resume_input_same_fork'
+    const journal = forkBefore(source, sourceId, runId, 'echo')
     const second = await runWith(journal, echoGraph(), runId, createMockRuntimeServices(), {
       resume: true,
       input: { prompt: 'same' },
@@ -389,12 +420,16 @@ describe('resume', () => {
   })
 
   test('replays completed nodes instead of executing them', async () => {
-    const journal = new MemoryJournal()
-    const runId = 'run_resume_replay'
-    const first = await runWith(journal, countGraph(), runId, createMockRuntimeServices())
+    const source = new MemoryJournal()
+    const sourceId = 'run_resume_replay'
+    const first = await runWith(source, countGraph(), sourceId, createMockRuntimeServices())
     expect(first.status).toBe('completed')
     expect(first.outputs).toEqual({ output: 'call-1' })
 
+    // Keep the `node.completed` rows but drop the terminal one, so this is a
+    // resume of an unfinished run rather than a second run under a used id.
+    const runId = 'run_resume_replay_fork'
+    const journal = forkUnfinished(source, sourceId, runId)
     const second = await runWith(journal, countGraph(), runId, createMockRuntimeServices(), {
       resume: true,
     })

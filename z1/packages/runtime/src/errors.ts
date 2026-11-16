@@ -8,6 +8,7 @@ export type RunFailureCode =
   | 'CANCELLED'
   | 'INVALID_OUTPUT'
   | 'RESUME_MISMATCH'
+  | 'RUN_EXISTS'
 
 /**
  * A run or node failure with a machine-readable reason. The code is part of the

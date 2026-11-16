@@ -412,28 +412,69 @@ test('artifact.get reads a blob written through the journal', async () => {
   expect(APP_ERRORS.artifactNotFound).toBe(1006)
 })
 
-test('run.resume replays a finished run and requires the graph', async () => {
-  const { server } = await makeServer()
+test('run.resume replays an unfinished run and requires the graph', async () => {
+  const { server, dbPath } = await makeServer()
   const peer = await connect(server)
 
   const started = await peer.request('run.start', {
     graph: helloGraph(),
     input: { name: 'resume' },
   })
+  expect(started.status).toBe('completed')
+
+  // The run ended, and a finished id may not be resumed. Fork its journal into
+  // a run that is still open — everything up to but excluding the terminal row
+  // — so every `node.completed` is replayable while the resume is legal.
+  const forkedRunId = 'run_resume_unfinished'
+  const journal = new SqliteJournal(dbPath)
+  try {
+    const owned = journal.ownedEvents(started.runId)
+    const terminal = owned[owned.length - 1]
+    expect(terminal?.event.type).toBe('run.completed')
+    journal.fork(started.runId, (terminal?.seq ?? 1) - 1, forkedRunId)
+  } finally {
+    journal.close()
+  }
+
   const resumed = await peer.request('run.resume', {
+    runId: forkedRunId,
+    graph: helloGraph(),
+    input: { name: 'resume' },
+  })
+  expect(resumed.runId).toBe(forkedRunId)
+  expect(resumed.status).toBe('completed')
+
+  const got = await peer.request('run.get', { runId: forkedRunId })
+  expect(got.events.some((item) => item.event.type === 'run.resumed')).toBe(true)
+  // The template replayed its journaled completion instead of executing again.
+  const cached = got.events.filter(
+    (item) => item.event.type === 'node.cached' && item.event.path === 'template',
+  )
+  expect(cached).toHaveLength(1)
+  expect(
+    got.events.filter(
+      (item) => item.event.type === 'node.started' && item.event.path === 'template',
+    ),
+  ).toHaveLength(1)
+
+  await expect(peer.request('run.resume', { runId: forkedRunId })).rejects.toMatchObject({
+    code: -32602,
+  })
+
+  // The terminal-state rule still holds: the finished id is refused, and the
+  // refusal journals exactly one `run.failed` without a second `run.completed`.
+  const refused = await peer.request('run.resume', {
     runId: started.runId,
     graph: helloGraph(),
     input: { name: 'resume' },
   })
-  expect(resumed.runId).toBe(started.runId)
-  expect(resumed.status).toBe('completed')
+  expect(refused.status).toBe('failed')
+  expect(refused.error).toContain('RESUME_MISMATCH')
+  expect(refused.error).toContain('already ended with run.completed')
 
-  const got = await peer.request('run.get', { runId: started.runId })
-  expect(got.events.some((item) => item.event.type === 'run.resumed')).toBe(true)
-
-  await expect(peer.request('run.resume', { runId: started.runId })).rejects.toMatchObject({
-    code: -32602,
-  })
+  const finished = await peer.request('run.get', { runId: started.runId })
+  expect(finished.events.filter((item) => item.event.type === 'run.failed')).toHaveLength(1)
+  expect(finished.events.filter((item) => item.event.type === 'run.completed')).toHaveLength(1)
 })
 
 test('approval.respond decides an approval the client has not replied to', async () => {

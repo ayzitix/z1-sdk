@@ -78,6 +78,54 @@ describe('z1.prompt nodes', () => {
     })
   })
 
+  test('section with literal: true keeps template braces verbatim', async () => {
+    const outputs = await runNode(
+      'z1.prompt.section',
+      {
+        id: 'custom.instructions',
+        slot: 'custom',
+        priority: 1000,
+        body: 'use {{name}} literally',
+        literal: true,
+      },
+      { vars: { name: 'Ada' } },
+      ['fragment'],
+    )
+
+    expect(outputs['fragment']).toEqual({
+      id: 'custom.instructions',
+      slot: 'custom',
+      priority: 1000,
+      required: false,
+      text: 'use {{name}} literally',
+    })
+  })
+
+  test('section substitutes braces when literal is false or absent', async () => {
+    const config = {
+      id: 'custom.instructions',
+      slot: 'custom',
+      priority: 1000,
+      body: 'use {{name}} literally',
+    }
+    const explicitFalse = await runNode(
+      'z1.prompt.section',
+      { ...config, literal: false },
+      { vars: { name: 'Ada' } },
+      ['fragment'],
+    )
+    const absent = await runNode(
+      'z1.prompt.section',
+      config,
+      { vars: { name: 'Ada' } },
+      ['fragment'],
+    )
+
+    for (const outputs of [explicitFalse, absent]) {
+      expect(outputs['fragment']).toMatchObject({ text: 'use Ada literally' })
+    }
+  })
+
   test('stack orders by slot then priority and joins with blank lines', async () => {
     const outputs = await runNode(
       'z1.prompt.stack',

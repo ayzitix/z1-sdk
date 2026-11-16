@@ -327,13 +327,16 @@ interface PromptChain {
   readonly last: string
 }
 
+/** A prompt section plus the builder-only flag `z1.prompt.section` understands. */
+type AgentSection = PromptSection & { literal?: boolean }
+
 /**
  * The system prompt as a visible graph: context → one section per default,
  * role delta, memory and custom, then a concat chain the stack consumes.
  */
 function promptChain(options: AgentGraphOptions): PromptChain {
   const role = options.role ?? 'coder'
-  const sections: PromptSection[] = [
+  const sections: AgentSection[] = [
     ...DEFAULT_SECTIONS,
     ROLE_SECTIONS[role],
     { id: 'context.memory', slot: 'context', priority: 0, required: false, body: '{{memory}}' },
@@ -345,6 +348,9 @@ function promptChain(options: AgentGraphOptions): PromptChain {
       priority: 1000,
       required: false,
       body: options.system,
+      // The caller's own words, not a template: `{{…}}` in a custom system
+      // prompt is part of the prompt, so it must not be substituted.
+      literal: true,
     })
   }
 
@@ -376,6 +382,7 @@ function promptChain(options: AgentGraphOptions): PromptChain {
       required: section.required === true,
       body: section.body,
     }
+    if (section.literal === true) config['literal'] = true
     nodes.push(node(id, 'z1.prompt.section', 440, 360 + index * 150, config))
     edges.push(data(`ps.vars.${section.id}`, 'promptContext', 'vars', id, 'vars'))
   }

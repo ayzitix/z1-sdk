@@ -566,6 +566,33 @@ describe('executor', () => {
     expect(journal.read(result.runId).some((event) => event.type === 'node.stream')).toBe(false)
   })
 
+  test('an onEvent listener that throws leaves the run and its outputs intact', async () => {
+    const logs: LogEntry[] = []
+    let delivered = 0
+    const services = createMockRuntimeServices()
+    services.onEvent = () => {
+      delivered += 1
+      if (delivered === 1) throw new Error('trace sink down')
+    }
+    services.onLog = (entry) => logs.push(entry)
+
+    const { events, result } = await runLinear(services)
+
+    expect(result.status).toBe('completed')
+    expect(result.outputs).toEqual({ greeting: 'hello world' })
+    // Observation is not part of the contract: the run kept emitting events.
+    expect(delivered).toBe(events.length)
+    expect(logs).toEqual([
+      {
+        runId: result.runId,
+        nodeId: '',
+        path: '',
+        level: 'warn',
+        message: 'onEvent listener threw: Error: trace sink down',
+      },
+    ])
+  })
+
   test('different root seeds in a loop body are not cache hits', async () => {
     const seen: Json[] = []
     const recordNode = defineNode<unknown>({

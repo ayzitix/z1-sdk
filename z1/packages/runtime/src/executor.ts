@@ -22,6 +22,7 @@ import {
 import { RunFailure } from './errors.ts'
 import { MemoryJournal } from './journal.ts'
 import { withLlmCallContext, type LlmCallContext } from './llm-context.ts'
+import { declaredToolNames, withToolGate } from './tool-gate.ts'
 import type { Journal, RunEvent, RunOptions, RunResult, RuntimeServices } from './types.ts'
 
 /** State replayed from the journal when `RunOptions.resume` is set. */
@@ -65,6 +66,11 @@ function digestInput(input: Json): string {
  * Rebuild the resume view for `runId`. A resume is only safe against the same
  * graph: the digest in `run.started` is the contract that node ids and configs
  * still mean what the journal says they mean.
+ *
+ * A journal may hold more than one `run.started` for an id (older journals, or
+ * a trace that was reused before ids were checked). The last start is the run
+ * that is actually being continued, and events before it belong to a previous
+ * occupancy of the same id, so they are not replayed.
  */
 function loadResumeState(
   journal: Journal,
@@ -72,12 +78,35 @@ function loadResumeState(
   graph: GraphDocument,
 ): ResumeLoad {
   const events = journal.read(runId)
-  const started = events.find((event) => event.type === 'run.started')
-  if (started === undefined) {
+  let index = -1
+  for (let cursor = events.length - 1; cursor >= 0; cursor -= 1) {
+    if (events[cursor]?.type === 'run.started') {
+      index = cursor
+      break
+    }
+  }
+  if (index < 0) {
     return {
       error: new RunFailure(
         'RESUME_MISMATCH',
         `journal has no run.started event for run "${runId}"`,
+      ).message,
+    }
+  }
+  const started = events[index]
+  if (started === undefined || started.type !== 'run.started') {
+    return {
+      error: new RunFailure(
+        'RESUME_MISMATCH',
+        `journal has no run.started event for run "${runId}"`,
+      ).message,
+    }
+  }
+  if (started.graphId !== graph.id) {
+    return {
+      error: new RunFailure(
+        'RESUME_MISMATCH',
+        `graph "${graph.id}" does not match journal graph "${started.graphId}" for run "${runId}"`,
       ).message,
     }
   }
@@ -92,11 +121,23 @@ function loadResumeState(
   }
 
   const state = emptyResumeState()
-  for (const event of events) {
+  for (const event of events.slice(index + 1)) {
     switch (event.type) {
       case 'node.completed':
         state.completed.set(event.path, event.outputs)
         break
+      case 'run.completed':
+      case 'run.failed':
+      case 'run.cancelled':
+        // The run already ended. Replaying it would append a second
+        // `run.completed` for one id, so a reader could no longer tell what the
+        // run's outcome was; re-running the graph is a new run, not a resume.
+        return {
+          error: new RunFailure(
+            'RESUME_MISMATCH',
+            `run "${runId}" already ended with ${event.type}; start a new run instead of resuming it`,
+          ).message,
+        }
       case 'approval.requested':
         state.pending.set(event.path, event.request)
         break
@@ -147,10 +188,35 @@ function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true
 }
 
+/**
+ * Hand an event to the live listener. Observation is not part of the run
+ * contract: a listener that throws (a broken trace sink, a UI that went away)
+ * must not fail the run or discard its outputs, so the error is turned into a
+ * log line and the run continues.
+ */
+function notify(services: RuntimeServices, event: RunEvent): void {
+  if (services.onEvent === undefined) return
+  try {
+    services.onEvent(event)
+  } catch (error) {
+    try {
+      services.onLog?.({
+        runId: event.runId,
+        nodeId: '',
+        path: '',
+        level: 'warn',
+        message: `onEvent listener threw: ${errorMessage(error)}`,
+      })
+    } catch {
+      // A throwing log sink is still not a reason to fail the run.
+    }
+  }
+}
+
 async function deliver(context: RunContext, event: RunEvent): Promise<void> {
   // Stream chunks are high-volume observation data; only the live listener sees them.
   if (event.type !== 'node.stream') await context.journal.append(event)
-  context.services.onEvent?.(event)
+  notify(context.services, event)
 }
 
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
@@ -374,7 +440,7 @@ function makeContext(input: NodeRunInput, signal: AbortSignal, attempt: number):
     },
     emit: (port, chunk) => {
       if (signal.aborted) return
-      services.onEvent?.({
+      notify(services, {
         type: 'node.stream',
         runId,
         nodeId: node.id,
@@ -977,34 +1043,68 @@ export async function runGraph(options: RunOptions): Promise<RunResult> {
   const journal = options.journal ?? new MemoryJournal()
   let effective = options
   let resume = emptyResumeState()
+
+  /**
+   * Fail before the run loop exists. Every such failure must still leave a
+   * `run.failed` row, or a reader of the journal sees a run that started and
+   * never ended (the CLI and the server both report "running" forever).
+   */
+  const failEarly = async (error: string): Promise<RunResult> => {
+    const event: RunEvent = { type: 'run.failed', runId, at: Date.now(), error }
+    try {
+      await journal.append(event)
+    } catch {
+      // The journal is the thing that failed; the caller still gets a result.
+    }
+    notify(options.services, event)
+    return { runId, status: 'failed', outputs: {}, error }
+  }
+
+  if (options.resume !== true) {
+    // A run id is an identity, not a label: starting a second run under an id
+    // the journal already holds would append a second `run.started` and make
+    // the trace (and any later resume) ambiguous. Refuse instead, and do not
+    // write a row into the other run's journal.
+    if (journal.read(runId).some((event) => event.type === 'run.started')) {
+      return {
+        runId,
+        status: 'failed',
+        outputs: {},
+        error: new RunFailure('RUN_EXISTS', `run "${runId}" already exists`).message,
+      }
+    }
+  }
+
   if (options.resume === true) {
     const loaded = loadResumeState(journal, runId, options.graph)
-    if ('error' in loaded) {
-      return { runId, status: 'failed', outputs: {}, error: loaded.error }
-    }
+    if ('error' in loaded) return await failEarly(loaded.error)
     resume = loaded.state
     if (options.input !== undefined) {
       // A resumed run must be the same run: a different seed would replay
       // stored outputs that were produced from other inputs, so refuse rather
       // than silently mixing two runs in one journal.
       if (digestInput(options.input) !== loaded.inputDigest) {
-        const error = new RunFailure(
-          'RESUME_MISMATCH',
-          'run input differs from the journaled input',
-        ).message
-        const event: RunEvent = { type: 'run.failed', runId, at: Date.now(), error }
-        await journal.append(event)
-        options.services.onEvent?.(event)
-        return { runId, status: 'failed', outputs: {}, error }
+        return await failEarly(
+          new RunFailure('RESUME_MISMATCH', 'run input differs from the journaled input').message,
+        )
       }
     } else {
       // No input supplied: re-executed nodes see the seed the run started with.
       effective = { ...options, input: loaded.input }
     }
   }
+
+  // The tool boundary is a privilege boundary: a model emits a name, and only
+  // the names this run advertised may be dispatched. `options.tools` is the
+  // caller's override; otherwise the graph's own `tools` declarations decide,
+  // and a graph that reads the live list leaves the gate open.
+  const services = withToolGate(
+    effective.services,
+    options.tools ?? declaredToolNames(options.graph),
+  )
   const context: RunContext = {
     runId,
-    services: options.services,
+    services,
     journal,
     cache: new Map(),
     resume,
@@ -1015,14 +1115,6 @@ export async function runGraph(options: RunOptions): Promise<RunResult> {
     // A rejected promise here would lose the result shape a caller relies on
     // (CLI, server, eval) and leave the run row `running`. A journal failure is
     // exactly such a throw, so the fallback append is best-effort.
-    const message = errorMessage(error)
-    const event: RunEvent = { type: 'run.failed', runId, at: Date.now(), error: message }
-    try {
-      await journal.append(event)
-    } catch {
-      // The journal is the thing that failed; the caller still gets a result.
-    }
-    options.services.onEvent?.(event)
-    return { runId, status: 'failed', outputs: {}, error: message }
+    return await failEarly(errorMessage(error))
   }
 }

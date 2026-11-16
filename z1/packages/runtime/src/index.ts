@@ -45,6 +45,7 @@ export {
 } from './recording.ts'
 export type { BlobJournal, RecordLlmMode, RecordLlmOptions } from './recording.ts'
 export { runGraph } from './executor.ts'
+export { declaredToolNames, gateToolService, withToolGate } from './tool-gate.ts'
 export { createMockRuntimeServices } from './mock.ts'
 export type {
   MockApprovalBehavior,
