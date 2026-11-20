@@ -392,6 +392,37 @@ test('cancelling one execution leaves another running in the same worker', async
   await expect(survivor).resolves.toEqual({ text: 'done' })
 }, 20_000)
 
+test('a cancelled execution must not SIGKILL the child under a slower sibling', async () => {
+  const worker = new ModuleWorker({
+    moduleDir: CANCEL_DIR,
+    entry: 'index.js',
+    manifestNodeIds: ['com.example.cancel.delay'],
+    capabilities: {},
+    services: createServices(freshProbes()),
+    // Well past the survivor's runtime, so only the kill grace can cut it down.
+    timeoutMs: 10_000,
+  })
+  workers.push(worker)
+  await worker.start()
+
+  const controller = new AbortController()
+  const cancelled = worker.execute(
+    'com.example.cancel.delay',
+    {},
+    { ms: 600 },
+    null,
+    controller.signal,
+  )
+  // The sibling outlives KILL_GRACE_MS (2 s): the child must acknowledge the
+  // cancellation so the kill timer is disarmed instead of firing 2 s later and
+  // SIGKILLing the whole worker mid-execution.
+  const survivor = worker.execute('com.example.cancel.delay', {}, { ms: 3_500 }, null)
+  setTimeout(() => controller.abort(new Error('test cancel')), 50)
+
+  await expect(cancelled).rejects.toThrow(/cancelled: .*test cancel/)
+  await expect(survivor).resolves.toEqual({ text: 'done' })
+}, 20_000)
+
 test('an exported node id missing from the manifest rejects start', async () => {
   const worker = createWorker(freshProbes(), { manifestNodeIds: [echoId] })
 

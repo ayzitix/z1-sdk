@@ -190,6 +190,13 @@ export type WorkerToHost =
   | { t: 'delta'; callId: number; delta: unknown }
   | { t: 'result'; id: number; outputs: unknown }
   | { t: 'error'; id: number; message: string; stack?: string }
+  /**
+   * Acknowledgement that a cancelled execution unwound: the node returned or
+   * threw with its signal already aborted and reported nothing. The host arms
+   * a kill timer on cancel; this message disarms it, so one cancelled
+   * execution never becomes the whole child's death.
+   */
+  | { t: 'cancelled'; id: number }
   | { t: 'service-result'; id: number; value: unknown }
   | { t: 'service-error'; id: number; message: string; stack?: string }
   | { t: 'service-delta'; id: number; delta: unknown }

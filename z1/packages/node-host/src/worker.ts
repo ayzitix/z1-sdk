@@ -675,16 +675,33 @@ async function runNode(
   executions.set(executionId, controller)
   const ctx = createContext(executionId, node.info.id, request, controller.signal)
 
+  // The host arms a kill timer when it cancels this execution. Without this
+  // ack the timer always fires — even though the node unwound cleanly — and
+  // the whole child, sibling executions included, is SIGKILLed 2 s later.
+  const acknowledgeCancel = (): void => {
+    try {
+      send({ t: 'cancelled', id: executionId })
+    } catch {
+      // The host is gone; whether the child is killed no longer matters.
+    }
+  }
+
   try {
     const produced = await node.execute(ctx)
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted) {
+      acknowledgeCancel()
+      return
+    }
     const outputs = toJsonValue(produced)
     if (!isRecord(outputs)) {
       throw new Error(`node "${node.info.id}" must return a plain object of port values`)
     }
     send({ t: 'result', id: executionId, outputs })
   } catch (error) {
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted) {
+      acknowledgeCancel()
+      return
+    }
     const payload: WorkerToHost = { t: 'error', id: executionId, message: errorText(error) }
     if (error instanceof Error && typeof error.stack === 'string') payload.stack = error.stack
     try {

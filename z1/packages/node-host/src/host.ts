@@ -667,6 +667,15 @@ export class ModuleWorker {
   readonly #bootstrap: string
   readonly #bootstrapPackage: string
   readonly #executions = new Map<number, PendingExecution>()
+  /**
+   * Executions the host asked the child to abort and has already settled, keyed
+   * by id with the kill timer still armed for each. The child answers
+   * `cancelled` once its node unwound (a late `result`/`error` counts too);
+   * only a child that never unwound within the grace is killed. Without the
+   * aborting bookkeeping, a per-execution cancel could not tell a stuck child
+   * from a healthy one that simply finished after the cancel crossed it.
+   */
+  readonly #aborting = new Map<number, NodeJS.Timeout>()
   /** Host-owned long-running children; they die with this worker. */
   readonly #tasks = new ProcessTasks()
   readonly #serviceCalls = new Map<number, PendingServiceCall>()
@@ -1126,6 +1135,10 @@ export class ModuleWorker {
     const executionId = raw['id']
     if (typeof executionId !== 'number') return
 
+    if (type === 'cancelled') {
+      this.#acknowledgeCancel(executionId)
+      return
+    }
     if (type === 'log') {
       this.#handleLog(executionId, raw)
       return
@@ -1153,7 +1166,13 @@ export class ModuleWorker {
     }
     if (type === 'result') {
       const execution = this.#executions.get(executionId)
-      if (execution === undefined) return
+      if (execution === undefined) {
+        // A result for an execution the host already settled is a node that
+        // finished after a cancel crossed it: the child unwound, so the kill
+        // timer can go just as if it had acked.
+        this.#acknowledgeCancel(executionId)
+        return
+      }
       const outputs = raw['outputs']
       if (!isRecord(outputs)) {
         this.#settle(execution, {
@@ -1167,7 +1186,11 @@ export class ModuleWorker {
     }
     if (type === 'error') {
       const execution = this.#executions.get(executionId)
-      if (execution === undefined) return
+      if (execution === undefined) {
+        // Same as a late result: the node unwound and reported.
+        this.#acknowledgeCancel(executionId)
+        return
+      }
       const message = raw['message']
       this.#settle(execution, {
         ok: false,
@@ -1413,11 +1436,30 @@ export class ModuleWorker {
     if (execution.settled) return
     // Name the execution: the child may be running nodes of other runs.
     this.#send({ t: 'cancel', id: execution.id, reason })
-    execution.killTimer = setTimeout(() => {
-      this.#killChild(execution.child)
+    // The child acknowledges with `cancelled` once its node has unwound, and
+    // this timer is disarmed. Only a child that never unwound — a node stuck
+    // in code that cannot observe the abort — is killed at the grace, which is
+    // the enforcement, not the normal path: killing here used to run 2 s after
+    // every successful cancel and SIGKILL the child under its live siblings.
+    const child = execution.child
+    const killTimer = setTimeout(() => {
+      this.#aborting.delete(execution.id)
+      execution.killTimer = undefined
+      // A respawned or already-exited child has nothing left to enforce.
+      if (this.#child === child) this.#killChild(child)
     }, KILL_GRACE_MS)
-    execution.killTimer.unref?.()
+    killTimer.unref?.()
+    execution.killTimer = killTimer
+    this.#aborting.set(execution.id, killTimer)
     this.#settle(execution, { ok: false, error: new Error(reason) }, true)
+  }
+
+  /** A cancelled execution unwound on the child side: disarm its kill timer. */
+  #acknowledgeCancel(executionId: number): void {
+    const killTimer = this.#aborting.get(executionId)
+    if (killTimer === undefined) return
+    this.#aborting.delete(executionId)
+    clearTimeout(killTimer)
   }
 
   #settle(
