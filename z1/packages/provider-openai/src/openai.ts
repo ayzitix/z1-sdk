@@ -54,7 +54,12 @@ interface WireUsage {
 
 interface WireResponse {
   choices?: WireChoice[]
-  usage?: WireUsage
+  /**
+   * `null` is real: with `stream_options.include_usage` every chunk but the
+   * closing one carries `"usage": null`, so an optional-only type would let a
+   * null reach `toUsage` and crash on `prompt_tokens`.
+   */
+  usage?: WireUsage | null
 }
 
 interface WireRequestToolCall {
@@ -79,6 +84,12 @@ interface ChatRequestBody {
   model: string
   messages: WireRequestMessage[]
   stream: boolean
+  /**
+   * Ask the server to close the stream with a usage chunk. Without it an
+   * OpenAI-compatible server reports no token counts for a streamed turn, and
+   * the caller falls back to estimating the transcript.
+   */
+  stream_options?: { include_usage: true }
   temperature?: number
   max_tokens?: number
   tools?: WireToolDefinition[]
@@ -173,8 +184,16 @@ export class OpenAiLlmService implements LlmService {
     onDelta?: (delta: ChatDelta) => void,
   ): Promise<ChatResult> {
     const stream = request.model.params?.['stream'] !== false
-    const body = buildBody(request, stream)
-    const response = await this.send(JSON.stringify(body))
+    let response = await this.send(JSON.stringify(buildBody(request, stream, true)))
+
+    // Compatible servers predate `stream_options` and reject the unknown field
+    // outright. Retry once without it rather than fail a turn that would work;
+    // only 400/422 are treated as "body rejected", so an auth or rate-limit
+    // answer still surfaces as itself.
+    if (stream && (response.status === 400 || response.status === 422)) {
+      await discardBody(response)
+      response = await this.send(JSON.stringify(buildBody(request, stream, false)))
+    }
 
     if (!response.ok) {
       const detail = redact(await readErrorBody(response), this.apiKey)
@@ -370,13 +389,18 @@ class ChatAccumulator {
   }
 }
 
-function buildBody(request: ChatRequest, stream: boolean): ChatRequestBody {
+function buildBody(
+  request: ChatRequest,
+  stream: boolean,
+  includeUsage: boolean,
+): ChatRequestBody {
   const params = request.model.params ?? {}
   const body: ChatRequestBody = {
     model: request.model.model,
     messages: request.messages.map(toWireMessage),
     stream,
   }
+  if (stream && includeUsage) body.stream_options = { include_usage: true }
 
   const temperature = request.temperature ?? numberParam(params['temperature'])
   if (temperature !== undefined) body.temperature = temperature
@@ -420,8 +444,8 @@ function numberParam(value: Json | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
-function toUsage(usage: WireUsage | undefined): ChatUsage | undefined {
-  if (usage === undefined) return undefined
+function toUsage(usage: WireUsage | null | undefined): ChatUsage | undefined {
+  if (usage === undefined || usage === null) return undefined
   const inputTokens = usage.prompt_tokens
   const outputTokens = usage.completion_tokens
   if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return undefined

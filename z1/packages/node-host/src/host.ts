@@ -888,10 +888,10 @@ export class ModuleWorker {
     })
   }
 
-  /** Ask the child to abort and kill it after the 2 s grace period. */
+  /** Ask the child to abort every execution and kill it after the 2 s grace period. */
   cancel(reason = 'module worker cancelled'): void {
     if (this.#child === undefined) return
-    this.#send({ t: 'cancel', reason })
+    this.#send({ t: 'cancel-all', reason })
     for (const execution of [...this.#executions.values()]) {
       this.#abortExecution(execution, reason)
     }
@@ -929,7 +929,7 @@ export class ModuleWorker {
       // workers never instantiated services, so they skip the round trip.
       if (this.#loadServices && wasReady) await this.#requestServiceDispose(child)
       try {
-        child.send({ t: 'cancel', reason: 'disposed' } satisfies HostToWorker)
+        child.send({ t: 'cancel-all', reason: 'disposed' } satisfies HostToWorker)
       } catch {
         // The channel may already be closed.
       }
@@ -1411,7 +1411,8 @@ export class ModuleWorker {
 
   #abortExecution(execution: PendingExecution, reason: string): void {
     if (execution.settled) return
-    this.#send({ t: 'cancel', reason })
+    // Name the execution: the child may be running nodes of other runs.
+    this.#send({ t: 'cancel', id: execution.id, reason })
     execution.killTimer = setTimeout(() => {
       this.#killChild(execution.child)
     }, KILL_GRACE_MS)

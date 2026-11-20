@@ -27,7 +27,7 @@ afterAll(async () => {
 })
 
 test('local write/read round-trips and creates nested directories', async () => {
-  const fs = createLocalFsService()
+  const fs = createLocalFsService(root)
   const path = join(root, 'nested', 'deeper', 'note.txt')
 
   await fs.write(path, 'hello workspace')
@@ -36,8 +36,41 @@ test('local write/read round-trips and creates nested directories', async () => 
   expect(await readFile(path, 'utf8')).toBe('hello workspace')
 })
 
+test('a relative path is resolved against the workspace, not process.cwd()', async () => {
+  const fs = createLocalFsService(root)
+
+  await fs.write('relative/note.txt', 'inside')
+  expect(await readFile(join(root, 'relative', 'note.txt'), 'utf8')).toBe('inside')
+  expect(await fs.read('relative/note.txt')).toBe('inside')
+})
+
+test('a path that escapes the workspace is refused', async () => {
+  const fs = createLocalFsService(root)
+
+  await expect(fs.write('../escape.txt', 'x')).rejects.toThrow(/escapes the workspace root/)
+  await expect(fs.write(join(root, '..', 'escape.txt'), 'x')).rejects.toThrow(
+    /escapes the workspace root/,
+  )
+  await expect(fs.read('/etc/passwd')).rejects.toThrow(/escapes the workspace root/)
+})
+
+test('the module broker may pass an absolute path it has already vetted', async () => {
+  const fs = createLocalFsService(root, { allowAbsolute: true })
+  const outside = join(tmpdir(), `z1-fs-absolute-${String(process.pid)}.txt`)
+
+  try {
+    await fs.write(outside, 'granted')
+    expect(await fs.read(outside)).toBe('granted')
+    await expect(fs.write('../still-relative.txt', 'x')).rejects.toThrow(
+      /escapes the workspace root/,
+    )
+  } finally {
+    await rm(outside, { force: true })
+  }
+})
+
 test('reading a missing file names the path', async () => {
-  const fs = createLocalFsService()
+  const fs = createLocalFsService(root)
   const missing = join(root, 'nested', 'absent.txt')
 
   await expect(fs.read(missing)).rejects.toThrow(missing)

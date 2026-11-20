@@ -266,6 +266,7 @@ const clip = defineNode({
     let omitted = text.length - headChars - tailChars
 
     let spillPath = ''
+    let spillFailure: string | undefined
     if (ctx.config.spill) {
       const relative = [
         ctx.config.directory.replace(/\/+$/, ''),
@@ -276,12 +277,20 @@ const clip = defineNode({
         await ctx.fs.write(relative, text)
         spillPath = relative
       } catch (error) {
-        // A missing spill is a smaller problem than losing the tool result.
-        ctx.log('warn', `clip: cannot write ${relative}: ${errorMessage(error)}`)
+        // A missing spill is a smaller problem than losing the tool result, but
+        // the caller must not be told the full text is on disk when it is not:
+        // say so in the value, not only in a log the model never sees.
+        spillFailure = errorMessage(error)
+        ctx.log('warn', `clip: cannot write ${relative}: ${spillFailure}`)
       }
     }
 
-    const where = spillPath === '' ? '' : `; full output at ${spillPath}`
+    const where =
+      spillPath === ''
+        ? spillFailure === undefined
+          ? ''
+          : `; full output unavailable (spill failed: ${spillFailure})`
+        : `; full output at ${spillPath}`
     const marker = `\n${MARKER_SENTINEL}… [z1: clipped ${String(text.length)} chars, ${String(omitted)} omitted${where}] …${MARKER_SENTINEL}\n`
 
     // The marker length depends on the numbers it prints, so trim the kept text

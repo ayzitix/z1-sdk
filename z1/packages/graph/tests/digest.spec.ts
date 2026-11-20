@@ -69,6 +69,62 @@ describe('graphDigest', () => {
     expect(graphDigest(renamed)).toBe(graphDigest(left))
   })
 
+  test('ignores display fields inside a nested graph body', () => {
+    const body = (title: string, nodeConfig: Record<string, unknown>, x: number, label: string) => ({
+      schemaVersion: 1,
+      id: 'nested',
+      title,
+      nodes: [
+        {
+          id: 'map',
+          type: 'test.source',
+          version: '1.0.0',
+          config: nodeConfig,
+          position: { x, y: 0 },
+          label,
+        },
+      ],
+      edges: [],
+    })
+    const left = makeGraph({
+      nodes: [node('loop', 'test.nested', { body: body('Tool calls', { path: 'a' }, 0, 'A') })],
+    })
+    const renamed = makeGraph({
+      nodes: [
+        node('loop', 'test.nested', { body: body('Renamed', { path: 'a' }, 420, 'Renamed') }),
+      ],
+    })
+
+    expect(graphDigest(renamed)).toBe(graphDigest(left))
+  })
+
+  test('changes when a nested node config changes', () => {
+    const body = (path: string) => ({
+      schemaVersion: 1,
+      id: 'nested',
+      nodes: [{ id: 'map', type: 'test.source', version: '1.0.0', config: { path } }],
+      edges: [],
+    })
+    const left = makeGraph({ nodes: [node('loop', 'test.nested', { body: body('a') })] })
+    const right = makeGraph({ nodes: [node('loop', 'test.nested', { body: body('b') })] })
+
+    expect(graphDigest(right)).not.toBe(graphDigest(left))
+  })
+
+  test('ignores a nested title under config.graph too', () => {
+    const inner = (title: string) => ({
+      schemaVersion: 1,
+      id: 'inner',
+      title,
+      nodes: [node('n', 'test.source')],
+      edges: [],
+    })
+    const left = makeGraph({ nodes: [node('sub', 'test.nested', { graph: inner('Before') })] })
+    const renamed = makeGraph({ nodes: [node('sub', 'test.nested', { graph: inner('After') })] })
+
+    expect(graphDigest(renamed)).toBe(graphDigest(left))
+  })
+
   test('changes when autonomy changes', () => {
     const left = makeGraph({ nodes: [node('a', 'test.source')] })
     const right = makeGraph({

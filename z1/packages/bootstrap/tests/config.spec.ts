@@ -125,10 +125,68 @@ test('a project config may add its own provider but not choose the module store'
   ).toBe(join(resolve(directory), 'attacker', 'modules'))
 })
 
+test('an untrusted project config cannot flip recording, isolation or storage keys', async () => {
+  const cases: readonly {
+    key: string
+    value: string | boolean
+    check: (config: RuntimeConfig) => void
+  }[] = [
+    { key: 'fsMode', value: 'memory', check: (config) => expect(config.fsMode).toBe('memory') },
+    { key: 'recordLlm', value: 'off', check: (config) => expect(config.recordLlm).toBe('off') },
+    {
+      key: 'cassette',
+      value: 'traffic.jsonl',
+      check: (config) => expect(config.cassette).toBe(join(resolve(directory), 'traffic.jsonl')),
+    },
+    { key: 'useModules', value: false, check: (config) => expect(config.useModules).toBe(false) },
+    {
+      key: 'useServiceModules',
+      value: false,
+      check: (config) => expect(config.useServiceModules).toBe(false),
+    },
+    { key: 'useMemory', value: false, check: (config) => expect(config.useMemory).toBe(false) },
+    {
+      key: 'dbPath',
+      value: 'elsewhere.db',
+      check: (config) => expect(config.dbPath).toBe(join(resolve(directory), 'elsewhere.db')),
+    },
+    {
+      key: 'graphsPath',
+      value: 'elsewhere-graphs',
+      check: (config) => expect(config.graphsPath).toBe(join(resolve(directory), 'elsewhere-graphs')),
+    },
+    {
+      key: 'templatesPath',
+      value: 'elsewhere-templates',
+      check: (config) =>
+        expect(config.templatesPath).toBe(join(resolve(directory), 'elsewhere-templates')),
+    },
+    {
+      key: 'modulesPath',
+      value: 'elsewhere-modules',
+      check: (config) =>
+        expect(config.modulesPath).toBe(join(resolve(directory), 'elsewhere-modules')),
+    },
+  ]
+
+  for (const { key, value, check } of cases) {
+    const file = join(directory, `untrusted-${key}.json`)
+    await writeConfig(file, { [key]: value })
+
+    expect(() => loadRuntimeConfig({ cwd: directory, env: {}, file })).toThrow(
+      new RegExp(`sets ${key}.*Z1_TRUST_CONFIG=1`, 's'),
+    )
+
+    // Trusting the directory is the explicit opt-in, and then the key applies.
+    check(loadRuntimeConfig({ cwd: directory, env: {}, file, trustFile: true }))
+  }
+})
+
 test('the environment beats the file, overrides beat the environment', async () => {
   const file = join(directory, 'precedence.json')
   await writeConfig(file, { dbPath: 'from-file.db', graphsPath: 'from-file-graphs' })
 
+  // Paths are trust-sensitive; the precedence itself is what this test covers.
   const fromEnv = loadRuntimeConfig({
     cwd: directory,
     env: {
@@ -139,6 +197,7 @@ test('the environment beats the file, overrides beat the environment', async () 
       Z1_SERVICE_MODULES: '0',
     },
     file,
+    trustFile: true,
   })
   expect(fromEnv.dbPath).toBe(join(resolve(directory), 'from-env.db'))
   expect(fromEnv.graphsPath).toBe(join(resolve(directory), 'env-graphs'))
@@ -150,6 +209,7 @@ test('the environment beats the file, overrides beat the environment', async () 
     cwd: directory,
     env: { Z1_DB: 'from-env.db', Z1_LIVE: '1' },
     file,
+    trustFile: true,
     overrides: { dbPath: 'override.db', live: false, useMemory: false },
   })
   expect(overridden.dbPath).toBe(join(resolve(directory), 'override.db'))
@@ -161,15 +221,19 @@ test('Z1_FS selects the filesystem backend; env beats file, overrides beat env',
   const file = join(directory, 'fs-mode.json')
   await writeConfig(file, { fsMode: 'memory' })
 
-  expect(loadRuntimeConfig({ cwd: directory, env: {}, file }).fsMode).toBe('memory')
+  // `fsMode` is trust-sensitive, so every read of the file trusts it here.
+  expect(loadRuntimeConfig({ cwd: directory, env: {}, file, trustFile: true }).fsMode).toBe(
+    'memory',
+  )
   expect(
-    loadRuntimeConfig({ cwd: directory, env: { Z1_FS: 'local' }, file }).fsMode,
+    loadRuntimeConfig({ cwd: directory, env: { Z1_FS: 'local' }, file, trustFile: true }).fsMode,
   ).toBe('local')
   expect(
     loadRuntimeConfig({
       cwd: directory,
       env: { Z1_FS: 'local' },
       file,
+      trustFile: true,
       overrides: { fsMode: 'memory' },
     }).fsMode,
   ).toBe('memory')

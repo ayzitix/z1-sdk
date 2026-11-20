@@ -4,7 +4,14 @@
  * always say that it cut something.
  */
 
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { describe, expect, test } from 'vitest'
+
+import { createLocalFsService } from '@z1/bootstrap'
+import type { FsService } from '@z1/runtime'
 
 import {
   contextBudget,
@@ -29,6 +36,8 @@ interface Extras {
   writeError?: Error
   logs?: Logged[]
   llm?: Vec
+  /** Replaces the in-memory stub, so a test can use the real rooted service. */
+  fs?: FsService
 }
 
 interface Vec {
@@ -46,7 +55,7 @@ function ctx(inputs: Record<string, unknown>, config: unknown, extras: Extras = 
     signal: new AbortController().signal,
     log: (level: string, message: string) => extras.logs?.push({ level, message }),
     emit: () => undefined,
-    fs: {
+    fs: extras.fs ?? {
       async write(path: string, data: string) {
         if (extras.writeError !== undefined) throw extras.writeError
         extras.writes?.push({ path, data })
@@ -507,7 +516,25 @@ describe('z1.ctx.clip', () => {
     expect(output.truncated).toBe(true)
     expect(output.spillPath).toBe('')
     expect(String(output.value)).not.toContain('full output at')
+    // Losing the spill must be visible to the caller, not only to the log.
+    expect(String(output.value)).toContain('spill failed: read-only workspace')
     expect(logs.some((entry) => entry.message.includes('read-only workspace'))).toBe(true)
+  })
+
+  test('a spill lands under the workspace, not the process cwd', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'z1-clip-workspace-'))
+    try {
+      const output = await runClip(
+        { maxChars: 200, headRatio: 0.5 },
+        { value: long, name: 'read' },
+        { fs: createLocalFsService(workspace) },
+      )
+
+      expect(output.spillPath).toBe('.z1/out/run_test/loop-0-toolMap-0-mapClip-read.txt')
+      expect(await readFile(join(workspace, String(output.spillPath)), 'utf8')).toBe(long)
+    } finally {
+      await rm(workspace, { recursive: true, force: true })
+    }
   })
 
   test('spill can be turned off', async () => {

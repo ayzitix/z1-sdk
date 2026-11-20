@@ -36,9 +36,10 @@ function nodeEvent(runId: string, path: string): RunEvent {
   }
 }
 
-test('200 appends read the journal once and report contiguous seqs', () => {
+test('200 appends ask for the max seq once and report contiguous seqs', () => {
   const runId = 'run_long'
   const journal = makeJournal(runId)
+  const maxSeq = vi.spyOn(journal, 'maxSeq')
   const read = vi.spyOn(journal, 'read')
   const seen: number[] = []
   const tee = new TeeJournal(journal, (_runId, seq) => {
@@ -49,8 +50,10 @@ test('200 appends read the journal once and report contiguous seqs', () => {
     tee.append(nodeEvent(runId, `step-${index}`))
   }
 
-  // The lazy seed is the only `read`: every later seq comes from the map.
-  expect(read).toHaveBeenCalledTimes(1)
+  // The lazy seed is the only journal query: every later seq comes from the map,
+  // and the whole event list is never read just to count it.
+  expect(maxSeq).toHaveBeenCalledTimes(1)
+  expect(read).not.toHaveBeenCalled()
   expect(seen).toEqual(Array.from({ length: 200 }, (_value, index) => index + 1))
   expect(tee.read(runId)).toHaveLength(200)
 })

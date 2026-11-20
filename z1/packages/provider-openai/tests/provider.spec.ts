@@ -156,6 +156,25 @@ function respond(res: ServerResponse): void {
         },
       ])
       return
+    case 'usage-null':
+      // With `stream_options.include_usage` OpenAI puts `"usage": null` on
+      // every chunk but the closing one. A null means "not yet", not a crash.
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      })
+      for (const event of [
+        { choices: [{ delta: { role: 'assistant', content: 'Hel' } }], usage: null },
+        { choices: [{ delta: { content: 'lo' } }], usage: null },
+        { choices: [{ delta: { content: ' world' }, finish_reason: 'stop' }], usage: null },
+        { choices: [], usage: { prompt_tokens: 9, completion_tokens: 5 } },
+      ]) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`)
+      }
+      res.write('data: [DONE]\n\n')
+      res.end()
+      return
     case 'stream':
       sse(
         res,
@@ -237,6 +256,8 @@ describe('OpenAiLlmService', () => {
     const body = sent?.body ?? {}
     expect(body['model']).toBe('gpt-test')
     expect(body['stream']).toBe(true)
+    // A streamed turn asks for the closing usage chunk, or `usage` is lost.
+    expect(body['stream_options']).toEqual({ include_usage: true })
     expect(body['temperature']).toBe(0.2)
     expect(body['max_tokens']).toBe(64)
     expect(body['messages']).toEqual([
@@ -266,6 +287,18 @@ describe('OpenAiLlmService', () => {
     expect(result.message.content).toBe('Hello world')
     expect(result.toolCalls).toEqual([])
     expect(result.stopReason).toBe('stop')
+    expect(result.usage).toEqual({ inputTokens: 9, outputTokens: 5 })
+  })
+
+  test('treats a null usage chunk as "not yet" and keeps the closing one', async () => {
+    scenario = 'usage-null'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+    const deltas: ChatDelta[] = []
+
+    const result = await service.chat(request(), (delta) => deltas.push(delta))
+
+    expect(deltas.filter((delta) => delta.type === 'text')).toHaveLength(3)
+    expect(result.message.content).toBe('Hello world')
     expect(result.usage).toEqual({ inputTokens: 9, outputTokens: 5 })
   })
 
@@ -335,6 +368,7 @@ describe('OpenAiLlmService', () => {
     )
 
     expect(captured[0]?.body['stream']).toBe(false)
+    expect(captured[0]?.body['stream_options']).toBeUndefined()
     expect(deltas).toEqual([])
     expect(result.message).toEqual({
       role: 'assistant',
@@ -398,12 +432,41 @@ describe('OpenAiLlmService retry', () => {
     expect(captured).toHaveLength(1)
   })
 
-  test('does not retry a 400 and keeps status and body', async () => {
-    failures = [{ status: 400, body: '{"error":{"message":"bad request"}}' }]
+  test('retries once without stream_options when the server rejects the field', async () => {
+    for (const status of [400, 422] as const) {
+      captured = []
+      failures = [
+        {
+          status,
+          body: '{"error":{"message":"Unrecognized request argument: stream_options"}}',
+        },
+      ]
+      const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY, retry: { attempts: 1 } })
+
+      const result = await service.chat(request())
+
+      expect(captured).toHaveLength(2)
+      expect(captured[0]?.body['stream_options']).toEqual({ include_usage: true })
+      expect(captured[1]?.body['stream_options']).toBeUndefined()
+      expect(result.message.content).toBe('Hello world')
+      // The server was never asked for usage, but a compatible one may still
+      // send it; this fixture does, and the caller keeps it.
+      expect(result.usage).toEqual({ inputTokens: 9, outputTokens: 5 })
+    }
+  })
+
+  test('does not retry a 400 beyond dropping stream_options', async () => {
+    failures = [
+      { status: 400, body: '{"error":{"message":"bad request"}}' },
+      { status: 400, body: '{"error":{"message":"bad request"}}' },
+    ]
     const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY, retry: { baseDelayMs: 1 } })
 
     await expect(service.chat(request())).rejects.toThrow(/400.*bad request/s)
-    expect(captured).toHaveLength(1)
+    // The first 400 buys exactly one retry without the optional field; the
+    // second is the server's real answer and is not retried again.
+    expect(captured).toHaveLength(2)
+    expect(captured[1]?.body['stream_options']).toBeUndefined()
   })
 
   test('attempts: 1 disables retry', async () => {

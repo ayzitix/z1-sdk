@@ -232,9 +232,19 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
 
   const memory = config.useMemory ? new BranchMemory(journal) : undefined
   const mock = createMockRuntimeServices()
-  // `memory` keeps the mock's in-process map (tests); `local` is the real disk.
+  // `memory` keeps the mock's in-process map (tests); `local` is the real disk,
+  // rooted at the workspace so a relative spill lands under `config.cwd`.
   // A run may still override this with `RunOverrides.fs`.
-  const fs: FsService = config.fsMode === 'memory' ? mock.fs : createLocalFsService()
+  const fs: FsService =
+    config.fsMode === 'memory' ? mock.fs : createLocalFsService(config.cwd)
+  // Worker modules are already fenced by the capability broker, which may grant
+  // an absolute path outside the workspace (their own module directory). Give
+  // that broker a service that leaves vetted absolute paths alone while still
+  // anchoring relative ones; the ambient `fs` above stays fully contained.
+  const moduleFs: FsService =
+    config.fsMode === 'memory'
+      ? mock.fs
+      : createLocalFsService(config.cwd, { allowAbsolute: true })
   const providers = new ProviderRegistry({
     providers: config.providers,
     env: config.env,
@@ -344,7 +354,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         llm,
         llmFor: (runId: string) => runLlm.get(runId),
         tools: mock.tools,
-        fs,
+        fs: moduleFs,
         approval: moduleNodeApproval,
         approvalFor: approvalForRun,
       },

@@ -24,6 +24,7 @@ import {
 } from '../src/index.ts'
 
 const MODULE_DIR = fileURLToPath(new URL('./fixtures/echo', import.meta.url))
+const CANCEL_DIR = fileURLToPath(new URL('./fixtures/cancel', import.meta.url))
 
 const NODE_IDS = [
   'com.example.echo.echo',
@@ -360,6 +361,35 @@ test('timeout and abort both stop a sleeping node', async () => {
   setTimeout(() => controller.abort(new Error('test abort')), 50)
 
   await expect(running).rejects.toThrow(/cancelled: .*test abort/)
+}, 20_000)
+
+test('cancelling one execution leaves another running in the same worker', async () => {
+  const worker = new ModuleWorker({
+    moduleDir: CANCEL_DIR,
+    entry: 'index.js',
+    manifestNodeIds: ['com.example.cancel.delay'],
+    capabilities: {},
+    services: createServices(freshProbes()),
+    // A generous per-node timeout: the survivor must finish on its own, not by
+    // outliving the cancelled execution's host-side timer.
+    timeoutMs: 1_500,
+  })
+  workers.push(worker)
+  await worker.start()
+
+  const controller = new AbortController()
+  const cancelled = worker.execute(
+    'com.example.cancel.delay',
+    {},
+    { ms: 600 },
+    null,
+    controller.signal,
+  )
+  const survivor = worker.execute('com.example.cancel.delay', {}, { ms: 300 }, null)
+  setTimeout(() => controller.abort(new Error('test cancel')), 50)
+
+  await expect(cancelled).rejects.toThrow(/cancelled: .*test cancel/)
+  await expect(survivor).resolves.toEqual({ text: 'done' })
 }, 20_000)
 
 test('an exported node id missing from the manifest rejects start', async () => {

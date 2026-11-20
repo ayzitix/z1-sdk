@@ -26,6 +26,14 @@ export interface SequencedEvent {
  */
 export interface RunJournal {
   read(runId: string): readonly RunEvent[]
+  /**
+   * Merged events after `seq` (1-based, the same numbering `read` returns).
+   * `readAfter(runId, 0)` equals `read(runId)`; a caller that already holds a
+   * cursor does not re-materialise the prefix.
+   */
+  readAfter(runId: string, seq: number): readonly RunEvent[]
+  /** Last merged sequence number `read` would return; `0` for an unknown run. */
+  maxSeq(runId: string): number
   ownedEvents(runId: string): readonly SequencedEvent[]
   getRun(runId: string): RunRecord | undefined
   listRuns(): readonly RunRecord[]

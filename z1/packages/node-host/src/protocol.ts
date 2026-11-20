@@ -204,7 +204,8 @@ export type HostToWorker =
       inputs: Record<string, unknown>
       seed: unknown
     }
-  | { t: 'cancel'; reason: string }
+  | { t: 'cancel'; id: number; reason: string }
+  | { t: 'cancel-all'; reason: string }
   | { t: 'delta'; callId: number; delta: unknown }
   | { t: 'call-result'; callId: number; ok: true; value: unknown }
   | { t: 'call-result'; callId: number; ok: false; error: string }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -115,6 +115,26 @@ test('a traversal attempt is refused', async () => {
     expect(response.status).toBe(404)
     expect(response.body).not.toContain('top secret')
   }
+})
+
+test('a symlink out of the build directory is refused', async () => {
+  const { root, staticDir } = await makeBuild()
+  await symlink(join(root, 'secret'), join(staticDir, 'leak.txt'))
+  const server = await start(staticDir)
+
+  const response = await fetch(`${origin(server)}/leak.txt`)
+  expect(response.status).toBe(404)
+  expect(await response.text()).not.toContain('top secret')
+})
+
+test('a symlink that stays inside the build still serves', async () => {
+  const { staticDir } = await makeBuild()
+  await symlink(join(staticDir, 'assets', 'app.js'), join(staticDir, 'alias.js'))
+  const server = await start(staticDir)
+
+  const response = await fetch(`${origin(server)}/alias.js`)
+  expect(response.status).toBe(200)
+  expect(await response.text()).toContain('console.log')
 })
 
 test('never lists a directory', async () => {

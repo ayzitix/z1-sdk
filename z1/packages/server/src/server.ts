@@ -220,15 +220,33 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     }
   }
 
+  /**
+   * Last `approval.requested` path per run and node, filled from the tee.
+   *
+   * The journal replay below is only for a run that began in an earlier server
+   * lifetime; a live run never walks its whole trace to answer an approval.
+   * Entries are dropped when the run is pruned, so a long-lived server does not
+   * accumulate one map per settled run.
+   */
+  const approvalPaths = new Map<string, Map<string, string>>()
+
   const tee = new TeeJournal(journal, (runId, seq, event) => {
+    if (event.type === 'approval.requested') {
+      let paths = approvalPaths.get(runId)
+      if (paths === undefined) {
+        paths = new Map()
+        approvalPaths.set(runId, paths)
+      }
+      paths.set(event.nodeId, event.path)
+    }
     publish(runId, seq, event)
   })
 
   function readSequenced(runId: string, afterSeq: number | undefined): SequencedEvent[] {
-    const events: SequencedEvent[] = journal
-      .read(runId)
-      .map((event, index) => ({ seq: index + 1, event }))
-    return afterSeq === undefined ? events : events.filter((item) => item.seq > afterSeq)
+    const start = afterSeq ?? 0
+    return journal
+      .readAfter(runId, start)
+      .map((event, index) => ({ seq: start + index + 1, event }))
   }
 
   function parseGraphParam(value: unknown): GraphDocument {
@@ -258,6 +276,9 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
    * that re-enters one node type from losing the previous iteration's path.
    */
   function lastApprovalPath(runId: string, nodeId: string): string {
+    const known = approvalPaths.get(runId)?.get(nodeId)
+    if (known !== undefined) return known
+    // A run resumed from an earlier server process has no tee history here.
     const events = journal.read(runId)
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const event = events[index]
@@ -347,6 +368,7 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
   function pruneRun(state: RunState): void {
     if (state.status === 'running' || state.subscribers.size > 0) return
     runs.delete(state.runId)
+    approvalPaths.delete(state.runId)
   }
 
   async function runAndSettle(
@@ -427,6 +449,21 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       })
     }
     if (args.resume) {
+      const record = journal.getRun(args.runId)
+      // A terminal row is the audit trail of a finished run. Flipping it back
+      // to `running` only to record the executor's RESUME_MISMATCH rewrites
+      // history for a run that already succeeded, and a pruned `RunState`
+      // makes that the first thing a resume does. Refuse before touching it.
+      if (
+        record !== undefined &&
+        (record.status === 'completed' ||
+          record.status === 'failed' ||
+          record.status === 'cancelled')
+      ) {
+        throw appFault(APP_ERRORS.conflict, `run ${args.runId} is already ${record.status}`, {
+          runId: args.runId,
+        })
+      }
       journal.updateRun(args.runId, { status: 'running', updatedAt: Date.now() })
     } else {
       const now = Date.now()

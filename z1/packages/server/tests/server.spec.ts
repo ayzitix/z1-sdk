@@ -461,19 +461,19 @@ test('run.resume replays an unfinished run and requires the graph', async () => 
     code: -32602,
   })
 
-  // The terminal-state rule still holds: the finished id is refused, and the
-  // refusal journals exactly one `run.failed` without a second `run.completed`.
-  const refused = await peer.request('run.resume', {
-    runId: started.runId,
-    graph: helloGraph(),
-    input: { name: 'resume' },
-  })
-  expect(refused.status).toBe('failed')
-  expect(refused.error).toContain('RESUME_MISMATCH')
-  expect(refused.error).toContain('already ended with run.completed')
+  // The terminal-state rule still holds: the finished id is refused before its
+  // row is touched, so a completed run never gains a second failure record.
+  await expect(
+    peer.request('run.resume', {
+      runId: started.runId,
+      graph: helloGraph(),
+      input: { name: 'resume' },
+    }),
+  ).rejects.toMatchObject({ code: APP_ERRORS.conflict })
 
   const finished = await peer.request('run.get', { runId: started.runId })
-  expect(finished.events.filter((item) => item.event.type === 'run.failed')).toHaveLength(1)
+  expect(finished.record.status).toBe('completed')
+  expect(finished.events.filter((item) => item.event.type === 'run.failed')).toHaveLength(0)
   expect(finished.events.filter((item) => item.event.type === 'run.completed')).toHaveLength(1)
 })
 

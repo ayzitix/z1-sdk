@@ -40,13 +40,14 @@ test('templatesPath precedence is env > file > default', async () => {
   const defaults = loadRuntimeConfig({ cwd: root, env: {} })
   expect(defaults.templatesPath).toBe(join(resolve(root), '.z1/templates'))
 
-  const fromFile = loadRuntimeConfig({ cwd: root, env: {}, file })
+  const fromFile = loadRuntimeConfig({ cwd: root, env: {}, file, trustFile: true })
   expect(fromFile.templatesPath).toBe(join(resolve(root), 'file-templates'))
 
   const fromEnv = loadRuntimeConfig({
     cwd: root,
     env: { Z1_TEMPLATES_DIR: 'env-templates' },
     file,
+    trustFile: true,
   })
   expect(fromEnv.templatesPath).toBe(join(resolve(root), 'env-templates'))
 

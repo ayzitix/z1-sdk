@@ -36,7 +36,7 @@ export class TeeJournal implements Journal {
     // events), matching the `seq` values `run.get`/`run.subscribe` replay.
     // `journal.fork` instead uses own numbering; the mapping between the two is
     // deliberately not exposed here.
-    const seq = known === undefined ? this.#inner.read(event.runId).length : known + 1
+    const seq = known === undefined ? this.#inner.maxSeq(event.runId) : known + 1
     this.#seqs.set(event.runId, seq)
     this.#sink(event.runId, seq, event)
   }

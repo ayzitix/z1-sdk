@@ -9,7 +9,7 @@
  * @module @z1/server/static
  */
 
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, realpath, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { extname, resolve, sep } from 'node:path'
 
@@ -51,11 +51,22 @@ function plain(response: ServerResponse, status: number, body: string): void {
   response.end(body)
 }
 
-/** `undefined` when the file is missing or is not a regular file. */
-async function existingFile(path: string): Promise<string | undefined> {
+/**
+ * The real path of a regular file inside `realBase`, or `undefined`.
+ *
+ * `stat` follows the final symlink, so on its own it can answer "this is a
+ * file" for a link that leaves the build directory. The resolved path is
+ * checked against the resolved base too, and the real path is what gets read:
+ * a symlink that stays inside the build still serves, one that points out of
+ * it is a 404.
+ */
+async function existingFile(path: string, realBase: string): Promise<string | undefined> {
   try {
     const info = await stat(path)
-    return info.isFile() ? path : undefined
+    if (!info.isFile()) return undefined
+    const real = await realpath(path)
+    if (real !== realBase && !real.startsWith(realBase + sep)) return undefined
+    return real
   } catch {
     return undefined
   }
@@ -119,7 +130,17 @@ export function createStaticHandler(
       return
     }
 
-    const file = target === base ? undefined : await existingFile(target)
+    // The build directory itself may be reached through a symlink; containment
+    // is judged on real paths, so `root` is resolved once per request.
+    let realBase: string
+    try {
+      realBase = await realpath(base)
+    } catch {
+      plain(response, 404, 'not found\n')
+      return
+    }
+
+    const file = target === base ? undefined : await existingFile(target, realBase)
     if (file !== undefined) {
       await sendFile(file, response, method === 'GET')
       return
@@ -131,7 +152,7 @@ export function createStaticHandler(
       return
     }
 
-    const index = await existingFile(resolve(base, 'index.html'))
+    const index = await existingFile(resolve(base, 'index.html'), realBase)
     if (index === undefined) {
       plain(response, 404, 'not found\n')
       return

@@ -204,6 +204,42 @@ export class SqliteJournal implements Journal, RunJournal {
   }
 
   /**
+   * Merged events after `seq`, skipping the prefix at the SQL level instead of
+   * reading it and dropping it in memory.
+   */
+  readAfter(runId: string, seq: number): readonly RunEvent[] {
+    const start = Number.isFinite(seq) ? Math.max(0, Math.floor(seq)) : 0
+    const chain = this.#chain(runId)
+    const db = this.#handle()
+    const events: RunEvent[] = []
+    let skip = start
+    for (const link of chain) {
+      const bound = this.#linkBound(link)
+      if (skip >= bound) {
+        skip -= bound
+        continue
+      }
+      const statement = db.prepare(
+        'SELECT data FROM events WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq',
+      )
+      for (const row of statement.all(link.runId, skip, bound)) {
+        events.push(JSON.parse(columnText(row, 'data')) as RunEvent)
+      }
+      // Once the prefix is consumed every remaining link starts from its first
+      // own event.
+      skip = 0
+    }
+    return events
+  }
+
+  /** Last merged sequence `read` would return for this run. */
+  maxSeq(runId: string): number {
+    let total = 0
+    for (const link of this.#chain(runId)) total += this.#linkBound(link)
+    return total
+  }
+
+  /**
    * This run's own rows, ascending, with their stored sequence numbers. Unlike
    * `read` it never walks the fork chain, so `seq` is the run's own numbering
    * (a fork point is a position in that numbering, not in the merged replay).
@@ -296,6 +332,15 @@ export class SqliteJournal implements Journal, RunJournal {
       .get(runId)
     if (row === undefined) return 1
     return columnNumber(row, 'max_seq') + 1
+  }
+
+  /** Last own sequence this link contributes to `read`, bounded by its fork. */
+  #linkBound(link: ChainLink): number {
+    const row = this.#handle()
+      .prepare('SELECT COALESCE(MAX(seq), 0) AS max_seq FROM events WHERE run_id = ?')
+      .get(link.runId)
+    const ownMax = row === undefined ? 0 : columnNumber(row, 'max_seq')
+    return Math.min(link.maxSeq, ownMax)
   }
 
   /** Root-to-leaf links, each with the prefix of its own events to replay. */

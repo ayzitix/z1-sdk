@@ -838,6 +838,21 @@ process.on('message', (raw: unknown) => {
   }
 
   if (type === 'cancel') {
+    const id = raw['id']
+    if (typeof id === 'number') {
+      // One child hosts every execution of this module, including runs that
+      // started concurrently, so a cancel names its execution. Aborting the
+      // whole map here would stop an unrelated run's node too.
+      const reason = raw['reason']
+      executions
+        .get(id)
+        ?.abort(new Error(typeof reason === 'string' ? reason : 'execution cancelled'))
+    }
+    return
+  }
+
+  if (type === 'cancel-all') {
+    // Disposal and worker shutdown are the only callers: no execution survives.
     for (const controller of executions.values()) controller.abort()
     return
   }

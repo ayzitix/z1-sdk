@@ -348,6 +348,49 @@ function envFsMode(
 }
 
 /**
+ * File keys an untrusted directory may not set.
+ *
+ * These do not describe how to reach the directory; they change what the
+ * process does once it is there. A checked-in file could turn recording off,
+ * swap `ctx.fs` for an in-memory backend, move the journal somewhere a later
+ * review will not look, or enable module code the user never installed. That
+ * is exactly the lever a cloned repository has, so the keys require
+ * `Z1_TRUST_CONFIG=1` in the same way `providers` does.
+ *
+ * `live` is deliberately absent: it only swaps the mock for the registry the
+ * user already configured, and an untrusted file cannot point that registry
+ * at its own host (see `vettedFileProviders`).
+ */
+const TRUSTED_FILE_KEYS = [
+  'fsMode',
+  'dbPath',
+  'graphsPath',
+  'modulesPath',
+  'templatesPath',
+  'useModules',
+  'useServiceModules',
+  'useMemory',
+  'recordLlm',
+  'cassette',
+] as const
+
+/** Reject the first security-relevant key a project config tries to set. */
+function assertTrustedFileKeys(config: RuntimeConfigFile, file: string): void {
+  for (const key of TRUSTED_FILE_KEYS) {
+    if (config[key] === undefined) continue
+    if (key === 'modulesPath') {
+      // Kept separate: the module store is executable code, not just a path.
+      throw new Error(
+        `"${file}" sets modulesPath, which is executable code; pass Z1_TRUST_CONFIG=1 to trust this directory or use --modules-dir`,
+      )
+    }
+    throw new Error(
+      `"${file}" sets ${key}, which changes how this process records, stores or isolates a run; pass Z1_TRUST_CONFIG=1 to trust this directory`,
+    )
+  }
+}
+
+/**
  * Providers a project config may contribute without being trusted.
  *
  * Adding a provider is harmless: it carries its own `envKey`, so it can only
@@ -394,6 +437,8 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
   const trustFile =
     options.trustFile === true || envFlag('Z1_TRUST_CONFIG', env) === true
 
+  if (!trustFile) assertTrustedFileKeys(fromFile, file)
+
   const fileProviders = trustFile
     ? (fromFile.providers ?? [])
     : vettedFileProviders(fromFile.providers ?? [], file)
@@ -405,12 +450,6 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
   const dbPath = overrides.dbPath ?? env['Z1_DB'] ?? fromFile.dbPath ?? DEFAULT_CONFIG.dbPath
   const graphsPath =
     overrides.graphsPath ?? env['Z1_GRAPHS_DIR'] ?? fromFile.graphsPath ?? DEFAULT_CONFIG.graphsPath
-  if (!trustFile && fromFile.modulesPath !== undefined) {
-    // The module store is executable code: a repository must not choose it.
-    throw new Error(
-      `"${file}" sets modulesPath, which is executable code; pass Z1_TRUST_CONFIG=1 to trust this directory or use --modules-dir`,
-    )
-  }
   const modulesPath =
     overrides.modulesPath ??
     env['Z1_MODULES_DIR'] ??
@@ -455,7 +494,6 @@ export function loadRuntimeConfig(options: LoadRuntimeConfigOptions = {}): Runti
       envRecordLlm('Z1_RECORD_LLM', env) ??
       fromFile.recordLlm ??
       DEFAULT_CONFIG.recordLlm,
-    ...(cassette === undefined ? {} : { cassette }),
     providers,
     env: { ...env },
   }

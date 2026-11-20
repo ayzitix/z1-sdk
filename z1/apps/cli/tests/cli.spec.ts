@@ -692,7 +692,8 @@ describe('z1 cli workspace', () => {
 
   test('io.cwd roots the runtime in the caller directory', async () => {
     const directory = await project({ dbPath: 'custom.db' })
-    const io = capture(false, {})
+    // The project config owns `dbPath`, which is a trust-sensitive key.
+    const io = capture(false, { Z1_TRUST_CONFIG: '1' })
 
     const code = await runCli(['run', HELLO, '--message', 'x', '--json'], {
       ...io.io,
@@ -706,7 +707,8 @@ describe('z1 cli workspace', () => {
   test('--cwd wins over io.cwd', async () => {
     const inherited = await project({ dbPath: 'inherited.db' })
     const named = await project({ dbPath: 'named.db' })
-    const io = capture(false, {})
+    // Both project configs own `dbPath`; trusting the directory is the opt-in.
+    const io = capture(false, { Z1_TRUST_CONFIG: '1' })
 
     const code = await runCli(
       ['run', HELLO, '--message', 'x', '--json', '--cwd', named],
@@ -721,7 +723,7 @@ describe('z1 cli workspace', () => {
   test('without either, the runtime uses process.cwd()', async () => {
     const directory = await project({ dbPath: 'default.db' })
     const original = process.cwd()
-    const io = capture(false, {})
+    const io = capture(false, { Z1_TRUST_CONFIG: '1' })
     process.chdir(directory)
     try {
       const code = await runCli(['run', HELLO, '--message', 'x', '--json'], io.io)

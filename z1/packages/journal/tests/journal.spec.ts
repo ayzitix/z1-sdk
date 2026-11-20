@@ -68,6 +68,23 @@ test('append numbers events per run and read returns them in order', () => {
   journal.close()
 })
 
+test('readAfter returns only later events and agrees with read on ordering', () => {
+  const journal = new SqliteJournal(':memory:')
+  journal.createRun(run('r1'))
+  const events: RunEvent[] = [started('r1', 10), node('r1', 11), node('r1', 12)]
+  for (const event of events) journal.append(event)
+
+  expect(journal.maxSeq('r1')).toBe(3)
+  expect(journal.readAfter('r1', 0)).toEqual(journal.read('r1'))
+  expect(journal.readAfter('r1', 1)).toEqual(events.slice(1))
+  expect(journal.readAfter('r1', 2)).toEqual(events.slice(2))
+  expect(journal.readAfter('r1', 3)).toEqual([])
+  // Unknown and empty runs answer zero rather than throwing.
+  expect(journal.maxSeq('nobody')).toBe(0)
+  expect(journal.readAfter('nobody', 0)).toEqual([])
+  journal.close()
+})
+
 test('append refuses an unknown run instead of writing an orphan event', () => {
   const journal = new SqliteJournal(':memory:')
   expect(() => journal.append(started('ghost', 1))).toThrow(/unknown run ghost/)
