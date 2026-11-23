@@ -435,7 +435,10 @@ describe('checkProcess', () => {
     const capabilities: ModuleCapabilities = { process: { spawn: ['node', 'git'] } }
     expect(checkProcess(capabilities, 'node')).toEqual({ ok: true })
     expect(checkProcess(capabilities, '/usr/local/bin/node')).toEqual({ ok: true })
-    expect(checkProcess(capabilities, 'C:/tools/git.exe').ok).toBe(false)
+    expect(checkProcess(capabilities, 'C:/tools/git-helper').ok).toBe(false)
+    // Windows executable suffixes are not part of the command name an operator
+    // grants: `git` covers `git.exe`, and only on Windows.
+    expect(checkProcess(capabilities, 'C:/tools/git.exe').ok).toBe(process.platform === 'win32')
 
     const absolute: ModuleCapabilities = { process: { spawn: ['/usr/local/bin/node'] } }
     expect(checkProcess(absolute, '/usr/local/bin/node')).toEqual({ ok: true })

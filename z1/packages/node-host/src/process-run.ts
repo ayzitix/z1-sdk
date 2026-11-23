@@ -67,10 +67,11 @@ export interface RunProcessOptions {
 
 /** True when `key` is on the inherited-environment allowlist. */
 export function isInheritedProcessEnvKey(key: string): boolean {
+  const upper = key.toUpperCase()
   return (
-    PROCESS_ENV_ALLOWED_KEYS.includes(key) ||
-    PROCESS_ENV_ALLOWED_PREFIXES.some((prefix) => key.startsWith(prefix)) ||
-    PROCESS_ENV_ALLOWED_SUFFIXES.some((suffix) => key.endsWith(suffix))
+    PROCESS_ENV_ALLOWED_KEYS.includes(upper) ||
+    PROCESS_ENV_ALLOWED_PREFIXES.some((prefix) => upper.startsWith(prefix)) ||
+    PROCESS_ENV_ALLOWED_SUFFIXES.some((suffix) => upper.endsWith(suffix))
   )
 }
 
@@ -83,7 +84,12 @@ export function isInheritedProcessEnvKey(key: string): boolean {
 export function baseProcessEnv(overrides: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && isInheritedProcessEnvKey(key)) env[key] = value
+    if (value === undefined || !isInheritedProcessEnvKey(key)) continue
+    const upper = key.toUpperCase()
+    // Windows spells the variable `Path`; canonicalise the exact allowlist
+    // keys so the child always receives `PATH`. Proxy and locale spellings are
+    // preserved because the allowlist deliberately carries both cases.
+    env[PROCESS_ENV_ALLOWED_KEYS.includes(upper) ? upper : key] = value
   }
   env['PATH'] = env['PATH'] ?? ''
   for (const key of Object.keys(overrides)) {

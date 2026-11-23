@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
+import { basename, dirname, join, normalize, resolve } from 'node:path'
 import type { ModuleCapabilities } from './types.ts'
 
 export type CapabilityCheck = { ok: true } | { ok: false; reason: string }
@@ -7,13 +7,25 @@ export type CapabilityCheck = { ok: true } | { ok: false; reason: string }
 const PARENT_SEGMENT = /(?:^|[\\/])\.\.(?:[\\/]|$)/
 
 function toPosix(path: string): string {
-  return path.split(sep).join('/')
+  return path.replace(/\\/g, '/')
 }
 
 /** `normalize` keeps a trailing slash; capability matching compares clean paths. */
 function cleanPath(path: string): string {
   const trimmed = path.replace(/\/+$/, '')
-  return trimmed.length === 0 ? '/' : trimmed
+  if (trimmed.length === 0) return '/'
+  // `C:/` is the root of a drive, not the drive-relative `C:`.
+  if (/^[A-Za-z]:$/.test(trimmed)) return `${trimmed}/`
+  return trimmed
+}
+
+/**
+ * Resolve a path or capability pattern to a cleaned POSIX form. `resolve` maps
+ * a POSIX-style root (`/**`, `/tmp/**`) to the current drive on Windows and
+ * leaves it untouched on POSIX; a `C:/...` path stays on its own drive.
+ */
+function absolutePath(value: string, base: string): string {
+  return cleanPath(toPosix(normalize(resolve(base, value))))
 }
 
 function escapeRegex(character: string): string {
@@ -95,17 +107,15 @@ export function checkFs(
     return deny('path contains a parent directory segment')
   }
 
-  const moduleRoot = resolve(moduleDir)
-  const target = cleanPath(toPosix(normalize(resolve(moduleRoot, path))))
+  const moduleRoot = absolutePath(moduleDir, process.cwd())
+  const target = absolutePath(path, moduleRoot)
 
   for (const pattern of patterns) {
     if (pattern.trim().length === 0) continue
     if (hasParentSegment(pattern)) continue
 
     const expanded = resolveCapabilityPath(pattern, moduleRoot)
-    const absolute = cleanPath(
-      toPosix(normalize(isAbsolute(expanded) ? expanded : resolve(moduleRoot, expanded))),
-    )
+    const absolute = absolutePath(expanded, moduleRoot)
     if (matchPath(absolute, target)) return { ok: true }
   }
 
@@ -126,7 +136,7 @@ function resolveReal(path: string): string | undefined {
   for (;;) {
     try {
       const real = realpathSync.native(current)
-      return missing.length === 0 ? real : join(real, ...missing.reverse())
+      return cleanPath(toPosix(normalize(missing.length === 0 ? real : join(real, ...missing.reverse()))))
     } catch {
       const parent = dirname(current)
       if (parent === current) return undefined
@@ -161,11 +171,11 @@ export function checkFsReal(
   if (!lexical.ok) return lexical
 
   const patterns = capabilities?.fs?.[direction] ?? []
-  const moduleRoot = cleanPath(toPosix(normalize(resolve(moduleDir))))
+  const moduleRoot = absolutePath(moduleDir, process.cwd())
   const realModuleRoot = resolveReal(moduleRoot)
   if (realModuleRoot === undefined) return deny(`cannot resolve the module directory: ${moduleDir}`)
 
-  const target = cleanPath(toPosix(normalize(resolve(moduleRoot, path))))
+  const target = absolutePath(path, moduleRoot)
   // `fs.stat` uses lstat, so the final component is reported, never followed;
   // resolving it would deny statting a link that points outside the grant while
   // protecting nothing. Intermediate components are still resolved.
@@ -173,7 +183,9 @@ export function checkFsReal(
     options.followFinal === false
       ? (() => {
           const parent = resolveReal(dirname(target))
-          return parent === undefined ? undefined : join(parent, basename(target))
+          return parent === undefined
+            ? undefined
+            : cleanPath(toPosix(normalize(join(parent, basename(target)))))
         })()
       : resolveReal(target)
   if (realTarget === undefined) return deny(`cannot resolve the path: ${path}`)
@@ -185,9 +197,7 @@ export function checkFsReal(
     if (literal.length === 0) return undefined
 
     const expanded = resolveCapabilityPath(literal, moduleRoot)
-    const absolute = cleanPath(
-      toPosix(normalize(isAbsolute(expanded) ? expanded : resolve(moduleRoot, expanded))),
-    )
+    const absolute = absolutePath(expanded, moduleRoot)
     if (absolute === moduleRoot) return realModuleRoot
     if (absolute.startsWith(moduleRoot + '/')) {
       return toPosix(join(realModuleRoot, absolute.slice(moduleRoot.length + 1)))
@@ -202,17 +212,16 @@ export function checkFsReal(
     if (pattern.trim().length === 0 || hasParentSegment(pattern)) continue
 
     const expanded = resolveCapabilityPath(pattern, moduleRoot)
-    const absolute = cleanPath(
-      toPosix(normalize(isAbsolute(expanded) ? expanded : resolve(moduleRoot, expanded))),
-    )
+    const absolute = absolutePath(expanded, moduleRoot)
     if (!matchPath(absolute, target)) continue
 
     const base = anchor(pattern)
     if (base === undefined) return deny(`capability pattern has no base directory: ${pattern}`)
 
-    // A grant anchored at the filesystem root (`/**`) has base `/`, and
-    // `'/' + '/'` would be `//`, which no path starts with.
-    if (realTarget === base || base === '/' || realTarget.startsWith(base + '/')) {
+    // A grant anchored at the filesystem root (`/**` -> `/` on POSIX, `C:/` on
+    // Windows) has a base that already ends in a slash; do not add another.
+    const prefix = base.endsWith('/') ? base : `${base}/`
+    if (realTarget === base || realTarget.startsWith(prefix)) {
       return { ok: true }
     }
     denied = `fs.${direction} path resolves through a symlink outside the granted pattern ${pattern}: ${realTarget}`
@@ -588,13 +597,28 @@ export function checkProcess(
 
   const wanted = command.trim()
   if (wanted.length === 0) return deny('empty command')
+  const wantedPosix = toPosix(wanted)
   const wantedBase = basename(wanted)
+  // A Windows grant for `node` must match `node.exe`; the extension is not
+  // part of the command name an operator writes. Only strip executable
+  // extensions, never an arbitrary dotted suffix (`python3.12`).
+  const wantedStem =
+    process.platform === 'win32'
+      ? wantedBase.replace(/\.(exe|cmd|bat|com)$/i, '')
+      : wantedBase
 
   for (const pattern of patterns) {
     const trimmed = pattern.trim()
     if (trimmed.length === 0) continue
     if (trimmed === '*') return { ok: true }
-    if (matchPath(trimmed, wanted) || matchPath(trimmed, wantedBase)) return { ok: true }
+    const normalized = toPosix(trimmed)
+    if (
+      matchPath(normalized, wantedPosix) ||
+      matchPath(normalized, wantedBase) ||
+      matchPath(normalized, wantedStem)
+    ) {
+      return { ok: true }
+    }
   }
 
   return deny(`command "${wanted}" is outside the granted process.spawn patterns`)

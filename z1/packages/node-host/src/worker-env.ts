@@ -66,8 +66,16 @@ export function workerEnvironment(
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue
-    if (!WORKER_ENV_KEYS.includes(key) && !LC_ENTRY.test(key)) continue
-    env[key] = value
+    const canonical = WORKER_ENV_KEYS.includes(key)
+      ? key
+      : WORKER_ENV_KEYS.includes(key.toUpperCase())
+        ? key.toUpperCase()
+        : undefined
+    if (canonical !== undefined) {
+      env[canonical] = value
+      continue
+    }
+    if (LC_ENTRY.test(key.toUpperCase())) env[key] = value
   }
   env['PATH'] = env['PATH'] ?? ''
   return env
