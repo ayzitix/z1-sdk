@@ -118,7 +118,7 @@ describe('resolveToolGrant', () => {
       'unknown_tool',
     )
 
-    expect(error.message).toBe('no installed tool named "readd"')
+    expect(error.message).toBe('subagent unknown_tool: no installed tool named "readd"')
     expect(error.requested).toEqual(['readd'])
   })
 

@@ -14,12 +14,15 @@ export {
   SubagentBudget,
   SubagentError,
   SubagentGrantError,
+  subagentErrorTap,
 } from './types.ts'
 export type {
   RestrictToolServiceOptions,
+  RunEventWithRunId,
   SubagentBudgetOptions,
   SubagentCallGuard,
   SubagentErrorCode,
+  SubagentErrorTap,
   SubagentGrantErrorCode,
   SubagentGrantErrorDetails,
   SubagentHost,
@@ -38,6 +41,7 @@ export type {
   SubagentToolOptions,
   SubagentToolResult,
   SubagentToolSelection,
+  SubagentToolStatus,
   ToolGrant,
   ToolGrantContext,
   WithSubagentToolOptions,
@@ -45,6 +49,20 @@ export type {
 export { normalizeToolName, parseSubagentInput, resolveToolGrant } from './grant.ts'
 export { subagentSystemPrompt } from './prompt.ts'
 export type { SubagentPromptOptions } from './prompt.ts'
+export {
+  MAX_SUBAGENT_RESULT_TEXT,
+  SUBAGENT_RESULT_PREAMBLE,
+  assistantTexts,
+  neutraliseChildText,
+  partialText,
+  resultText,
+  statusLine,
+  stepCapDetail,
+  stepLimitSteps,
+  toolStatus,
+  truncateText,
+} from './result.ts'
+export type { SubagentResultInput, SubagentResultSection, SubagentResultText } from './result.ts'
 export {
   createSubagentTool,
   restrictToolService,

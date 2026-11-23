@@ -9,6 +9,7 @@ import {
   MAX_SUBAGENT_TOOL_ENTRIES,
   SUBAGENT_TOOL_NAME,
   SubagentError,
+  subagentErrorTap,
   type SubagentTool,
   type SubagentToolOptions,
   type SubagentToolResult,
@@ -74,6 +75,17 @@ function resultJson(result: SubagentToolResult): Json {
     tools: [...result.tools],
     denied: [...result.denied],
     output: result.output,
+    // The machine-readable code travels next to the text, so a host that
+    // branches on `errorCode` never has to parse the message; `isError` is the
+    // same channel `z1.tool.call` uses for a failed tool.
+    ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+    ...(result.message === undefined ? {} : { message: result.message }),
+    ...(result.partial === undefined ? {} : { partial: result.partial }),
+    ...(result.steps === undefined ? {} : { steps: result.steps }),
+    ...(result.elapsedMs === undefined ? {} : { elapsedMs: result.elapsedMs }),
+    ...(result.detail === undefined ? {} : { detail: result.detail }),
+    isError: result.status !== 'completed',
+    text: result.text,
   }
 }
 
@@ -146,9 +158,38 @@ export async function withSubagentTool(
         // silently shadow it.
         await assertNoShadow('call')
         if (options.guardCall !== undefined) await options.guardCall(toolName, args)
-        return resultJson(await tool.call(args))
+        // A *finished* child is a result, not a throw (see `runSubagent`): its
+        // `isError`/`errorCode` fields cross the tool boundary intact. A throw
+        // here is a pre-run failure (invalid grant, budget, `beginRun`); it
+        // keeps its `SubagentError.code`, now an own enumerable field, and its
+        // message is prefixed with the same stable token a result carries.
+        let result: SubagentToolResult
+        try {
+          result = await tool.call(args)
+        } catch (error) {
+          throw prefixed(error)
+        }
+        return resultJson(result)
       }
       return await inner.call(toolName, args)
     },
   }
+}
+
+/**
+ * Re-throw a `SubagentError` with `subagent <code>:` in front of its message.
+ *
+ * The original instance is preserved (code, cause, `instanceof`), because some
+ * hosts match on the class. A non-`SubagentError` passes through untouched.
+ */
+function prefixed(error: unknown): unknown {
+  const tap = subagentErrorTap(error)
+  if (tap === undefined) return error
+  if (tap.message.startsWith(`subagent ${tap.code}`)) return error
+  if (!(error instanceof Error)) return error
+  // The original instance and stack stay; only the message is prefixed, and it
+  // is the *message* that `z1.tool.call` reports as `{ error }`. Re-assigning
+  // `message` keeps it an own field, so a structured clone still carries it.
+  error.message = `subagent ${tap.code}: ${tap.message}`
+  return error
 }

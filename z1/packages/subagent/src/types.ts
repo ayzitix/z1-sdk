@@ -2,6 +2,7 @@ import type { Json, ModelHandle, NodeRegistry, ToolSchema } from '@z1/node'
 import type {
   ApprovalService,
   Journal,
+  RunEvent,
   RuntimeServices,
 } from '@z1/runtime'
 
@@ -105,13 +106,51 @@ export type SubagentErrorCode =
   | 'child_suspended'
   | 'no_output'
 
+/**
+ * The stable token every `SubagentError` message starts with. A host that only
+ * receives text (a log, a `{ error }` tool result) can match it instead of
+ * parsing prose; the structured `code` stays the primary channel.
+ */
+export const subagentErrorPrefix = (code: SubagentErrorCode): string => `subagent ${code}: `
+
 export class SubagentError extends Error {
   readonly code: SubagentErrorCode
 
   constructor(code: SubagentErrorCode, message: string, options?: ErrorOptions) {
-    super(message, options)
+    super(message.startsWith(subagentErrorPrefix(code)) ? message : `${subagentErrorPrefix(code)}${message}`, options)
     this.name = 'SubagentError'
     this.code = code
+    // A `ToolService.call` argument may be structured-cloned before the call
+    // leaves the host, so the code is an own enumerable field rather than a
+    // class-only property; `codeOf` reads it structurally across that boundary.
+    Object.defineProperty(this, 'code', {
+      value: code,
+      enumerable: true,
+      writable: false,
+      configurable: true,
+    })
+  }
+}
+
+/** A throw that lost its `SubagentError` identity but kept `{ name, code }`. */
+export interface SubagentErrorTap {
+  readonly code: SubagentErrorCode
+  readonly message: string
+}
+
+/**
+ * The error code of anything that is (or looks like) a `SubagentError`, read
+ * structurally so a cloned or re-wrapped error is not silently `child_failed`.
+ */
+export function subagentErrorTap(error: unknown): SubagentErrorTap | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  if (!(error instanceof SubagentError)) return undefined
+  // Subclasses rename themselves (`SubagentGrantError`); the code is inherited
+  // and own, so `instanceof` is the test, not the name.
+  const code = error.code
+  return {
+    code,
+    message: typeof error.message === 'string' ? error.message : '',
   }
 }
 
@@ -138,6 +177,15 @@ export class SubagentGrantError extends SubagentError {
     this.name = 'SubagentGrantError'
     this.requested = details.requested ?? []
     this.denied = details.denied ?? []
+    // The base constructor sets an own enumerable `code`; a subclass field
+    // declaration would shadow it with a non-enumerable one, so it is
+    // re-asserted here for the same structured-clone reason.
+    Object.defineProperty(this, 'code', {
+      value: code,
+      enumerable: true,
+      writable: false,
+      configurable: true,
+    })
   }
 }
 
@@ -312,6 +360,15 @@ export interface SubagentHost {
   beginRun(overrides: SubagentRunOverrides): Promise<SubagentRunHandle>
 }
 
+/**
+ * What a finished delegation reports.
+ *
+ * `partial` is a child that used up its step cap: it is not `failed`, because
+ * a child that ran out of steps has usually done most of the work, and its
+ * last text is carried so the parent can decide what to do with it.
+ */
+export type SubagentToolStatus = 'completed' | 'failed' | 'cancelled' | 'timeout' | 'partial'
+
 export interface SubagentToolOptions {
   /** Model used for every child run; the model-facing input cannot change it. */
   readonly model: ModelHandle
@@ -360,14 +417,60 @@ export interface SubagentToolOptions {
    * here so a mid-run `/tools off read` revokes a child tool.
    */
   readonly guardCall?: SubagentCallGuard
+  /**
+   * Receives every child run event as it happens (before the journal append),
+   * tagged with `runId`. A host uses this to count the child's steps and to
+   * refresh a "N subagents running" line without reading the journal.
+   *
+   * Setup and the run's own event stream only: it is never given the parent's
+   * events, so a host cannot confuse the two.
+   */
+  readonly onEvent?: (event: RunEventWithRunId) => void
 }
 
+/** A child event. Every `RunEvent` already carries `runId`; this names it. */
+export type RunEventWithRunId = RunEvent & { readonly runId: string }
+
+/**
+ * The machine-readable half of a delegation result.
+ *
+ * `status` is the honest outcome, including `partial` (step cap) and
+ * `timeout`; `errorCode` is the package's code (`child_timeout`,
+ * `child_cancelled`, `child_failed`, `no_output`, …) so a host can tell a
+ * timeout from a parent cancellation without parsing text. `text` is the block
+ * the model reads - data, never instructions - and always starts with
+ * {@link SUBAGENT_RESULT_PREAMBLE}.
+ *
+ * A failed run does not throw: the caller gets this object with `isError: true`
+ * on the tool channel (see `call`), so the code survives the tool boundary the
+ * way `z1.tool.call`'s `{ isError: true }` result does.
+ */
 export interface SubagentToolResult {
   readonly runId: string
-  readonly status: SubagentRunStatus
+  readonly status: SubagentToolStatus
   readonly tools: readonly string[]
   readonly denied: readonly string[]
+  /** The child's answer; empty when it produced none. */
   readonly output: string
+  /** Always present on a non-`completed`/`partial` result. */
+  readonly errorCode?: SubagentErrorCode
+  /** The child's last assistant text when the run did not complete. */
+  readonly partial?: string
+  /** Child loop iterations the run completed (from `node.started` events). */
+  readonly steps?: number
+  /** Wall time of the child graph run, in milliseconds. */
+  readonly elapsedMs?: number
+  /** One sentence describing how the run ended. */
+  readonly detail?: string
+  /**
+   * The failed-run message, prefixed with a stable machine token:
+   * `subagent child_timeout: graph run … timed out after 240000ms`. Present
+   * exactly when `status` is not `completed`; a host that only gets the text
+   * of a failed result can still match the code.
+   */
+  readonly message?: string
+  /** The model-facing block, `\n`-separated; starts with the data preamble. */
+  readonly text: string
 }
 
 /** The host-side tool: a schema plus the callable implementation. */

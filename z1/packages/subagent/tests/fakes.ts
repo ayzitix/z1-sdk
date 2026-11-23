@@ -103,6 +103,12 @@ export interface FakeHostOptions {
   readonly beforeBegin?: () => void | Promise<void>
   /** Runs inside the fake handle's `dispose()`. */
   readonly beforeDispose?: () => void | Promise<void>
+  /**
+   * Serve this as the handle's `services.onEvent`. The package *replaces* it on
+   * the child run with its own forwarding wrapper, so this only proves which
+   * channel is authoritative; it is never seen by the parent.
+   */
+  readonly hostOnEvent?: (event: RunEvent) => void
 }
 
 export class FakeHandle implements SubagentRunHandle {
@@ -166,6 +172,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
       }
       if (options.llm !== undefined) services.llm = options.llm
       services.approval = overrides.approval
+      if (options.hostOnEvent !== undefined) services.onEvent = options.hostOnEvent
 
       const handle = new FakeHandle(
         createBuiltinRegistry(),

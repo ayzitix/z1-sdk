@@ -17,6 +17,7 @@ import {
   type SubagentCallGuard,
   type SubagentInventory,
   type SubagentRunRecorder,
+  type SubagentToolResult,
 } from '../src/index.ts'
 import {
   createFakeHost,
@@ -111,6 +112,17 @@ async function runError(promise: Promise<unknown>): Promise<SubagentError> {
   throw new Error('expected the subagent run to fail')
 }
 
+/**
+ * A finished child that ended badly is a *result*, not a throw (1.5c), so a
+ * test asserts on the returned object: status, code and kept text. Only a
+ * failure before the child exists still throws, and `runError` covers that.
+ */
+async function refused(promise: Promise<SubagentToolResult>): Promise<SubagentToolResult> {
+  const result = await promise
+  expect(result.status).not.toBe('completed')
+  return result
+}
+
 describe('runSubagent journal and lifecycle', () => {
   test('records the child run without fork lineage', async () => {
     const model = staticLlm('child answer')
@@ -195,6 +207,47 @@ describe('runSubagent journal and lifecycle', () => {
     ).resolves.toBe('rejected')
   })
 
+  test('onEvent forwards the child stream tagged with its runId, for step counts', async () => {
+    const seen: RunEvent[] = []
+    const host = createFakeHost({ tools: [schema('read')] })
+    const tool = createSubagentTool({
+      model: MODEL,
+      host,
+      inventory,
+      onEvent: (event) => seen.push(event),
+    })
+
+    const result = await tool.call(validArgs)
+
+    expect(result.status).toBe('completed')
+    expect(result.steps).toBe(1)
+    // Every forwarded event is the child's, and the one model turn is visible
+    // as `loop/0/chat`, which is exactly what a step counter looks for.
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((event) => event.runId === result.runId)).toBe(true)
+    const modelTurns = seen.filter(
+      (event) => event.type === 'node.started' && /^loop\/\d+\/chat$/.test(event.path),
+    )
+    expect(modelTurns).toHaveLength(1)
+    expect(seen.some((event) => event.type === 'run.completed')).toBe(true)
+  })
+
+  test('a throwing onEvent observer does not fail the child run', async () => {
+    const host = createFakeHost({ tools: [schema('read')], llm: staticLlm('done').llm })
+    const tool = createSubagentTool({
+      model: MODEL,
+      host,
+      inventory,
+      onEvent: () => {
+        throw new Error('observer is broken')
+      },
+    })
+
+    const result = await tool.call(validArgs)
+    expect(result.status).toBe('completed')
+    expect(result.output).toBe('done')
+  })
+
   test('disposes the child on timeout and records a failed run', async () => {
     const journal = createTestJournal()
     const host = createFakeHost({
@@ -204,10 +257,12 @@ describe('runSubagent journal and lifecycle', () => {
     })
     const tool = toolFor(host, { timeoutMs: 20 })
 
-    const error = await runError(tool.call(validArgs))
+    const result = await refused(tool.call(validArgs))
 
-    expect(error.code).toBe('child_timeout')
-    expect(error.message).toContain('graph run')
+    expect(result.status).toBe('timeout')
+    expect(result.errorCode).toBe('child_timeout')
+    expect(result.detail).toContain('graph run')
+    expect(result.message?.startsWith('subagent child_timeout:')).toBe(true)
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId
     expect(runId).toBeDefined()
@@ -236,10 +291,11 @@ describe('runSubagent journal and lifecycle', () => {
     })
     const tool = toolFor(host, { maxSteps: 2 })
 
-    const error = await runError(tool.call(validArgs))
+    const result = await refused(tool.call(validArgs))
 
-    expect(error.code).toBe('child_failed')
-    expect(error.message).toContain('step limit reached after 2 steps')
+    expect(result.status).toBe('partial')
+    expect(result.errorCode).toBe('child_failed')
+    expect(result.detail).toBe('stopped by the step cap after 2 of 2 model turns; no text produced')
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId
     expect(journal.runs.get(runId ?? '')?.status).toBe('failed')
@@ -389,10 +445,10 @@ describe('runSubagent journal and lifecycle', () => {
     })
     const tool = toolFor(host, { maxSteps: 1 })
 
-    const error = await runError(tool.call(validArgs))
+    const result = await refused(tool.call(validArgs))
 
-    expect(error.code).toBe('child_failed')
-    expect(error.message).toContain('step limit reached after 1 steps')
+    expect(result.status).toBe('partial')
+    expect(result.detail).toBe('stopped by the step cap after 1 of 1 model turn; no text produced')
     expect(statuses).toEqual(['failed', 'failed'])
     expect(failedUpdates).toBe(2)
     const runId = host.beginCalls[0]?.runId ?? ''
@@ -524,9 +580,9 @@ describe('runSubagent journal and lifecycle', () => {
       })
       const tool = toolFor(host, { maxSteps: 1 })
 
-      const error = await runError(tool.call(validArgs))
+      const result = await refused(tool.call(validArgs))
 
-      expect(error.code).toBe('child_failed')
+      expect(result.status).toBe('partial')
       const runId = host.beginCalls[0]?.runId ?? ''
       expect(journal.getRun(runId)?.status).toBe('failed')
     } finally {
@@ -555,7 +611,7 @@ describe('runSubagent journal and lifecycle', () => {
       const error = await runError(tool.call(validArgs))
 
       expect(error.code).toBe('child_failed')
-      expect(error.message).toContain('cannot append to unknown run')
+      expect(error.message).toContain('could not record its start')
       const runId = host.beginCalls[0]?.runId ?? ''
       expect(inner.getRun(runId)).toBeUndefined()
       expect(host.handles[0]?.disposed).toBe(true)
@@ -724,9 +780,10 @@ describe('runSubagent parent cancellation', () => {
 
     parent.abort()
 
-    const error = await runError(pending)
-    expect(error.code).toBe('child_cancelled')
-    expect(error.message).toContain('cancelled by the parent')
+    const result = await refused(pending)
+    expect(result.status).toBe('cancelled')
+    expect(result.errorCode).toBe('child_cancelled')
+    expect(result.detail).toContain('cancelled by the parent')
     expect(host.handles[0]?.disposed).toBe(true)
 
     const record = journal.runs.get(runId)
@@ -763,11 +820,12 @@ describe('runSubagent parent cancellation', () => {
     })
     const tool = toolFor(host, { signal: parent.signal })
 
-    const error = await runError(tool.call(validArgs))
-    expect(error.code).toBe('child_cancelled')
+    const result = await refused(tool.call(validArgs))
+    expect(result.status).toBe('cancelled')
+    expect(result.errorCode).toBe('child_cancelled')
     // Whether the abort surfaced as a throw, a `cancelled` result or a racing
-    // completion, the error names the parent.
-    expect(error.message).toContain('cancelled by the parent')
+    // completion, the detail names the parent.
+    expect(result.detail).toContain('cancelled by the parent')
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('cancelled')
@@ -790,8 +848,8 @@ describe('runSubagent parent cancellation', () => {
     const host = createFakeHost({ tools: [schema('read')], journal })
     const tool = toolFor(host, { signal: parent.signal })
 
-    const error = await runError(tool.call(validArgs))
-    expect(error.code).toBe('child_cancelled')
+    const result = await refused(tool.call(validArgs))
+    expect(result.errorCode).toBe('child_cancelled')
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('cancelled')
     const types = (journal.events.get(runId) ?? []).map((event) => event.type)
@@ -814,8 +872,8 @@ describe('runSubagent parent cancellation', () => {
     const host = createFakeHost({ tools: [schema('read')], journal })
     const tool = toolFor(host, { signal: parent.signal })
 
-    const error = await runError(tool.call(validArgs))
-    expect(error.code).toBe('child_cancelled')
+    const result = await refused(tool.call(validArgs))
+    expect(result.errorCode).toBe('child_cancelled')
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('cancelled')
     const types = (journal.events.get(runId) ?? []).map((event) => event.type)
@@ -831,8 +889,9 @@ describe('runSubagent parent cancellation', () => {
     const host = createFakeHost({ tools: [schema('read')], llm: hangingLlm, journal })
     const tool = toolFor(host, { timeoutMs: 20 })
 
-    const error = await runError(tool.call(validArgs))
-    expect(error.code).toBe('child_timeout')
+    const result = await refused(tool.call(validArgs))
+    expect(result.status).toBe('timeout')
+    expect(result.errorCode).toBe('child_timeout')
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('failed')
     const types = (journal.events.get(runId) ?? []).map((event) => event.type)
@@ -842,23 +901,29 @@ describe('runSubagent parent cancellation', () => {
 
   test('a ledger that lost run.started gets no orphan terminal append', async () => {
     // `SqliteJournal` refuses an append to an unknown run. When the very first
-    // event is lost, the run never started from the journal's point of view,
-    // so there is nothing to append a terminal event to; the call still reports
-    // an error, and no orphan event is invented.
+    // event is lost, the run never started from the journal's point of view, so
+    // there is nothing to append a terminal event to and nothing a host could
+    // inspect later: that is a host failure, reported by throwing, and no
+    // orphan event is invented.
     const journal = createTestJournal()
-    const parent = new AbortController()
     journal.failNext('run.started')
     const host = createFakeHost({ tools: [schema('read')], journal })
-    parent.abort()
-    const tool = toolFor(host, { signal: parent.signal })
+    const tool = toolFor(host)
 
     const error = await runError(tool.call(validArgs))
-    expect(error.code).toBe('child_cancelled')
+    expect(error.code).toBe('child_failed')
+    expect(error.message).toContain('could not record its start')
     const runId = host.beginCalls[0]?.runId ?? ''
-    expect(journal.events.get(runId) ?? []).toEqual([])
+    // `runGraph` writes its own `run.failed` fallback when a start append is
+    // rejected; `startLost` must not add a second one here.
+    const types = (journal.events.get(runId) ?? []).map((event) => event.type)
+    expect(types.filter((type) => type === 'run.failed').length).toBeLessThanOrEqual(1)
   })
 
-  test('an abort before the call starts no child at all', async () => {
+  test('an expired host signal before the call starts no child at all', async () => {
+    // The documented contract: an aborted turn never starts a child (`running`
+    // check at the top of `runSubagent`). This is therefore a throw, not a
+    // result.
     const parent = new AbortController()
     parent.abort()
     const host = createFakeHost({ tools: [schema('read')] })
@@ -898,8 +963,8 @@ describe('runSubagent parent cancellation', () => {
     await model.pendingCall
     parent.abort()
 
-    const error = await runError(pending)
-    expect(error.code).toBe('child_cancelled')
+    const result = await refused(pending)
+    expect(result.errorCode).toBe('child_cancelled')
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('cancelled')
@@ -918,10 +983,10 @@ describe('runSubagent parent cancellation', () => {
       signal: new AbortController().signal,
     })
 
-    const error = await runError(tool.call(validArgs))
+    const result = await refused(tool.call(validArgs))
 
-    expect(error.code).toBe('child_timeout')
-    expect(error.message).not.toContain('parent')
+    expect(result.errorCode).toBe('child_timeout')
+    expect(result.detail).not.toContain('parent')
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('failed')
@@ -950,10 +1015,11 @@ describe('runSubagent parent cancellation', () => {
       signal: new AbortController().signal,
     })
 
-    const error = await runError(tool.call(validArgs))
+    const result = await refused(tool.call(validArgs))
 
-    expect(error.code).toBe('child_failed')
-    expect(error.message).toContain('step limit reached after 2 steps')
+    expect(result.status).toBe('partial')
+    expect(result.errorCode).toBe('child_failed')
+    expect(result.detail).toBe('stopped by the step cap after 2 of 2 model turns; no text produced')
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('failed')
   })
@@ -979,8 +1045,8 @@ describe('runSubagent parent cancellation', () => {
     })
     const tool = toolFor(host, { signal: parent.signal })
 
-    const error = await runError(tool.call(validArgs))
-    expect(error.code).toBe('child_cancelled')
+    const result = await refused(tool.call(validArgs))
+    expect(result.errorCode).toBe('child_cancelled')
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId ?? ''
     expect(journal.runs.get(runId)?.status).toBe('cancelled')
@@ -1006,8 +1072,9 @@ describe('runSubagent parent cancellation', () => {
       if (event.type === 'run.started') parent.abort()
     }
 
-    const error = await runError(tool.call(validArgs))
-    expect(error.code).toBe('child_cancelled')
+    const result = await refused(tool.call(validArgs))
+    expect(result.status).toBe('cancelled')
+    expect(result.errorCode).toBe('child_cancelled')
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId ?? ''
     const record = journal.runs.get(runId)

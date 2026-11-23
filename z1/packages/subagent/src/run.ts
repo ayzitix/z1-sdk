@@ -13,6 +13,7 @@ import {
 
 import { normalizeToolName, parseSubagentInput, resolveToolGrant } from './grant.ts'
 import { subagentSystemPrompt } from './prompt.ts'
+import { partialText, resultText, stepCapDetail, stepLimitSteps } from './result.ts'
 import { restrictToolService } from './restrict.ts'
 import {
   DEFAULT_SUBAGENT_MAX_DEPTH,
@@ -24,6 +25,7 @@ import {
   SUBAGENT_TOOL_NAME,
   SubagentBudget,
   SubagentError,
+  type RunEventWithRunId,
   type SubagentCallGuard,
   type SubagentHost,
   type SubagentInventory,
@@ -32,6 +34,7 @@ import {
   type SubagentRunStatus,
   type SubagentToolOptions,
   type SubagentToolResult,
+  type SubagentToolStatus,
 } from './types.ts'
 
 /** A child never gets an interactive approval in v1. */
@@ -57,6 +60,7 @@ interface NormalizedOptions {
   readonly moduleApproval: ApprovalService
   readonly signal: AbortSignal | undefined
   readonly guardCall: SubagentCallGuard | undefined
+  readonly onEvent: SubagentToolOptions['onEvent']
   readonly runs: SubagentRunRecorder | undefined
 }
 
@@ -211,6 +215,7 @@ function normalizeOptions(options: SubagentToolOptions): NormalizedOptions {
     moduleApproval: options.moduleApproval ?? denyApprovalService,
     signal: options.signal,
     guardCall: options.guardCall,
+    onEvent: options.onEvent,
     runs,
   }
 }
@@ -402,13 +407,20 @@ function childOutcome(
  * `ToolService.call()` has no run/node/signal context, so the host passes its
  * cancellation through `options.signal` explicitly. The child runs on
  * `AbortSignal.any([options.signal, timeout])`; `childOutcome` decides the one
- * terminal status and callers see it in the journal row and the thrown
- * `SubagentError.code`:
+ * terminal status and callers see it in the journal row and, in the returned
+ * `SubagentToolResult`, as `status` plus `errorCode`:
  *
  * - host signal aborted  → `cancelled` (`child_cancelled`), row `cancelled`
- * - `timeoutMs` expired  → `failed` (`child_timeout`), row `failed`
- * - anything else        → the run's own status (`child_failed` /
- *   `child_cancelled` / `child_suspended` / `no_output`)
+ * - `timeoutMs` expired  → `timeout` (`child_timeout`), row `failed`
+ * - step cap exhausted   → `partial` (`child_failed`), row `failed`
+ * - anything else        → `failed` (`child_failed` / `no_output` /
+ *   `child_suspended`) or `completed`
+ *
+ * A run that ends badly is a *result*, not a throw: the tool surface can only
+ * carry a message plus `isError`, so the code travels in the result object and
+ * the message carries a stable `subagent <code>:` prefix. Only failures that
+ * happen before the child exists (an invalid grant, an exhausted budget, a
+ * `beginRun` error) still throw; they never had a run to report.
  *
  * Setup (`beginRun`, child tool re-listing, journal create/update) and teardown
  * (`dispose`) are not covered by the timer; they remain host responsibilities,
@@ -533,24 +545,47 @@ export async function runSubagent(
       hostSignal === undefined
         ? controller.signal
         : AbortSignal.any([hostSignal, controller.signal])
+
+    // The package always observes its own child: a host may want the stream
+    // (a CLI counts steps live), but the step count must also reach the result
+    // when no callback is installed, so the counting lives here and the host
+    // callback sees exactly these events and never the parent's.
+    let steps = 0
     let timedOut = false
+    let thrown: unknown
+    const forward = limits.onEvent
+    const childEvents = (event: RunEvent): void => {
+      if (event.type === 'node.started' && /^loop\/\d+\/chat$/.test(event.path)) steps += 1
+      if (forward === undefined) return
+      try {
+        forward(event as RunEventWithRunId)
+      } catch {
+        // A host observer is diagnostic; it must not fail the child run.
+      }
+    }
     const timer = setTimeout(() => {
       timedOut = true
       controller.abort()
     }, limits.timeoutMs)
-
+    const startedAt = Date.now()
     let result: RunResult | undefined
-    let thrown: unknown
     // Ledger awareness: a host journal that refuses `run.started` leaves no
     // row a terminal event could attach to (`SqliteJournal` rejects appends to
     // an unknown run), so recovery there is impossible and pointless.
     let startLost = false
+    // A wrapper throw and a `runGraph`-swallowed throw both leave the run with
+    // no row; the second is recognised after the run from the failure text,
+    // which is the only trace `runGraph` keeps of its own failed append.
+    let lostStartError: unknown
     const ledger: Journal = {
       append: (event) => {
         try {
           return journal.append(event)
         } catch (error) {
-          if (event.type === 'run.started') startLost = true
+          if (event.type === 'run.started') {
+            startLost = true
+            lostStartError = error
+          }
           throw error
         }
       },
@@ -560,7 +595,11 @@ export async function runSubagent(
       result = await runGraph({
         graph,
         registry: child.registry,
-        services: { ...child.services, tools: childTools },
+        services: {
+          ...child.services,
+          tools: childTools,
+          onEvent: childEvents,
+        },
         input: parsed.prompt,
         runId: childRunId,
         journal: ledger,
@@ -572,13 +611,57 @@ export async function runSubagent(
       thrown = error
     } finally {
       clearTimeout(timer)
+      // `runGraph` turns a throw while starting into a `failed` result whose
+      // error *is* the thrown message, so a lost `run.started` shows up here
+      // and never reaches the ledger wrapper's catch. The phrase is
+      // `SqliteJournal`'s own; a false positive only skips a best-effort
+      // terminal append that would be rejected anyway.
+      const failure = result?.error ?? (thrown === undefined ? undefined : errorMessage(thrown))
+      if (!startLost && failure !== undefined && failure.includes('cannot append to unknown run')) {
+        startLost = true
+        lostStartError = failure
+      }
     }
+    const elapsedMs = Date.now() - startedAt
     // Snapshot after the run settled: by then the host signal is final, and
     // its `aborted` flag is the one fact that separates a parent cancellation
     // from a child failure.
     const hostAborted = hostSignal?.aborted === true
 
     const outcome = childOutcome(hostAborted, timedOut, limits.timeoutMs, childRunId, result, thrown)
+
+    // A run whose journal row was never durable has nothing to report *about*:
+    // `SqliteJournal` refused `run.started`, so the row this package created is
+    // not there and the run could not be inspected later. That is a host
+    // failure, not a child outcome, so it still throws (`child_failed`) with
+    // no terminal append invented.
+    if (startLost && (outcome.kind === 'cancelled' || outcome.kind === 'failed')) {
+      throw new SubagentError(
+        'child_failed',
+        `subagent run ${childRunId} could not record its start: ${errorMessage(
+          thrown ?? lostStartError,
+        )}`,
+        thrown === undefined ? undefined : { cause: thrown },
+      )
+    }
+
+    // Everything below is read before the terminal writes, because the text
+    // kept for the parent must be what the child had said by the time it ended.
+    const childEventsSeen = (): readonly RunEvent[] => {
+      try {
+        return journal.read(childRunId)
+      } catch {
+        return []
+      }
+    }
+    const stepped = Math.max(steps, 0)
+    const shared = {
+      runId: childRunId,
+      tools: [...grant.names],
+      denied: [...grant.denied],
+      steps: stepped,
+      elapsedMs,
+    }
 
     if (outcome.kind === 'cancelled' || outcome.kind === 'failed') {
       // The row and its events must agree, whatever shape the run ended in:
@@ -606,6 +689,16 @@ export async function runSubagent(
           ),
         )
       }
+
+      // A child that used up its step cap did work: the journal row stays
+      // `failed` (the graph failed the run), but the parent is told `partial`
+      // and gets the child's last text instead of a bare error.
+      const exhausted =
+        outcome.kind === 'failed'
+          ? stepLimitSteps(result?.error ?? (thrown === undefined ? undefined : errorMessage(thrown)))
+          : undefined
+      const kept = partialText(childEventsSeen())
+
       if (status === 'cancelled') {
         // The row is rewritten to the same final status the graph wrote, and
         // stays `cancelled` even when (rarely) the run had no chance to write
@@ -619,12 +712,28 @@ export async function runSubagent(
             if (!hostAborted) throw error
           }
         }
-        throw new SubagentError(
-          'child_cancelled',
-          `subagent ${outcome.message}`,
-          { ...(thrown === undefined ? {} : { cause: thrown }) },
-        )
+        return {
+          ...shared,
+          status: 'cancelled',
+          errorCode: 'child_cancelled',
+          output: '',
+          ...(kept === undefined ? {} : { partial: kept }),
+          message: `subagent child_cancelled: ${outcome.message}`,
+          detail: outcome.message,
+          text: resultText({
+            runId: childRunId,
+            status: 'cancelled',
+            errorCode: 'child_cancelled',
+            steps: stepped,
+            elapsedMs,
+            tools: shared.tools,
+            denied: shared.denied,
+            ...(kept === undefined ? {} : { partial: kept }),
+            detail: outcome.message,
+          }).text,
+        }
       }
+
       if (runs !== undefined) {
         try {
           await recordFinalStatus(runs, childRunId, 'failed')
@@ -635,11 +744,41 @@ export async function runSubagent(
       }
       // Narrowed to the failed branch: `outcome.code` is `child_failed` or
       // `child_timeout` (an internal timeout), which the CLI renders apart.
-      throw new SubagentError(
-        outcome.kind === 'failed' ? outcome.code : 'child_failed',
-        `subagent ${outcome.message}`,
-        { ...(thrown === undefined ? {} : { cause: thrown }) },
-      )
+      const code = outcome.kind === 'failed' ? outcome.code : 'child_failed'
+      const toolStatusValue: SubagentToolStatus =
+        exhausted !== undefined ? 'partial' : code === 'child_timeout' ? 'timeout' : 'failed'
+      // One sentence for both readers. On a step cap the graph's own wording
+      // (`step limit reached after 1 steps`) would disagree with the model-facing
+      // text (`after 1 of 1 model turn`) - and `/agents` prints this `detail` -
+      // so the derived sentence is used here as well as in `resultText`.
+      const detail =
+        toolStatusValue === 'partial' && stepped !== undefined
+          ? stepCapDetail(stepped, limits.maxSteps, kept !== undefined)
+          : outcome.message
+      const text = resultText({
+        runId: childRunId,
+        status: toolStatusValue,
+        errorCode: code,
+        steps: stepped,
+        // The cap is what stopped the child; `partial` names it so the detail
+        // reads `after 1 of 1 model turn` rather than contradicting `1 step`.
+        ...(exhausted === undefined ? {} : { maxSteps: limits.maxSteps }),
+        elapsedMs,
+        tools: shared.tools,
+        denied: shared.denied,
+        ...(kept === undefined ? {} : { partial: kept }),
+        detail,
+      }).text
+      return {
+        ...shared,
+        status: toolStatusValue,
+        errorCode: code,
+        output: '',
+        ...(kept === undefined ? {} : { partial: kept }),
+        message: `subagent ${code}: ${detail}`,
+        detail,
+        text,
+      }
     }
 
     // `completed` and `suspended` keep the run's own status. A completed run
@@ -649,29 +788,66 @@ export async function runSubagent(
     }
 
     if (outcome.kind === 'suspended') {
-      throw new SubagentError(
-        'child_suspended',
-        `subagent run ${childRunId} suspended on approval at ${
-          result?.pendingApproval?.path ?? 'unknown path'
-        }`,
-      )
+      const detail = `subagent run ${childRunId} suspended on approval at ${
+        result?.pendingApproval?.path ?? 'unknown path'
+      }`
+      return {
+        ...shared,
+        status: 'failed',
+        errorCode: 'child_suspended',
+        output: '',
+        message: `subagent child_suspended: ${detail}`,
+        detail,
+        text: resultText({
+          runId: childRunId,
+          status: 'failed',
+          errorCode: 'child_suspended',
+          steps: stepped,
+          elapsedMs,
+          tools: shared.tools,
+          denied: shared.denied,
+          detail,
+        }).text,
+      }
     }
 
     // `completed` past this point: `result` is defined by the outcome.
     const output = result?.outputs['output']
     if (typeof output !== 'string') {
-      throw new SubagentError(
-        'no_output',
-        `subagent run ${childRunId} completed without a text output`,
-      )
+      const detail = `subagent run ${childRunId} completed without a text output`
+      return {
+        ...shared,
+        status: 'failed',
+        errorCode: 'no_output',
+        output: '',
+        message: `subagent no_output: ${detail}`,
+        detail,
+        text: resultText({
+          runId: childRunId,
+          status: 'failed',
+          errorCode: 'no_output',
+          steps: stepped,
+          elapsedMs,
+          tools: shared.tools,
+          denied: shared.denied,
+          detail,
+        }).text,
+      }
     }
 
     return {
-      runId: childRunId,
+      ...shared,
       status: 'completed',
-      tools: [...grant.names],
-      denied: [...grant.denied],
       output,
+      text: resultText({
+        runId: childRunId,
+        status: 'completed',
+        steps: stepped,
+        elapsedMs,
+        tools: shared.tools,
+        denied: shared.denied,
+        output,
+      }).text,
     }
   } finally {
     reservation.release()
