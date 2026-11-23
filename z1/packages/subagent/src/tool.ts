@@ -1,0 +1,154 @@
+import type { Json, ToolSchema } from '@z1/node'
+import type { ToolService } from '@z1/runtime'
+
+import { normalizeToolName } from './grant.ts'
+import { runSubagent } from './run.ts'
+import {
+  MAX_SUBAGENT_DESCRIPTION_LENGTH,
+  MAX_SUBAGENT_PROMPT_BYTES,
+  MAX_SUBAGENT_TOOL_ENTRIES,
+  SUBAGENT_TOOL_NAME,
+  SubagentError,
+  type SubagentTool,
+  type SubagentToolOptions,
+  type SubagentToolResult,
+  type WithSubagentToolOptions,
+} from './types.ts'
+
+export { restrictToolService } from './restrict.ts'
+
+/**
+ * Model-facing declaration. Runtime validation is deliberately stricter than
+ * JSON Schema (byte-sized prompts, exact tool names), so the schema is an
+ * advertisement, not the security boundary.
+ */
+export const subagentToolSchema: ToolSchema = {
+  name: SUBAGENT_TOOL_NAME,
+  description:
+    'Delegate one self-contained task to a child agent that does not see this conversation. Choose the exact tools it may use; the child cannot delegate further.',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['description', 'prompt', 'tools'],
+    properties: {
+      description: {
+        type: 'string',
+        maxLength: MAX_SUBAGENT_DESCRIPTION_LENGTH,
+        description: 'Short label for this delegation, shown in the transcript.',
+      },
+      prompt: {
+        type: 'string',
+        maxLength: MAX_SUBAGENT_PROMPT_BYTES,
+        description:
+          'Complete, self-contained task. The child does not receive the parent conversation and cannot ask questions. Runtime cap: 64 KiB UTF-8 bytes; the JSON Schema maxLength is a character hint.',
+      },
+      tools: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['enable'],
+        properties: {
+          enable: {
+            type: 'array',
+            maxItems: MAX_SUBAGENT_TOOL_ENTRIES,
+            items: { type: 'string' },
+            description:
+              'Exact tool names the child may call. [] means no tools; ["*"] means every parent tool.',
+          },
+          disable: {
+            type: 'array',
+            maxItems: MAX_SUBAGENT_TOOL_ENTRIES,
+            items: { type: 'string' },
+            description:
+              'Optional exact names to deny after enable. Deny wins; "*" is invalid here.',
+          },
+        },
+      },
+    },
+  },
+}
+
+function resultJson(result: SubagentToolResult): Json {
+  return {
+    runId: result.runId,
+    status: result.status,
+    tools: [...result.tools],
+    denied: [...result.denied],
+    output: result.output,
+  }
+}
+
+/** Build the host-side tool around one model, host and inventory snapshot. */
+export function createSubagentTool(options: SubagentToolOptions): SubagentTool {
+  const name = normalizeToolName(
+    options.name ?? SUBAGENT_TOOL_NAME,
+    'subagent tool name',
+  )
+  const schema: ToolSchema = { ...subagentToolSchema, name }
+  return {
+    schema,
+    call: async (args: Json): Promise<SubagentToolResult> => {
+      return await runSubagent(args, { ...options, name })
+    },
+  }
+}
+
+/**
+ * Compose the subagent tool with an existing service.
+ *
+ * The collision check runs before composition, not on the first call: two tools
+ * with one name would make the model's choice ambiguous and the parent's tool
+ * state unable to distinguish them. `inventory` lets a CLI pass its raw
+ * snapshot (including disabled tools) instead of the live enabled list; the
+ * live list is still read once so a name that is currently advertised cannot
+ * be shadowed either.
+ */
+export async function withSubagentTool(
+  inner: ToolService,
+  tool: SubagentTool,
+  options: WithSubagentToolOptions = {},
+): Promise<ToolService> {
+  const name = tool.schema.name
+  const live = await inner.list()
+  const inventory = options.inventory ?? live
+  if (
+    inventory.some((schema) => schema.name === name) ||
+    live.some((schema) => schema.name === name)
+  ) {
+    throw new SubagentError(
+      'duplicate_tool',
+      `cannot add subagent tool "${name}": the tool service already has a tool with that name`,
+    )
+  }
+
+  async function assertNoShadow(
+    action: 'advertise' | 'call',
+  ): Promise<readonly ToolSchema[]> {
+    const current = await inner.list()
+    if (current.some((schema) => schema.name === name)) {
+      throw new SubagentError(
+        'duplicate_tool',
+        `cannot ${action} subagent tool "${name}": the tool service now has a tool with that name`,
+      )
+    }
+    return current
+  }
+
+  return {
+    async list(): Promise<readonly ToolSchema[]> {
+      const current = await assertNoShadow('advertise')
+      return [...current, tool.schema]
+    },
+
+    async call(toolName: string, args: Json): Promise<Json> {
+      if (toolName === name) {
+        // The composition-time check is not enough: a live service may add a
+        // same-named tool later, and routing the call to the child anyway would
+        // silently shadow it.
+        await assertNoShadow('call')
+        if (options.guardCall !== undefined) await options.guardCall(toolName, args)
+        return resultJson(await tool.call(args))
+      }
+      return await inner.call(toolName, args)
+    },
+  }
+}

@@ -43,6 +43,9 @@
       "@z1/agent": [
         "./packages/agent/src/index.ts"
       ],
+      "@z1/subagent": [
+        "./packages/subagent/src/index.ts"
+      ],
       "@z1/memory": [
         "./packages/memory/src/index.ts"
       ],

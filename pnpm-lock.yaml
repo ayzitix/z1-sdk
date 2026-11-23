@@ -19261,6 +19261,27 @@ importers:
         specifier: workspace:*
         version: link:../node
 
+  z1/packages/subagent:
+    dependencies:
+      '@z1/agent':
+        specifier: workspace:*
+        version: link:../agent
+      '@z1/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@z1/journal':
+        specifier: workspace:*
+        version: link:../journal
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/nodes':
+        specifier: workspace:*
+        version: link:../nodes
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
   z1/packages/template:
     dependencies:
       '@z1/graph':

@@ -1,0 +1,30 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../agent"
+    },
+    {
+      "path": "../graph"
+    },
+    {
+      "path": "../journal"
+    },
+    {
+      "path": "../node"
+    },
+    {
+      "path": "../nodes"
+    },
+    {
+      "path": "../runtime"
+    }
+  ],
+  "compilerOptions": {
+    "outDir": "lib",
+    "rootDir": "src"
+  }
+}
