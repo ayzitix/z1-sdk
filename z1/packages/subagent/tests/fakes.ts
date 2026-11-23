@@ -27,6 +27,11 @@ export interface TestJournal extends Journal, SubagentRunRecorder {
   readonly events: Map<string, RunEvent[]>
   readonly runs: Map<string, SubagentRunRecord>
   readonly updates: { readonly runId: string; readonly patch: SubagentRunPatch }[]
+  /**
+   * Reject the next append of `type` once (then accept it). Used to make
+   * `runGraph` lose a specific event, e.g. its own terminal append.
+   */
+  failNext(type: RunEvent['type'], reason?: string): void
 }
 
 /**
@@ -39,11 +44,16 @@ export function createTestJournal(): TestJournal {
   const events = new Map<string, RunEvent[]>()
   const runs = new Map<string, SubagentRunRecord>()
   const updates: { runId: string; patch: SubagentRunPatch }[] = []
+  const failing = new Map<string, string>()
 
   return {
     events,
     runs,
     updates,
+
+    failNext(type: RunEvent['type'], reason = 'journal: append lost'): void {
+      failing.set(type, reason)
+    },
 
     createRun(record: SubagentRunRecord): void {
       if (runs.has(record.runId)) {
@@ -64,6 +74,11 @@ export function createTestJournal(): TestJournal {
       const rows = events.get(event.runId)
       if (rows === undefined) {
         throw new Error(`journal: cannot append to unknown run ${event.runId}`)
+      }
+      const reason = failing.get(event.type)
+      if (reason !== undefined) {
+        failing.delete(event.type)
+        throw new Error(reason)
       }
       rows.push(event)
     },
@@ -194,6 +209,63 @@ export const hangingLlm: LlmService = {
       // the model cooperating.
     })
   },
+}
+
+/**
+ * A model that blocks on its first call until the test releases it.
+ *
+ * `LlmService.chat` has no signal argument, and the executor races a node
+ * attempt against the run signal itself, so a hanging model still ends the
+ * run on abort. `pendingCall` lets a test abort a *live* child turn without a
+ * sleep; `failNext()` covers the other path, where the node throws and
+ * `runGraph` takes its failure branch instead of returning `cancelled`.
+ */
+export interface GatedLlm {
+  readonly llm: LlmService
+  /** Resolves once the model is inside its first `chat`. */
+  readonly pendingCall: Promise<void>
+  /** End the gate with the given reply; a later call blocks again. */
+  release(reply?: string): void
+  /**
+   * Make the *next* model call (one that has not started yet) throw the way a
+   * real provider does when its own request is aborted. Tests use it to force
+   * `runGraph`'s failure branch after a host abort.
+   */
+  failNext(): void
+}
+
+export function gatedLlm(): GatedLlm {
+  let started!: () => void
+  const pendingCall = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  let release!: (reply: string) => void
+  const answer = new Promise<string>((resolve) => {
+    release = resolve
+  })
+  let failNext = false
+  return {
+    pendingCall,
+    release: (reply = 'released') => release(reply),
+    failNext: () => {
+      failNext = true
+    },
+    llm: {
+      async chat(): Promise<ChatResult> {
+        started()
+        if (failNext) {
+          failNext = false
+          throw new Error('provider request aborted')
+        }
+        const reply = await answer
+        return {
+          message: { role: 'assistant', content: reply },
+          toolCalls: [],
+          stopReason: 'stop',
+        }
+      },
+    },
+  }
 }
 
 export function tick(): Promise<void> {

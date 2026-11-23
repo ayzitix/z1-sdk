@@ -7,6 +7,7 @@ import {
   runGraph,
   type ApprovalService,
   type Journal,
+  type RunEvent,
   type RunResult,
 } from '@z1/runtime'
 
@@ -226,6 +227,55 @@ function toolSchemas(
   return byName
 }
 
+/** The terminal event that matches a final row status. */
+function terminalEventFor(
+  status: 'cancelled' | 'failed',
+  runId: string,
+  error: string,
+): RunEvent {
+  return status === 'cancelled'
+    ? { type: 'run.cancelled', runId, at: Date.now() }
+    : { type: 'run.failed', runId, at: Date.now(), error }
+}
+
+/**
+ * A child's row and its events must agree.
+ *
+ * `runGraph` writes its own terminal event on most paths, but the events can
+ * still disagree with this package's row:
+ *
+ * - a throw can leave the *wrong* terminal event: when the executor's
+ *   `run.cancelled` append is rejected it falls back to `failEarly`, which
+ *   writes `run.failed` and resolves;
+ * - a timeout is the internal controller's abort, so the executor writes
+ *   `run.cancelled` while the row — correctly — says `failed`;
+ * - a throw can leave *no* terminal event at all.
+ *
+ * So the caller passes the terminal event its row names, and this function
+ * appends it unless the journal already ends with that same event. An
+ * earlier, different terminal event stays: the journal is append-only, and
+ * the last terminal event is what a reader renders next to the row.
+ */
+async function ensureTerminalEvent(
+  journal: Journal,
+  runId: string,
+  event: RunEvent,
+): Promise<void> {
+  try {
+    const last = journal.read(runId).at(-1)
+    if (last?.type === event.type && last.runId === runId) return
+  } catch {
+    // Unreadable: try one append; a journal that also rejects it is caught
+    // below, and the row update is still the caller's hard requirement.
+  }
+  try {
+    await journal.append(event)
+  } catch (e) {
+    // Best-effort: a failing journal must not turn the child's outcome into a
+    // different error.
+  }
+}
+
 /**
  * Record a final status. The first write is retried once as `failed`: that
  * covers a transient error on the actual failure status and turns a failed
@@ -270,24 +320,117 @@ async function recordFinalStatus(
 }
 
 /**
+ * Why a child ended early. `cancelled` is only ever the host's own signal;
+ * the internal `timeoutMs` timer and a run-scoped abort are never reported as
+ * a parent cancellation, because "the parent went away" and "the child failed"
+ * call for different messages and different journal rows.
+ */
+function cancelSource(hostAborted: boolean, timedOut: boolean): 'external' | 'internal' | undefined {
+  if (hostAborted) return 'external'
+  if (timedOut) return 'internal'
+  return undefined
+}
+
+/** The single decision point: the terminal row and error for a finished run. */
+type ChildOutcome =
+  | { readonly kind: 'cancelled'; readonly message: string }
+  | {
+      readonly kind: 'failed'
+      readonly code: 'child_failed' | 'child_timeout'
+      readonly message: string
+    }
+  | { readonly kind: 'suspended' }
+  | { readonly kind: 'completed' }
+
+function childOutcome(
+  hostAborted: boolean,
+  timedOut: boolean,
+  timeoutMs: number,
+  childRunId: string,
+  result: RunResult | undefined,
+  thrown: unknown,
+): ChildOutcome {
+  const source = cancelSource(hostAborted, timedOut)
+  if (source === 'external') {
+    // A host abort wins over the run's own verdict: even a graph that
+    // "completed" raced the cancel, and the parent will never read it.
+    return {
+      kind: 'cancelled',
+      message: thrown === undefined
+        ? `run ${childRunId} was cancelled by the parent`
+        : `run ${childRunId} was cancelled by the parent: ${errorMessage(thrown)}`,
+    }
+  }
+  if (source === 'internal') {
+    return {
+      kind: 'failed',
+      code: 'child_timeout',
+      message: `graph run ${childRunId} timed out after ${String(timeoutMs)}ms`,
+    }
+  }
+  if (result === undefined) {
+    return {
+      kind: 'failed',
+      code: 'child_failed',
+      message: `run ${childRunId} failed: ${errorMessage(thrown)}`,
+    }
+  }
+  if (result.status === 'failed') {
+    return {
+      kind: 'failed',
+      code: 'child_failed',
+      message: `run ${childRunId} failed: ${result.error ?? 'unknown error'}`,
+    }
+  }
+  if (result.status === 'cancelled') {
+    // Not the host's: the child run's own signal was aborted inside
+    // `runGraph`. Not a `failed` child, and not a parent cancellation.
+    return { kind: 'cancelled', message: `run ${childRunId} was cancelled` }
+  }
+  if (result.status === 'suspended') return { kind: 'suspended' }
+  return { kind: 'completed' }
+}
+
+/**
  * Run one child agent synchronously.
  *
  * Everything that can invalidate the grant is checked before `beginRun`, so an
  * invalid selection cannot start a child, write a run record, or append an
  * event. Once the child handle exists it is disposed on every path, including
- * timeout, a disappeared tool, and a failed run.
+ * timeout, parent cancellation, a disappeared tool, and a failed run.
  *
- * `ToolService.call()` has no run/node/signal context yet, so the parent's
- * cancellation is not propagated in v1: the child graph is bounded by
- * `timeoutMs` and its own step limit instead. Setup (`beginRun`, child tool
- * re-listing, journal create/update) and teardown (`dispose`) are not covered
- * by that timer; they remain host responsibilities.
+ * `ToolService.call()` has no run/node/signal context, so the host passes its
+ * cancellation through `options.signal` explicitly. The child runs on
+ * `AbortSignal.any([options.signal, timeout])`; `childOutcome` decides the one
+ * terminal status and callers see it in the journal row and the thrown
+ * `SubagentError.code`:
+ *
+ * - host signal aborted  → `cancelled` (`child_cancelled`), row `cancelled`
+ * - `timeoutMs` expired  → `failed` (`child_timeout`), row `failed`
+ * - anything else        → the run's own status (`child_failed` /
+ *   `child_cancelled` / `child_suspended` / `no_output`)
+ *
+ * Setup (`beginRun`, child tool re-listing, journal create/update) and teardown
+ * (`dispose`) are not covered by the timer; they remain host responsibilities,
+ * and an already-cancelled host signal is honoured before `beginRun` so an
+ * aborted turn never starts a child.
  */
 export async function runSubagent(
   input: unknown,
   options: SubagentToolOptions,
 ): Promise<SubagentToolResult> {
   const limits = normalizeOptions(options)
+
+  if (limits.signal?.aborted === true) {
+    // The host already cancelled this delegation (a parent Ctrl-C between the
+    // model's tool call and this one). Starting a child now would be a child
+    // nobody waits for, so fail before the budget and before any run row.
+    throw new SubagentError(
+      'child_cancelled',
+      'subagent run was cancelled by the parent before it started',
+      { cause: limits.signal.reason },
+    )
+  }
 
   const parsed = parseSubagentInput(input, {
     maxDescriptionLength: limits.maxDescriptionLength,
@@ -383,17 +526,36 @@ export async function runSubagent(
     }
 
     const controller = new AbortController()
+    // The host signal is read once into a local so the post-run snapshot below
+    // observes the same object (the options bag is readonly, the signal is not).
+    const hostSignal = limits.signal
     const signal =
-      limits.signal === undefined
+      hostSignal === undefined
         ? controller.signal
-        : AbortSignal.any([limits.signal, controller.signal])
+        : AbortSignal.any([hostSignal, controller.signal])
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
       controller.abort()
     }, limits.timeoutMs)
 
-    let result: RunResult
+    let result: RunResult | undefined
+    let thrown: unknown
+    // Ledger awareness: a host journal that refuses `run.started` leaves no
+    // row a terminal event could attach to (`SqliteJournal` rejects appends to
+    // an unknown run), so recovery there is impossible and pointless.
+    let startLost = false
+    const ledger: Journal = {
+      append: (event) => {
+        try {
+          return journal.append(event)
+        } catch (error) {
+          if (event.type === 'run.started') startLost = true
+          throw error
+        }
+      },
+      read: (runId) => journal.read(runId),
+    }
     try {
       result = await runGraph({
         graph,
@@ -401,12 +563,68 @@ export async function runSubagent(
         services: { ...child.services, tools: childTools },
         input: parsed.prompt,
         runId: childRunId,
-        journal,
+        journal: ledger,
         tools: grant.names,
         signal,
         suspendOnApproval: false,
       })
     } catch (error) {
+      thrown = error
+    } finally {
+      clearTimeout(timer)
+    }
+    // Snapshot after the run settled: by then the host signal is final, and
+    // its `aborted` flag is the one fact that separates a parent cancellation
+    // from a child failure.
+    const hostAborted = hostSignal?.aborted === true
+
+    const outcome = childOutcome(hostAborted, timedOut, limits.timeoutMs, childRunId, result, thrown)
+
+    if (outcome.kind === 'cancelled' || outcome.kind === 'failed') {
+      // The row and its events must agree, whatever shape the run ended in:
+      //
+      // - a host abort can resolve `failed` with `run.failed` (the executor's
+      //   fallback when its own `run.cancelled` append was rejected) while the
+      //   row is `cancelled`;
+      // - a timeout resolves `cancelled` with `run.cancelled` (the internal
+      //   controller) while the row is `failed`;
+      // - a throw can leave no terminal event at all.
+      //
+      // So the caller passes the terminal event the row names and appends it
+      // when the journal does not already end with it. A normal resolved run
+      // ends with its own matching event and is skipped, as is any duplicate.
+      // A ledger that lost `run.started` has nothing to append to.
+      const status = outcome.kind === 'cancelled' ? 'cancelled' : 'failed'
+      if (!startLost) {
+        await ensureTerminalEvent(
+          journal,
+          childRunId,
+          terminalEventFor(
+            status,
+            childRunId,
+            thrown === undefined ? outcome.message : errorMessage(thrown),
+          ),
+        )
+      }
+      if (status === 'cancelled') {
+        // The row is rewritten to the same final status the graph wrote, and
+        // stays `cancelled` even when (rarely) the run had no chance to write
+        // its own `run.cancelled`. The message names the parent so the CLI can
+        // render a cancellation as one. A journal that also rejects the write
+        // during a host abort is not worth replacing the cancellation with.
+        if (runs !== undefined) {
+          try {
+            await recordFinalStatus(runs, childRunId, 'cancelled')
+          } catch (error) {
+            if (!hostAborted) throw error
+          }
+        }
+        throw new SubagentError(
+          'child_cancelled',
+          `subagent ${outcome.message}`,
+          { ...(thrown === undefined ? {} : { cause: thrown }) },
+        )
+      }
       if (runs !== undefined) {
         try {
           await recordFinalStatus(runs, childRunId, 'failed')
@@ -415,47 +633,32 @@ export async function runSubagent(
           // cannot be repaired here.
         }
       }
+      // Narrowed to the failed branch: `outcome.code` is `child_failed` or
+      // `child_timeout` (an internal timeout), which the CLI renders apart.
       throw new SubagentError(
-        'child_failed',
-        `subagent run ${childRunId} failed: ${errorMessage(error)}`,
-        { cause: error },
+        outcome.kind === 'failed' ? outcome.code : 'child_failed',
+        `subagent ${outcome.message}`,
+        { ...(thrown === undefined ? {} : { cause: thrown }) },
       )
-    } finally {
-      clearTimeout(timer)
     }
 
-    if (runs !== undefined) {
+    // `completed` and `suspended` keep the run's own status. A completed run
+    // always has a result; a throw earlier leaves `result` undefined.
+    if (runs !== undefined && result !== undefined) {
       await recordFinalStatus(runs, childRunId, result.status)
     }
 
-    if (timedOut) {
-      throw new SubagentError(
-        'child_timeout',
-        `subagent graph run ${childRunId} timed out after ${String(limits.timeoutMs)}ms`,
-      )
-    }
-    if (result.status === 'failed') {
-      throw new SubagentError(
-        'child_failed',
-        `subagent run ${childRunId} failed: ${result.error ?? 'unknown error'}`,
-      )
-    }
-    if (result.status === 'cancelled') {
-      throw new SubagentError(
-        'child_cancelled',
-        `subagent run ${childRunId} was cancelled`,
-      )
-    }
-    if (result.status === 'suspended') {
+    if (outcome.kind === 'suspended') {
       throw new SubagentError(
         'child_suspended',
         `subagent run ${childRunId} suspended on approval at ${
-          result.pendingApproval?.path ?? 'unknown path'
+          result?.pendingApproval?.path ?? 'unknown path'
         }`,
       )
     }
 
-    const output = result.outputs['output']
+    // `completed` past this point: `result` is defined by the outcome.
+    const output = result?.outputs['output']
     if (typeof output !== 'string') {
       throw new SubagentError(
         'no_output',

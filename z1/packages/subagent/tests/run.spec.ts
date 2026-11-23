@@ -21,6 +21,7 @@ import {
 import {
   createFakeHost,
   createTestJournal,
+  gatedLlm,
   hangingLlm,
   schema,
   staticLlm,
@@ -80,6 +81,7 @@ interface ToolOverrides {
   readonly timeoutMs?: number
   readonly budget?: SubagentBudget
   readonly guardCall?: SubagentCallGuard
+  readonly signal?: AbortSignal
 }
 
 function toolFor(
@@ -95,6 +97,7 @@ function toolFor(
     ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
     ...(overrides.budget === undefined ? {} : { budget: overrides.budget }),
     ...(overrides.guardCall === undefined ? {} : { guardCall: overrides.guardCall }),
+    ...(overrides.signal === undefined ? {} : { signal: overrides.signal }),
   })
 }
 
@@ -192,7 +195,7 @@ describe('runSubagent journal and lifecycle', () => {
     ).resolves.toBe('rejected')
   })
 
-  test('disposes the child on timeout and marks the run cancelled', async () => {
+  test('disposes the child on timeout and records a failed run', async () => {
     const journal = createTestJournal()
     const host = createFakeHost({
       tools: [schema('read')],
@@ -208,7 +211,9 @@ describe('runSubagent journal and lifecycle', () => {
     expect(host.handles[0]?.disposed).toBe(true)
     const runId = host.beginCalls[0]?.runId
     expect(runId).toBeDefined()
-    expect(journal.runs.get(runId ?? '')?.status).toBe('cancelled')
+    // A timeout is not a parent cancellation: the child did not finish, so its
+    // row is `failed`, unlike a host abort which records `cancelled`.
+    expect(journal.runs.get(runId ?? '')?.status).toBe('failed')
   })
 
   test('disposes the child when the run fails at the step limit', async () => {
@@ -696,5 +701,317 @@ describe('runSubagent limits', () => {
     await expect(first).resolves.toMatchObject({ status: 'completed' })
     expect(budget.active).toBe(0)
     expect(budget.total).toBe(1)
+  })
+})
+
+describe('runSubagent parent cancellation', () => {
+  test('a host abort during a live child turn records and reports cancelled', async () => {
+    const model = gatedLlm()
+    const journal = createTestJournal()
+    const host = createFakeHost({
+      tools: [schema('read')],
+      llm: model.llm,
+      journal,
+    })
+    const parent = new AbortController()
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const pending = tool.call(validArgs)
+    await model.pendingCall
+    const runId = host.beginCalls[0]?.runId ?? ''
+    // The row exists and is `running` while the child is live.
+    expect(journal.runs.get(runId)?.status).toBe('running')
+
+    parent.abort()
+
+    const error = await runError(pending)
+    expect(error.code).toBe('child_cancelled')
+    expect(error.message).toContain('cancelled by the parent')
+    expect(host.handles[0]?.disposed).toBe(true)
+
+    const record = journal.runs.get(runId)
+    expect(record?.status).toBe('cancelled')
+    expect(record).not.toHaveProperty('parentRunId')
+    expect(Object.hasOwn(record ?? {}, 'parentRunId')).toBe(false)
+
+    const events = journal.events.get(runId) ?? []
+    expect(events.map((event) => event.type)).toContain('run.cancelled')
+    expect(events.map((event) => event.type)).not.toContain('run.failed')
+    // The child's restricted tool service never ran a tool call.
+    expect(host.handles[0]?.services.toolCalls).toEqual([])
+  })
+
+  test('a child that throws during the run is cancelled when the host aborted', async () => {
+    // The other `runGraph` shape: the run itself throws instead of returning a
+    // result, so the call arrives with no `RunResult`. The journal row and the
+    // error must still say "the parent cancelled", not "the child failed". The
+    // host aborts from inside the run (on its `run.started` append), so the
+    // abort lands mid-run rather than in the pre-start check.
+    const model = gatedLlm()
+    model.failNext()
+    const journal = createTestJournal()
+    const parent = new AbortController()
+    const append = journal.append.bind(journal)
+    journal.append = (event: RunEvent): void => {
+      append(event)
+      if (event.type === 'run.started') parent.abort()
+    }
+    const host = createFakeHost({
+      tools: [schema('read')],
+      llm: model.llm,
+      journal,
+    })
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const error = await runError(tool.call(validArgs))
+    expect(error.code).toBe('child_cancelled')
+    // Whether the abort surfaced as a throw, a `cancelled` result or a racing
+    // completion, the error names the parent.
+    expect(error.message).toContain('cancelled by the parent')
+    expect(host.handles[0]?.disposed).toBe(true)
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('cancelled')
+  })
+
+  test('a cancelled child whose terminal append was lost still ends with run.cancelled', async () => {
+    // L-4: the row is rewritten to `cancelled`, so the events must not stop at
+    // `node.started` or end on a contradicting `run.failed`. When the
+    // executor's own `run.cancelled` append is rejected it falls back to
+    // `run.failed`; the package then appends the `run.cancelled` its row names,
+    // so the trace ends consistently.
+    const journal = createTestJournal()
+    const parent = new AbortController()
+    const append = journal.append.bind(journal)
+    journal.append = (event: RunEvent): void => {
+      append(event)
+      if (event.type === 'run.started') parent.abort()
+    }
+    journal.failNext('run.cancelled')
+    const host = createFakeHost({ tools: [schema('read')], journal })
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const error = await runError(tool.call(validArgs))
+    expect(error.code).toBe('child_cancelled')
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('cancelled')
+    const types = (journal.events.get(runId) ?? []).map((event) => event.type)
+    // The executor's fallback `run.failed` is append-only history; what matters
+    // is that the trace ends with the row's own terminal event, once.
+    expect(types.at(-1)).toBe('run.cancelled')
+    expect(types.filter((type) => type === 'run.cancelled')).toHaveLength(1)
+  })
+
+  test('an abort mid-run keeps the executor terminal event with no duplicate', async () => {
+    // The normal abort path: `runGraph` writes `run.cancelled` itself and
+    // resolves, so the package must not append a second one.
+    const journal = createTestJournal()
+    const parent = new AbortController()
+    const append = journal.append.bind(journal)
+    journal.append = (event: RunEvent): void => {
+      append(event)
+      if (event.type === 'run.started') parent.abort()
+    }
+    const host = createFakeHost({ tools: [schema('read')], journal })
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const error = await runError(tool.call(validArgs))
+    expect(error.code).toBe('child_cancelled')
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('cancelled')
+    const types = (journal.events.get(runId) ?? []).map((event) => event.type)
+    expect(types.filter((type) => type === 'run.cancelled')).toHaveLength(1)
+    expect(types.filter((type) => type.startsWith('run.')).slice(-1)).toEqual(['run.cancelled'])
+  })
+
+  test('a timeout row failed ends with run.failed, not only run.cancelled', async () => {
+    // The internal timer aborts the child, so `runGraph` writes
+    // `run.cancelled` while the row says `failed`; the package appends the
+    // matching `run.failed` so the last terminal event agrees with the row.
+    const journal = createTestJournal()
+    const host = createFakeHost({ tools: [schema('read')], llm: hangingLlm, journal })
+    const tool = toolFor(host, { timeoutMs: 20 })
+
+    const error = await runError(tool.call(validArgs))
+    expect(error.code).toBe('child_timeout')
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('failed')
+    const types = (journal.events.get(runId) ?? []).map((event) => event.type)
+    expect(types.at(-1)).toBe('run.failed')
+    expect(types.filter((type) => type === 'run.failed')).toHaveLength(1)
+  })
+
+  test('a ledger that lost run.started gets no orphan terminal append', async () => {
+    // `SqliteJournal` refuses an append to an unknown run. When the very first
+    // event is lost, the run never started from the journal's point of view,
+    // so there is nothing to append a terminal event to; the call still reports
+    // an error, and no orphan event is invented.
+    const journal = createTestJournal()
+    const parent = new AbortController()
+    journal.failNext('run.started')
+    const host = createFakeHost({ tools: [schema('read')], journal })
+    parent.abort()
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const error = await runError(tool.call(validArgs))
+    expect(error.code).toBe('child_cancelled')
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.events.get(runId) ?? []).toEqual([])
+  })
+
+  test('an abort before the call starts no child at all', async () => {
+    const parent = new AbortController()
+    parent.abort()
+    const host = createFakeHost({ tools: [schema('read')] })
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const error = await runError(tool.call(validArgs))
+
+    expect(error.code).toBe('child_cancelled')
+    expect(error.message).toContain('before it started')
+    expect(host.beginCalls).toEqual([])
+    expect(host.handles).toEqual([])
+    expect((host.journal as ReturnType<typeof createTestJournal>).runs.size).toBe(0)
+  })
+
+  test('an abort before a zero-grant child starts still starts no child', async () => {
+    const parent = new AbortController()
+    parent.abort()
+    const journal = createTestJournal()
+    const host = createFakeHost({ tools: [schema('read')], journal })
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const error = await runError(tool.call({ ...validArgs, tools: { enable: [] } }))
+
+    expect(error.code).toBe('child_cancelled')
+    expect(host.beginCalls).toEqual([])
+    expect(journal.runs.size).toBe(0)
+  })
+
+  test('a zero-grant child is cancelled by a host abort like any other', async () => {
+    const model = gatedLlm()
+    const journal = createTestJournal()
+    const host = createFakeHost({ tools: [schema('read')], llm: model.llm, journal })
+    const parent = new AbortController()
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const pending = tool.call({ ...validArgs, tools: { enable: [] } })
+    await model.pendingCall
+    parent.abort()
+
+    const error = await runError(pending)
+    expect(error.code).toBe('child_cancelled')
+    expect(host.handles[0]?.disposed).toBe(true)
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('cancelled')
+  })
+
+  test('a timeout stays a timeout, not a cancellation', async () => {
+    const journal = createTestJournal()
+    const host = createFakeHost({
+      tools: [schema('read')],
+      llm: hangingLlm,
+      journal,
+    })
+    // A live host signal that is never aborted: only the timer can end the run.
+    const tool = toolFor(host, {
+      timeoutMs: 20,
+      signal: new AbortController().signal,
+    })
+
+    const error = await runError(tool.call(validArgs))
+
+    expect(error.code).toBe('child_timeout')
+    expect(error.message).not.toContain('parent')
+    expect(host.handles[0]?.disposed).toBe(true)
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('failed')
+  })
+
+  test('a genuine child error stays failed with a live host signal', async () => {
+    let call = 0
+    const alwaysToolCall: LlmService = {
+      async chat(): Promise<ChatResult> {
+        call += 1
+        return {
+          message: { role: 'assistant', content: '' },
+          toolCalls: [{ id: `call_${String(call)}`, name: 'read', arguments: {} }],
+          stopReason: 'tool_calls',
+        }
+      },
+    }
+    const journal = createTestJournal()
+    const host = createFakeHost({
+      tools: [schema('read')],
+      llm: alwaysToolCall,
+      journal,
+    })
+    const tool = toolFor(host, {
+      maxSteps: 2,
+      signal: new AbortController().signal,
+    })
+
+    const error = await runError(tool.call(validArgs))
+
+    expect(error.code).toBe('child_failed')
+    expect(error.message).toContain('step limit reached after 2 steps')
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('failed')
+  })
+
+  test('a node that rejects with AbortError during a host abort is cancelled', async () => {
+    // AbortSignal.reason / a provider adapter's rethrow is the canonical abort
+    // error; it must not make an aborted child look failed.
+    const journal = createTestJournal()
+    const parent = new AbortController()
+    const append = journal.append.bind(journal)
+    journal.append = (event: RunEvent): void => {
+      append(event)
+      if (event.type === 'run.started') parent.abort()
+    }
+    const host = createFakeHost({
+      tools: [schema('read')],
+      llm: {
+        async chat(): Promise<never> {
+          throw new DOMException('This operation was aborted', 'AbortError')
+        },
+      },
+      journal,
+    })
+    const tool = toolFor(host, { signal: parent.signal })
+
+    const error = await runError(tool.call(validArgs))
+    expect(error.code).toBe('child_cancelled')
+    expect(host.handles[0]?.disposed).toBe(true)
+    const runId = host.beginCalls[0]?.runId ?? ''
+    expect(journal.runs.get(runId)?.status).toBe('cancelled')
+  })
+
+  test('an abort that races a finished graph still reports cancelled', async () => {
+    // The host cancels while the child's one-shot model reply is in flight.
+    // Even if the graph happens to finish, the parent will never read that
+    // result: the row and the error say cancelled, not completed.
+    const journal = createTestJournal()
+    const host = createFakeHost({
+      tools: [schema('read')],
+      llm: staticLlm('ok').llm,
+      journal,
+    })
+    const parent = new AbortController()
+    const tool = toolFor(host, { signal: parent.signal })
+
+    // The mock replies synchronously, so abort on the run's own start event.
+    const append = journal.append.bind(journal)
+    journal.append = (event: RunEvent): void => {
+      append(event)
+      if (event.type === 'run.started') parent.abort()
+    }
+
+    const error = await runError(tool.call(validArgs))
+    expect(error.code).toBe('child_cancelled')
+    expect(host.handles[0]?.disposed).toBe(true)
+    const runId = host.beginCalls[0]?.runId ?? ''
+    const record = journal.runs.get(runId)
+    expect(record?.status).toBe('cancelled')
+    expect(record).not.toHaveProperty('parentRunId')
   })
 })

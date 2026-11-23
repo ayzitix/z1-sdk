@@ -347,7 +347,11 @@ export interface SubagentToolOptions {
   readonly moduleApproval?: ApprovalService
   /**
    * Optional host signal. It is not read from `ToolService.call()` (that API
-   * has no run context yet); the host passes it explicitly.
+   * has no run context yet); the host passes it explicitly, usually the
+   * parent turn's `AbortController.signal`. Aborting it is a *parent
+   * cancellation*: the child graph stops and the run is recorded and reported
+   * as `cancelled`, never `failed`. `timeoutMs` is separate and stays
+   * `child_timeout`.
    */
   readonly signal?: AbortSignal
   /**
