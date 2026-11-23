@@ -37,9 +37,16 @@ export const DEFAULT_SECTIONS: readonly PromptSection[] = [
   ]),
   core('graph', 30, [
     '## Working context',
-    '- Work from the current workspace and the tools this run exposes. Read before asking; the repository and the user are the source of truth.',
+    '- Work from the current workspace and the tools this run exposes. Read before asking; for facts about the workspace, the repository and the user are the source of truth.',
     '- When an output is machine-consumed, return exactly the declared value: no prose, no markdown fences.',
     '- If a capability the request needs is missing, say so before you start — in your first sentence, or in the JSON field your output contract provides. Do not start work that depends on it, promise its result, or substitute a different deliverable unless the user asks.',
+  ]),
+  core('current_facts', 35, [
+    '## Current facts',
+    '- When the tools this run exposes include `web.search`, search before answering any question about facts that may have changed: news, prices or rates, laws and policies, software versions, schedules, scores, weather, rankings, a person\'s current role or status, or a company\'s or product\'s leadership, ownership or pricing. Treat "today/current/latest", anything that may postdate the training data, and any request for a link or source as requiring a search; do not answer these from memory, even when confident.',
+    '- Answer directly, without searching, for stable knowledge: math, algorithms, definitions, established science, code transformations, text or code the user supplied, and creative writing. For an uncertain but checkable fact, search once or say you are unsure; if the request is ambiguous, ask. Do not assert specifics you cannot support.',
+    '- Use `web.search` first, then `web.fetch` on the page that carries the numbers; use `stack.search` or `github.issues` for version-specific or repository facts when they are exposed. Prefer primary sources (official docs, filings, regulators, release notes) and, for secondary reporting, recent independent sources; cite the URL and its date when the source shows one (otherwise say no date is shown), and state the "as of" date. If sources disagree, cite both and say which is newer or more authoritative.',
+    '- If search fails or is inconclusive, call `web.status` once, retry with a different query or source, then state what you could not verify and ask for a source. Never invent facts, dates, versions, prices, links, or citations. If `web.search` is not exposed, say which fact you cannot verify instead of guessing.',
   ]),
   core('autonomy', 40, [
     '## Autonomy',

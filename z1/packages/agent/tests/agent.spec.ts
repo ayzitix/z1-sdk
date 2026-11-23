@@ -132,6 +132,7 @@ describe('buildAgentGraph', () => {
 
     expect(system).toContain('You are z1')
     expect(system).toContain('## Working context')
+    expect(system).toContain('## Current facts')
     expect(system).toContain('## Autonomy')
     expect(system).toContain('## Output')
     // The stack is materialized once: no transcript system message plus a port.

@@ -16,6 +16,7 @@ const CORE_HEADINGS = [
   '## Success',
   '## Safety',
   '## Working context',
+  '## Current facts',
   '## Autonomy',
   '## Doing tasks',
   '## Editing',
@@ -29,13 +30,14 @@ const snapshot = readFileSync(new URL('./__snapshots__/default.txt', import.meta
 
 describe('DEFAULT_SECTIONS', () => {
   test('is core identity plus the approved headings, all required', () => {
-    expect(DEFAULT_SECTIONS).toHaveLength(11)
+    expect(DEFAULT_SECTIONS).toHaveLength(12)
     expect(DEFAULT_SECTIONS.every((entry) => entry.slot === 'core' && entry.required)).toBe(true)
     expect(DEFAULT_SECTIONS.map((entry) => entry.id)).toEqual([
       'core.identity',
       'core.success',
       'core.non_negotiables',
       'core.graph',
+      'core.current_facts',
       'core.autonomy',
       'core.loop',
       'core.editing',
@@ -45,7 +47,7 @@ describe('DEFAULT_SECTIONS', () => {
       'core.output',
     ])
     expect(DEFAULT_SECTIONS.map((entry) => entry.priority)).toEqual([
-      0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100,
+      0, 10, 20, 30, 35, 40, 50, 60, 70, 80, 90, 100,
     ])
   })
 
@@ -151,12 +153,20 @@ describe('buildPrompt', () => {
     expect(result.text).toContain('Success means the requested outcome')
   })
 
+  test('current facts require a web lookup and a source, not memory', () => {
+    const { text } = buildPrompt({ role: 'coder' })
+    expect(text).toContain('## Current facts')
+    expect(text).toContain('do not answer these from memory')
+    expect(text).toContain('Use `web.search` first')
+    expect(text).toContain('Never invent facts')
+  })
+
   test('is deterministic and reports a stable version', () => {
     const one = buildPrompt({ role: 'reviewer' })
     const two = buildPrompt({ role: 'reviewer' })
     expect(one.hash).toBe(two.hash)
     expect(one.text).toBe(two.text)
-    expect(PROMPT_VERSION).toBe('4')
+    expect(PROMPT_VERSION).toBe('5')
   })
 
   test('matches the committed default snapshot', () => {

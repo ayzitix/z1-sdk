@@ -33,7 +33,10 @@ skipped and the rest are joined with a blank line, verbatim.
 `buildPrompt` starts from `DEFAULT_SECTIONS` (the z1 core prompt), appends one
 role delta from `ROLE_SECTIONS` (`planner`, `coder`, `reviewer`, `summarizer`,
 `judge`, `router`; `coder` is the default and adds only a two-line note), then
-appends any extra sections:
+appends any extra sections. The core includes `core.current_facts`: when
+`web.search` is exposed, current or time-sensitive facts require a search and a
+cited source, and must not be answered from memory; stable knowledge stays
+direct.
 
 ```ts
 import { buildPrompt } from '@z1/prompt'

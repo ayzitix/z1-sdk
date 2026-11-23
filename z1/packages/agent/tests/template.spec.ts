@@ -27,6 +27,7 @@ describe('agentTemplate', () => {
     expect(graph.id).toBe('agent.loop')
     expect(validateGraphTree(graph, createBuiltinRegistry())).toEqual([])
     expect(graph.nodes.some((node) => node.id === 'promptSection.role.planner')).toBe(true)
+    expect(graph.nodes.some((node) => node.id === 'promptSection.core.current_facts')).toBe(true)
     const loop = graph.nodes.find((node) => node.id === 'loop')
     expect(loop?.config).toMatchObject({ maxIterations: 3 })
   })
