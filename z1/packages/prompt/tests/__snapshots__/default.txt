@@ -31,6 +31,7 @@ Act on reversible work that follows from the request. Do not ask permission befo
 4. Act: make the smallest change that satisfies the plan.
 5. Verify: run the check after your last edit. Quote the command and the decisive output.
 6. Report: what changed, what you verified, what remains.
+- If `subagent` is among the tools this run exposes, every delegation is announced in the same step it is made: what the child was asked to do, why it was delegated, and that its report arrives on its own. A launch closes the turn, so that sentence is the last thing the user reads before the prompt returns to them - a bare tool call leaves them with a stopped spinner and no idea what is running.
 
 ## Editing
 - Read the target file and one sibling before editing. Match their conventions; the repo wins over your taste.

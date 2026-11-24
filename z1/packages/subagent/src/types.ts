@@ -28,6 +28,21 @@ export const DEFAULT_SUBAGENT_MAX_STEPS = 24
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 240_000
 
 /**
+ * Fraction of the context window at which a child stops working and reports.
+ *
+ * A child that fills its window is cut off mid-task by the provider, and the
+ * parent gets a failure with no content: the work is lost and the user learns
+ * nothing. Stopping earlier costs the *next action*, never the *report* - at
+ * the threshold the child is asked what is done, what is not, and how to
+ * continue, which is the only useful thing a truncated run can say. Three
+ * quarters leaves a full quarter of the window for that report.
+ */
+export const SUBAGENT_HANDOFF_RATIO = 0.75
+
+/** The context window a child assumes when its host does not know one. */
+export const DEFAULT_SUBAGENT_CONTEXT_WINDOW = 128_000
+
+/**
  * The model-facing input. `enable` is required: delegation never inherits the
  * parent's tool set implicitly. `disable` is applied afterwards and wins.
  */
@@ -111,6 +126,12 @@ export type SubagentErrorCode =
   | 'child_cancelled'
   | 'child_suspended'
   | 'no_output'
+  /**
+   * The child stopped at the context hand-off threshold rather than finishing
+   * or breaking. `partial`, not `failed`: it did work and it reported what
+   * remains, which is the useful outcome when a window runs out.
+   */
+  | 'context_limit'
 
 /**
  * The stable token every `SubagentError` message starts with. A host that only
@@ -390,6 +411,13 @@ export interface SubagentToolOptions {
   readonly depth?: number
   /** Child agent loop cap; defaults to 24. */
   readonly maxSteps?: number
+  /**
+   * The child model's context window, in tokens. The child stops taking new
+   * work at `SUBAGENT_HANDOFF_RATIO` of it and reports instead of running into
+   * a provider failure, so the host should set this to the real window when it
+   * knows one. Defaults to `DEFAULT_SUBAGENT_CONTEXT_WINDOW`.
+   */
+  readonly contextWindow?: number
   /**
    * Child graph-run timeout; defaults to 240_000 ms. This does not cover
    * `beginRun`, child tool re-listing, journal setup/update, or `dispose`;

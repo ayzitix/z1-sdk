@@ -5,8 +5,12 @@ import type { PromptSection, PromptVars, StackOptions, StackResult } from './typ
 /**
  * Bumped whenever the default text or the stack semantics change, so a stored
  * prompt hash can be tied to the version that produced it.
+ *
+ * 6: `core.loop` requires every `subagent` launch to be announced in the same
+ * step. A run suspended under 5 resumes into a different system prompt, which
+ * is what the version exists to make visible.
  */
-export const PROMPT_VERSION = '5'
+export const PROMPT_VERSION = '6'
 
 export interface BuildPromptOptions {
   /** Role delta appended after the core. Defaults to `coder`. */

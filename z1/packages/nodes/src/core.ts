@@ -273,6 +273,40 @@ const fail = defineNode({
   },
 })
 
+/**
+ * The last assistant message's text, scanning back from the end.
+ *
+ * A turn can close on a step that produced no assistant text of its own - a
+ * hand-off, where the model launched work and stopped. `core.last` would then
+ * publish a tool message, whose `content` is a JSON payload and not an answer.
+ * This reads the transcript for the last thing the model actually *said*, and
+ * publishes an empty string when it never said anything.
+ */
+const lastText = defineNode({
+  id: 'z1.core.lastText',
+  version: NODE_VERSION,
+  title: 'Last text',
+  description: 'The last assistant message content in a transcript, or an empty string.',
+  category: 'core',
+  config: z.object({ role: z.string().optional() }),
+  defaultConfig: {},
+  inputs: [flowPort('in'), dataPort('items', z.array(jsonValue))],
+  outputs: [dataPort('value', z.string()), flowPort('out')],
+  execute: async (ctx) => {
+    const items = inputValues(ctx.input)['items']
+    const list = Array.isArray(items) ? items : []
+    const role = ctx.config.role ?? 'assistant'
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      const entry = list[index]
+      if (!isRecord(entry)) continue
+      if (entry['role'] !== role) continue
+      const content = entry['content']
+      return { value: typeof content === 'string' ? content : '', out: true }
+    }
+    return { value: '', out: true }
+  },
+})
+
 export const coreNodes: readonly NodeDefinition[] = [
   input,
   output,
@@ -283,6 +317,7 @@ export const coreNodes: readonly NodeDefinition[] = [
   concat,
   message,
   last,
+  lastText,
   merge,
   fail,
 ]

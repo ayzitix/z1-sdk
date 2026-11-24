@@ -166,7 +166,7 @@ describe('buildPrompt', () => {
     const two = buildPrompt({ role: 'reviewer' })
     expect(one.hash).toBe(two.hash)
     expect(one.text).toBe(two.text)
-    expect(PROMPT_VERSION).toBe('5')
+    expect(PROMPT_VERSION).toBe('6')
   })
 
   test('matches the committed default snapshot', () => {

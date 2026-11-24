@@ -51,7 +51,12 @@ describe('subagentSystemPrompt', () => {
 
     expect(prompt).toContain('runs the child in the background by default')
     expect(prompt).toContain('wait: true')
-    expect(prompt).toContain('only when you need the answer to continue')
+    // The wording is biased towards the default on purpose: a model that reads
+    // "find X" as a task needing an answer blocks the user's prompt for the
+    // whole child run, which is the one thing background delegation prevents.
+    expect(prompt).toContain('Do not pass `wait: true` merely because you want the answer')
+    expect(prompt).toContain('very next line of this same step')
+    expect(prompt).toContain('the user does not have to type')
   })
 
   test('is deterministic and lists only the exact grant', () => {

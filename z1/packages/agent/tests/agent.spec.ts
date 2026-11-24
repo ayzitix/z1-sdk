@@ -105,6 +105,13 @@ function stubTools(services: MockRuntimeServices, tools: readonly ToolSchema[]):
   services.tools = { ...services.tools, list: async () => tools }
 }
 
+/** The one declaration the hand-off tests need: a tool that returns a launch. */
+const BACKGROUND_TOOL: ToolSchema = {
+  name: 'subagent',
+  description: 'Delegates to a child',
+  parameters: { type: 'object', properties: {} },
+}
+
 describe('buildAgentGraph', () => {
   test('runs the tool round trip and terminates on the assistant answer', async () => {
     const { result, services } = await run({ model: MODEL }, '[[tool:echo]] hi')
@@ -124,6 +131,99 @@ describe('buildAgentGraph', () => {
     expect(result.outputs['output']).toBe('mock: hello')
     expect(services.chatCalls).toHaveLength(1)
     expect(services.lastChatRequest?.messages[1]).toEqual({ role: 'user', content: 'hello' })
+  })
+
+  /**
+   * A step that only launched background work hands control back.
+   *
+   * This is the difference between "the call returns fast" and "the parent
+   * stops". The model asks for `subagent`, the tool answers
+   * `{ status: 'running', runId }`, and the turn ends there — no second chat
+   * call to write "delegated, waiting", and `completed` rather than the
+   * step-cap `failed` a last-step tool call used to produce.
+   */
+  test('a step that only launched a background child closes the turn', async () => {
+    let chats = 0
+    const { result } = await run({ model: MODEL, tools: [BACKGROUND_TOOL] }, 'go', (mock) => {
+      mock.llm = {
+        chat: async () => {
+          chats += 1
+          // Only ever asked once: a second call would mean the loop kept going.
+          return {
+            message: { role: 'assistant', content: '' },
+            toolCalls: [{ id: 'c1', name: 'subagent', arguments: { description: 'x' } }],
+            stopReason: 'tool_calls',
+          }
+        },
+      }
+      mock.tools = {
+        ...mock.tools,
+        list: async () => [BACKGROUND_TOOL],
+        call: async () => ({ runId: 'run_child', status: 'running', tools: [], denied: [] }),
+      }
+    })
+
+    expect(result.status).toBe('completed')
+    // One model call: the launch. No follow-up "waiting" step.
+    expect(chats).toBe(1)
+    // The turn published what the model said (nothing), not the tool payload.
+    expect(result.outputs['output']).toBe('')
+  })
+
+  /**
+   * The same step, but the model did say something before launching. That text
+   * is the turn's answer: `lastText` reads the transcript by role, because the
+   * *last* message is the tool result.
+   */
+  test('a hand-off keeps the text the model said in that step', async () => {
+    const { result } = await run({ model: MODEL, tools: [BACKGROUND_TOOL] }, 'go', (mock) => {
+      mock.llm = {
+        chat: async () => ({
+          message: { role: 'assistant', content: 'Started the reader.' },
+          toolCalls: [{ id: 'c1', name: 'subagent', arguments: { description: 'x' } }],
+          stopReason: 'tool_calls',
+        }),
+      }
+      mock.tools = {
+        ...mock.tools,
+        list: async () => [BACKGROUND_TOOL],
+        call: async () => ({ runId: 'run_child', status: 'running', tools: [], denied: [] }),
+      }
+    })
+
+    expect(result.status).toBe('completed')
+    expect(result.outputs['output']).toBe('Started the reader.')
+  })
+
+  /**
+   * A blocking tool in the same step is not a hand-off: its result is an answer
+   * the model still has to read, so the loop asks again.
+   */
+  test('a step with a blocking tool result keeps the loop going', async () => {
+    let chats = 0
+    const { result } = await run({ model: MODEL }, 'go', (mock) => {
+      mock.llm = {
+        chat: async () => {
+          chats += 1
+          if (chats === 1) {
+            return {
+              message: { role: 'assistant', content: '' },
+              toolCalls: [{ id: 'c1', name: 'echo', arguments: {} }],
+              stopReason: 'tool_calls',
+            }
+          }
+          return {
+            message: { role: 'assistant', content: 'read it' },
+            toolCalls: [],
+            stopReason: 'stop',
+          }
+        },
+      }
+    })
+
+    expect(result.status).toBe('completed')
+    expect(chats).toBe(2)
+    expect(result.outputs['output']).toBe('read it')
   })
 
   test('sends one system prompt with the core headings, then the user message', async () => {

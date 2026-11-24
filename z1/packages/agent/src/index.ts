@@ -246,7 +246,13 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       node('toolMap', 'z1.flow.map', 880, 120, { body: graphJson(buildToolMapBody()) }),
       node('thenConcat', 'z1.core.concat', 1100, -60),
       node('thenMsgs', 'z1.core.concat', 1320, 20),
-      node('thenDone', 'z1.core.value', 1540, -180, { value: false }),
+      // A step whose every tool result is a background launch has handed its
+      // work off: the child keeps running on its own and the parent's turn is
+      // over. Asking the model again would produce a "delegated, waiting"
+      // message and keep the prompt busy while nothing is being decided.
+      // The node's `value` *is* the loop's `done`, so no extra branch is
+      // needed: `true` completes the turn, `false` asks the model again.
+      node('handOff', 'z1.tool.background', 1540, -180),
       // A second, flow-gated read of the loop input: only the else branch runs it.
       node('elseMessages', 'z1.core.get', 880, 340, { path: 'value' }),
       node('elseMsgs', 'z1.core.concat', 1100, 340),
@@ -278,12 +284,15 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       data('d9', 'assistantMsg', 'message', 'thenConcat', 'b'),
       data('d10', 'thenConcat', 'value', 'thenMsgs', 'a'),
       data('d11', 'toolMap', 'results', 'thenMsgs', 'b'),
+      // The hand-off check reads the mapped tool messages: a launch is visible
+      // only in their content, never in the assistant text.
+      data('d11b', 'toolMap', 'results', 'handOff', 'results'),
       data('d12', 'thenMsgs', 'value', 'messagesMerge', 'a'),
       data('d13', 'body', 'value', 'elseMessages', 'value'),
       data('d14', 'ctxMerge', 'value', 'elseMsgs', 'a'),
       data('d15', 'chat', 'message', 'elseMsgs', 'b'),
       data('d16', 'elseMsgs', 'value', 'messagesMerge', 'b'),
-      data('d17', 'thenDone', 'value', 'doneMerge', 'a'),
+      data('d17', 'handOff', 'value', 'doneMerge', 'a'),
       data('d18', 'elseDone', 'value', 'doneMerge', 'b'),
       data('d19', 'messagesMerge', 'value', 'outValue', 'value'),
       data('d20', 'doneMerge', 'value', 'outDone', 'value'),
@@ -303,14 +312,14 @@ function buildLoopBody(options: AgentGraphOptions): GraphDocument {
       flow('f6', 'assistantMsg', 'out', 'toolMap', 'in'),
       flow('f7', 'toolMap', 'out', 'thenConcat', 'in'),
       flow('f8', 'thenConcat', 'out', 'thenMsgs', 'in'),
-      flow('f9', 'thenMsgs', 'out', 'thenDone', 'in'),
+      flow('f9', 'thenMsgs', 'out', 'handOff', 'in'),
       flow('f10', 'branch', 'else', 'elseMessages', 'in'),
       flow('f11', 'elseMessages', 'out', 'elseMsgs', 'in'),
       flow('f12', 'elseMsgs', 'out', 'elseDone', 'in'),
       // Both branch tokens converge; only the taken one is ever propagated.
       flow('f13', 'thenMsgs', 'out', 'messagesMerge', 'in'),
       flow('f14', 'elseMsgs', 'out', 'messagesMerge', 'in'),
-      flow('f15', 'thenDone', 'out', 'doneMerge', 'in'),
+      flow('f15', 'handOff', 'out', 'doneMerge', 'in'),
       flow('f16', 'elseDone', 'out', 'doneMerge', 'in'),
       flow('f17', 'messagesMerge', 'out', 'outValue', 'in'),
       flow('f18', 'doneMerge', 'out', 'outDone', 'in'),
@@ -456,9 +465,12 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
       // The loop's own `completed` flag decides whether the transcript ended on
       // an assistant answer or was cut short by the cap.
       node('doneCheck', 'z1.flow.if', 1760, 0),
-      node('last', 'z1.core.last', 1980, 0),
-      node('content', 'z1.core.get', 2200, 0, { path: 'content' }),
-      node('output', 'z1.core.output', 2420, 0, { port: 'output' }),
+      // The transcript's last message is a tool result whenever the turn closed
+      // on a hand-off (the model launched work and stopped). The answer the
+      // user reads is the last thing the *model* said, so it is read by role
+      // rather than by position.
+      node('lastText', 'z1.core.lastText', 1980, 0),
+      node('output', 'z1.core.output', 2200, 0, { port: 'output' }),
       node('fail', 'z1.core.fail', 1980, -180, {
         message: `step limit reached after ${String(maxSteps)} steps`,
       }),
@@ -474,9 +486,8 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
       data('d6', 'promptHead', 'value', 'seed', 'a'),
       data('d7', 'seedUser', 'value', 'seed', 'b'),
       data('d8', 'seed', 'value', 'loop', 'seed'),
-      data('d9', 'loop', 'result', 'last', 'items'),
-      data('d10', 'last', 'value', 'content', 'value'),
-      data('d11', 'content', 'value', 'output', 'value'),
+      data('d9', 'loop', 'result', 'lastText', 'items'),
+      data('d11', 'lastText', 'value', 'output', 'value'),
       data('d13', 'loop', 'completed', 'doneCheck', 'condition'),
       ...prompt.edges,
       flow('f1', 'input', 'out', prompt.first, 'in'),
@@ -487,9 +498,8 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
       flow('f6', 'seedUser', 'out', 'seed', 'in'),
       flow('f7', 'seed', 'out', 'loop', 'in'),
       flow('f8', 'loop', 'out', 'doneCheck', 'in'),
-      flow('f9', 'doneCheck', 'then', 'last', 'in'),
-      flow('f10', 'last', 'out', 'content', 'in'),
-      flow('f11', 'content', 'out', 'output', 'in'),
+      flow('f9', 'doneCheck', 'then', 'lastText', 'in'),
+      flow('f11', 'lastText', 'out', 'output', 'in'),
       flow('f12', 'doneCheck', 'else', 'fail', 'in'),
     ],
   }

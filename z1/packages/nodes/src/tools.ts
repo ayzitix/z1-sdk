@@ -6,6 +6,7 @@ import {
   errorMessage,
   flowPort,
   inputValues,
+  isRecord,
   jsonValue,
   NODE_VERSION,
 } from './shared.ts'
@@ -93,5 +94,54 @@ const list = defineNode({
   execute: async (ctx) => ({ tools: asJson([...(await ctx.tools.list())]) }),
 })
 
-export const toolNodes: readonly NodeDefinition[] = [call, list]
-export { call as toolCall, list as toolList }
+/**
+ * Whether a step handed its work off to the background.
+ *
+ * A tool result whose content is `{ status: "running", runId: "…" }` is a
+ * *launch*, not an answer: the work continues elsewhere and the model has
+ * nothing left to read in this step. The agent loop uses this to close the
+ * turn on such a step instead of asking the model again - the parent hands
+ * control back instead of waiting, which is the point of a background child.
+ *
+ * It reads the mapped tool results, not the assistant message. One blocking
+ * tool in the same step means the model still has an answer to read, so that
+ * step is not a hand-off.
+ */
+const background = defineNode({
+  id: 'z1.tool.background',
+  version: NODE_VERSION,
+  title: 'Background?',
+  description: 'True when every tool result of the step is a background launch.',
+  category: 'tool',
+  config: z.object({}),
+  defaultConfig: {},
+  inputs: [flowPort('in'), dataPort('results', z.array(jsonValue), false)],
+  outputs: [dataPort('value', z.boolean()), flowPort('out')],
+  execute: async (ctx) => {
+    const raw = inputValues(ctx.input)['results']
+    const results = Array.isArray(raw) ? raw : []
+    // No results is an ordinary answer, not a hand-off.
+    if (results.length === 0) return { value: false, out: true }
+    const handOff = results.every((entry) => {
+      if (!isRecord(entry)) return false
+      // A tool message's `content` is the JSON the tool returned, as text.
+      const content = entry['content']
+      const parsed = typeof content === 'string' ? safeJson(content) : content
+      if (!isRecord(parsed)) return false
+      return parsed['status'] === 'running' && typeof parsed['runId'] === 'string'
+    })
+    return { value: handOff, out: true }
+  },
+})
+
+/** JSON.parse that answers `undefined` instead of throwing. */
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+export const toolNodes: readonly NodeDefinition[] = [call, list, background]
+export { call as toolCall, list as toolList, background as toolBackground }

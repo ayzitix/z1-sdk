@@ -16,6 +16,7 @@ test('registers every SPEC §7 node at 1.0.0', () => {
     'z1.core.get',
     'z1.core.input',
     'z1.core.last',
+    'z1.core.lastText',
     'z1.core.merge',
     'z1.core.message',
     'z1.core.output',
@@ -36,6 +37,7 @@ test('registers every SPEC §7 node at 1.0.0', () => {
     'z1.prompt.section',
     'z1.prompt.stack',
     'z1.prompt.text',
+    'z1.tool.background',
     'z1.tool.call',
     'z1.tools.list',
   ])

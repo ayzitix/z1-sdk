@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { buildAgentGraph } from '@z1/agent'
 import { graphDigest } from '@z1/graph'
-import type { ApprovalDecision, ToolSchema } from '@z1/node'
+import type { ApprovalDecision, ChatMessage, ToolSchema } from '@z1/node'
 import {
   runGraph,
   type ApprovalService,
@@ -12,7 +12,7 @@ import {
 } from '@z1/runtime'
 
 import { normalizeToolName, parseSubagentInput, resolveToolGrant } from './grant.ts'
-import { subagentSystemPrompt } from './prompt.ts'
+import { SUBAGENT_HANDOFF_REQUEST, subagentSystemPrompt } from './prompt.ts'
 import {
   backgroundLaunchText,
   partialText,
@@ -22,12 +22,14 @@ import {
 } from './result.ts'
 import { restrictToolService } from './restrict.ts'
 import {
+  DEFAULT_SUBAGENT_CONTEXT_WINDOW,
   DEFAULT_SUBAGENT_MAX_DEPTH,
   DEFAULT_SUBAGENT_MAX_STEPS,
   DEFAULT_SUBAGENT_TIMEOUT_MS,
   MAX_SUBAGENT_DESCRIPTION_LENGTH,
   MAX_SUBAGENT_PROMPT_BYTES,
   MAX_SUBAGENT_TOOL_ENTRIES,
+  SUBAGENT_HANDOFF_RATIO,
   SUBAGENT_TOOL_NAME,
   SubagentBudget,
   SubagentError,
@@ -60,6 +62,13 @@ interface NormalizedOptions {
   readonly depth: number
   readonly maxSteps: number
   readonly timeoutMs: number
+  /**
+   * The token count at which the child stops working and reports instead.
+   * Derived once from the window and `SUBAGENT_HANDOFF_RATIO`, so every path
+   * (timing, reporting, tests) uses the same number.
+   */
+  readonly handoffTokens: number
+  readonly contextWindow: number
   readonly maxDescriptionLength: number
   readonly maxPromptBytes: number
   readonly maxToolEntries: number
@@ -75,6 +84,21 @@ interface NormalizedOptions {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The prompt-side token count from a chat node's `usage` record, when the
+ * provider reported one. `promptTokens` is the OpenAI-compatible field; a
+ * provider that reports only `totalTokens` still gives a usable floor.
+ */
+function promptTokensOf(usage: unknown): number | undefined {
+  if (typeof usage !== 'object' || usage === null) return undefined
+  const record = usage as Record<string, unknown>
+  for (const key of ['promptTokens', 'prompt_tokens', 'totalTokens', 'total_tokens']) {
+    const value = record[key]
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.round(value)
+  }
+  return undefined
 }
 
 function integerOption(
@@ -207,6 +231,14 @@ function normalizeOptions(options: SubagentToolOptions): NormalizedOptions {
     'subagent tool name',
   )
   const approval = options.approval ?? denyApprovalService
+  // The child's window: whatever the host knows, or the documented default. The
+  // hand-off point is a fraction of it, computed once so every reader agrees.
+  const contextWindow = integerOption(
+    options.contextWindow ?? DEFAULT_SUBAGENT_CONTEXT_WINDOW,
+    'contextWindow',
+    1,
+  )
+  const handoffTokens = Math.max(1, Math.floor(contextWindow * SUBAGENT_HANDOFF_RATIO))
 
   return {
     model: options.model,
@@ -216,6 +248,8 @@ function normalizeOptions(options: SubagentToolOptions): NormalizedOptions {
     depth,
     maxSteps,
     timeoutMs,
+    handoffTokens,
+    contextWindow,
     maxDescriptionLength,
     maxPromptBytes,
     maxToolEntries,
@@ -530,6 +564,12 @@ interface ChildRun {
   readonly timedOut: boolean
   readonly startLost: boolean
   readonly lostStartError: unknown
+  /**
+   * The child crossed the context hand-off threshold, so it stopped working
+   * while it still could report. `settleChild` turns this into the `partial`
+   * status and asks for the report.
+   */
+  readonly handoffReached: boolean
 }
 
 /**
@@ -560,6 +600,13 @@ async function runChildGraph(
   let steps = 0
   let timedOut = false
   let thrown: unknown
+  /**
+   * Whether the child crossed the hand-off threshold. Read from the chat
+   * node's `usage` port on every step: that number is the provider's own count
+   * of what the next request will carry, which is exactly what the window
+   * limit applies to.
+   */
+  let handoffReached = false
   const forward = limits.onEvent
   const childEvents = (event: RunEvent): void => {
     if (event.type === 'node.started' && /^loop\/\d+\/chat$/.test(event.path)) {
@@ -570,6 +617,20 @@ async function runChildGraph(
         } catch {
           // Observation only.
         }
+      }
+    }
+    // The budget is checked on the *result* of a step, before the next one
+    // starts: crossing the threshold must stop the work, not truncate a step
+    // that is already in flight.
+    if (event.type === 'node.completed' && event.path !== undefined && /^loop\/\d+\/chat$/.test(event.path)) {
+      const usage = (event.outputs as Record<string, unknown> | undefined)?.['usage']
+      const tokens = promptTokensOf(usage)
+      if (tokens !== undefined && tokens >= limits.handoffTokens) {
+        handoffReached = true
+        // Stop the graph here: the work must end at the threshold, not at the
+        // next provider failure. The report is written afterwards, from what
+        // the run already produced.
+        controller.abort()
       }
     }
     if (forward === undefined) return
@@ -642,7 +703,62 @@ async function runChildGraph(
       lostStartError = failure
     }
   }
-  return { result, thrown, steps, timedOut, startLost, lostStartError }
+  return { result, thrown, steps, timedOut, startLost, lostStartError, handoffReached }
+}
+
+/**
+ * Ask the child's own model for a status report, when the run stopped at the
+ * context threshold instead of finishing.
+ *
+ * This is the one turn that is allowed to run *after* the graph has ended, and
+ * it is deliberately tool-free: the child cannot continue the work, it can only
+ * say where the work stands. That is what makes the report trustworthy - the
+ * text comes from the same transcript the child produced, not from a summary of
+ * a summary.
+ *
+ * A failure here is not fatal: the caller keeps whatever the run already had
+ * (its last text), because a missing hand-off is still better than a lost run.
+ */
+async function handoffReport(
+  setup: ChildSetup,
+  events: readonly RunEvent[],
+): Promise<string | undefined> {
+  const llm = setup.child.services.llm
+  if (llm === undefined) return undefined
+  const messages = transcriptOf(events)
+  if (messages.length === 0) return undefined
+  try {
+    const result = await llm.chat({
+      model: setup.limits.model,
+      messages: [...messages, { role: 'user', content: SUBAGENT_HANDOFF_REQUEST }],
+      // No tools: the window is nearly full and the work is stopping. Offering
+      // them would only invite another round.
+      tools: [],
+    })
+    const text = result.message.content
+    return typeof text === 'string' && text.trim().length > 0 ? text.trim() : undefined
+  } catch {
+    // A provider that fails here loses only the summary, not the run.
+    return undefined
+  }
+}
+
+/** The child's transcript as chat messages, dropping what the model cannot read. */
+function transcriptOf(events: readonly RunEvent[]): readonly ChatMessage[] {
+  const messages: ChatMessage[] = []
+  for (const event of events) {
+    if (event.type !== 'node.completed') continue
+    const outputs = event.outputs as Record<string, unknown> | undefined
+    const message = outputs?.['message']
+    if (typeof message !== 'object' || message === null) continue
+    const record = message as Record<string, unknown>
+    const role = record['role']
+    const content = record['content']
+    if (typeof role !== 'string' || typeof content !== 'string') continue
+    if (role !== 'system' && role !== 'user' && role !== 'assistant' && role !== 'tool') continue
+    messages.push(message as ChatMessage)
+  }
+  return messages
 }
 
 /**
@@ -820,6 +936,50 @@ async function settleChild(
       message: `subagent ${code}: ${detail}`,
       detail,
       text,
+    }
+  }
+
+  // The context threshold: the child stopped because its window was nearly
+  // full, not because the task was finished or broken. That is `partial` -
+  // the same status a step cap earns - and it carries a report, because a
+  // reader needs to know what is done, what is not, and how to continue.
+  //
+  // This branch runs before the `completed` check on purpose: a run that filled
+  // its window can still resolve as `completed` (it had an answer in hand), and
+  // calling that "done" would hide the fact that the work was cut short. It
+  // ranks *below* a real cancellation: the user stopping a child is still a
+  // cancellation, whatever the window was doing at the time.
+  if (run.handoffReached && !aborted) {
+    const report = await handoffReport(setup, childEventsSeen())
+    const detail = `stopped at ${String(Math.round(SUBAGENT_HANDOFF_RATIO * 100))}% of the context window after ${String(stepped)} model ${
+      stepped === 1 ? 'turn' : 'turns'
+    }${report === undefined ? '; the report could not be produced' : ''}`
+    if (runs !== undefined) {
+      try {
+        await recordFinalStatus(runs, childRunId, 'failed')
+      } catch {
+        // The report is the useful artefact; a broken journal cannot be repaired.
+      }
+    }
+    return {
+      ...shared,
+      status: 'partial',
+      errorCode: 'context_limit',
+      output: report ?? '',
+      ...(report === undefined ? {} : { partial: report }),
+      message: `subagent context_limit: ${detail}`,
+      detail,
+      text: resultText({
+        runId: childRunId,
+        status: 'partial',
+        errorCode: 'context_limit',
+        steps: stepped,
+        elapsedMs,
+        tools: shared.tools,
+        denied: shared.denied,
+        output: report ?? '',
+        detail,
+      }).text,
     }
   }
 

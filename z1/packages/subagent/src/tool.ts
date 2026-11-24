@@ -2,7 +2,7 @@ import type { Json, ToolSchema } from '@z1/node'
 import type { ToolService } from '@z1/runtime'
 
 import { normalizeToolName } from './grant.ts'
-import { SUBAGENT_WAIT_GUIDANCE } from './prompt.ts'
+import { SUBAGENT_LAUNCH_REPORT, SUBAGENT_WAIT_GUIDANCE } from './prompt.ts'
 import { runSubagent } from './run.ts'
 import {
   MAX_SUBAGENT_DESCRIPTION_LENGTH,
@@ -27,7 +27,7 @@ export { restrictToolService } from './restrict.ts'
 export const subagentToolSchema: ToolSchema = {
   name: SUBAGENT_TOOL_NAME,
   description:
-    `Delegate one self-contained task to a child agent that does not see this conversation. Choose the exact tools it may use; the child cannot delegate further. ${SUBAGENT_WAIT_GUIDANCE}`,
+    `Delegate one self-contained task to a child agent that does not see this conversation. Choose the exact tools it may use; the child cannot delegate further. ${SUBAGENT_WAIT_GUIDANCE} ${SUBAGENT_LAUNCH_REPORT}`,
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -68,7 +68,7 @@ export const subagentToolSchema: ToolSchema = {
       wait: {
         type: 'boolean',
         description:
-          'Default false: return { runId, status: "running" } immediately and deliver the result at a later turn. true: block now and return the result text. Use true only when the answer is needed to continue.',
+          'Omit this. The child runs in the background: your turn ends at the launch, and the report arrives by itself in a later turn without the user typing. Pass true only when the very next line of this same step cannot be written without the child\'s value - not merely because you want the answer.',
       },
     },
   },
