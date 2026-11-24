@@ -13,6 +13,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -25,7 +26,9 @@ import {
   PACKAGE,
   SessionCorruptError,
   SessionTooNewError,
+  TRASH_KEEP,
   createSessionStore,
+  pruneTrash,
   resolveSessionRoot,
   type SessionStore,
 } from '../src/index.ts'
@@ -305,6 +308,32 @@ describe('clear', () => {
     expect(readFileSync(outside, 'utf8')).toBe('kept\n')
   })
 
+  test('a transcript that cannot be replaced fails with the session named', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    store.appendTurn(session.meta.id, [user('one')])
+    const dir = join(store.root, 'sessions', session.meta.id)
+    // A directory where the transcript should be: the atomic replace cannot
+    // succeed on any platform, which is the post-retry path a Windows sharing
+    // violation also takes. A bare `EPERM: rename <temp>` names nothing useful.
+    rmSync(join(dir, 'events.jsonl'))
+    mkdirSync(join(dir, 'events.jsonl'))
+
+    expect(() => store.clear(session.meta.id)).toThrow(/could not acquire/)
+    expect(() => store.clear(session.meta.id)).toThrow(new RegExp(session.meta.id))
+    // No litter: the temp file this writer made is gone with the failure.
+    expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([])
+    // And no half-clear: the metadata still describes the transcript that is
+    // there, with the generation the failed call never bumped.
+    const meta = JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')) as {
+      generation?: number
+      messageCount?: number
+    }
+    expect(meta.messageCount).toBe(1)
+    expect(meta.generation ?? 0).toBe(0)
+  })
+
   test('clearing an already-empty session writes nothing', () => {
     const cwd = tempDir()
     const store = open(cwd)
@@ -383,6 +412,165 @@ describe('management', () => {
     expect(existsSync(join(trashed, 'meta.json'))).toBe(true)
     expect(existsSync(join(trashed, 'events.jsonl'))).toBe(true)
     expect(() => store.remove(session.meta.id)).toThrow(/unknown session/)
+  })
+
+  test('the trash keeps a bounded window: oldest entries go, fresh ones stay', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const trash = join(store.root, '.trash')
+    mkdirSync(trash, { recursive: true })
+    const now = Date.now()
+    const day = 24 * 60 * 60 * 1000
+    // Five entries, five days apart, named the way `remove` writes them.
+    const names: string[] = []
+    for (let age = 5; age >= 1; age -= 1) {
+      const name = `2026010${String(age)}T000000-s_2026010${String(age)}T000000-abcdef`
+      mkdirSync(join(trash, name), { recursive: true })
+      utimesSync(join(trash, name), new Date(now - age * day), new Date(now - age * day))
+      names.push(name)
+    }
+
+    // The count window: the three newest survive, the two oldest do not.
+    expect(pruneTrash(store.root, { keep: 3, keepMs: 365 * day, now })).toHaveLength(2)
+    expect(readdirSync(trash).sort()).toEqual(names.slice(2).sort())
+
+    // The age window: an entry under `keep` but past `keepMs` still goes.
+    const ancient = '20250101T000000-s_20250101T000000-abcdef'
+    mkdirSync(join(trash, ancient), { recursive: true })
+    utimesSync(join(trash, ancient), new Date(now - 400 * day), new Date(now - 400 * day))
+    expect(pruneTrash(store.root, { keep: 50, keepMs: 30 * day, now })).toEqual([ancient])
+    expect(existsSync(join(trash, ancient))).toBe(false)
+    // Pruning a root with no trash is a no-op, not an error.
+    expect(pruneTrash(join(cwd, 'nowhere'))).toEqual([])
+  })
+
+  test('a stale source mtime cannot make the next open prune the entry just moved', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const session = newSession(store, cwd)
+    store.appendTurn(session.meta.id, [user('gone soon')])
+    const dir = join(store.root, 'sessions', session.meta.id)
+    // The source directory looks 400 days old, which is the timestamp a rename
+    // carries into `.trash`.
+    const stale = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000)
+    utimesSync(dir, stale, stale)
+
+    store.remove(session.meta.id)
+    const trash = join(store.root, '.trash')
+    const entries = readdirSync(trash)
+    expect(entries).toHaveLength(1)
+    const entry = entries[0] ?? ''
+    // `remove` re-stamps the entry, so its age no longer comes from the source.
+    expect(Date.now() - statSync(join(trash, entry)).mtimeMs).toBeLessThan(60_000)
+
+    // A later open prunes without any protection: an entry it would have judged
+    // ancient has to survive on its own.
+    open(cwd)
+    expect(existsSync(join(trash, entry))).toBe(true)
+  })
+
+  test('a backwards clock jump cannot prune the entry a caller is writing', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const trash = join(store.root, '.trash')
+    const now = Date.now()
+    const day = 24 * 60 * 60 * 1000
+    // What `remove` writes after the clock jumped back: the smallest name in the
+    // trash and an mtime that looks 400 days old.
+    const fresh = '20200101T000000-s_20200101T000000-abcdef'
+    const seed = (): void => {
+      rmSync(trash, { recursive: true, force: true })
+      mkdirSync(trash, { recursive: true })
+      // A full trash written by a clock a day ahead of the one `remove` uses.
+      for (let index = 0; index < TRASH_KEEP; index += 1) {
+        const name = `29991231T235959-${String(index).padStart(3, '0')}`
+        mkdirSync(join(trash, name), { recursive: true })
+        utimesSync(join(trash, name), new Date(now + day), new Date(now + day))
+      }
+      mkdirSync(join(trash, fresh), { recursive: true })
+      utimesSync(join(trash, fresh), new Date(now - 400 * day), new Date(now - 400 * day))
+    }
+
+    // Unprotected, a full trash deletes the entry that was just written: an
+    // mtime that looks ancient is all the age rule needs.
+    seed()
+    expect(pruneTrash(store.root, { now })).toContain(fresh)
+    expect(existsSync(join(trash, fresh))).toBe(false)
+
+    // Protected, it survives — and the oldest unprotected entry pays for its
+    // slot, so the window still holds exactly TRASH_KEEP entries.
+    seed()
+    const removed = pruneTrash(store.root, { protect: [fresh], now })
+    expect(removed).not.toContain(fresh)
+    expect(existsSync(join(trash, fresh))).toBe(true)
+    expect(removed).toHaveLength(1)
+    expect(readdirSync(trash)).toHaveLength(TRASH_KEEP)
+
+    // The id alone is enough: `remove` knows the session, not the stamp that
+    // was put in front of it, so both spellings are part of the contract.
+    expect(pruneTrash(store.root, { protect: ['s_20200101T000000-abcdef'], now })).toEqual([])
+
+    // The age rule still applies to everything else: with the window wide open
+    // the count is not the reason, and an entry past `keepMs` is dropped.
+    const lonely = tempDir()
+    mkdirSync(join(lonely, '.trash'), { recursive: true })
+    mkdirSync(join(lonely, '.trash', fresh), { recursive: true })
+    utimesSync(join(lonely, '.trash', fresh), new Date(now - 400 * day), new Date(now - 400 * day))
+    expect(pruneTrash(lonely, { keep: 100, now })).toEqual([fresh])
+  })
+
+  test('remove keeps the entry it just wrote even when the trash is full', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const trash = join(store.root, '.trash')
+    mkdirSync(trash, { recursive: true })
+    const now = Date.now()
+    const day = 24 * 60 * 60 * 1000
+    // Full, and every entry was stamped and touched by a clock ahead of this
+    // one: by name and by mtime, the entry `remove` is about to add is the
+    // oldest thing in the trash.
+    for (let index = 0; index < TRASH_KEEP; index += 1) {
+      const name = `29991231T235959-${String(index).padStart(3, '0')}`
+      mkdirSync(join(trash, name), { recursive: true })
+      utimesSync(join(trash, name), new Date(now + day), new Date(now + day))
+    }
+
+    const session = newSession(store, cwd)
+    store.remove(session.meta.id)
+
+    const after = readdirSync(trash)
+    expect(after.some((name) => name.endsWith(session.meta.id))).toBe(true)
+    expect(after).toHaveLength(TRASH_KEEP)
+  })
+
+  test('remove and opening a store both prune the trash', () => {
+    const cwd = tempDir()
+    const store = open(cwd)
+    const trash = join(store.root, '.trash')
+    mkdirSync(trash, { recursive: true })
+    const seedTrash = (count: number, from: number): void => {
+      for (let index = from; index < from + count; index += 1) {
+        mkdirSync(
+          join(trash, `20260101T${String(index).padStart(6, '0')}-s_20260101T000000-abcdef`),
+          { recursive: true },
+        )
+      }
+    }
+
+    // A trash already over the limit is bounded by the next remove, and the
+    // entry that remove just wrote is the newest, so retention never drops it.
+    seedTrash(TRASH_KEEP + 1, 0)
+    const session = newSession(store, cwd)
+    store.remove(session.meta.id)
+    const afterRemove = readdirSync(trash)
+    expect(afterRemove).toHaveLength(TRASH_KEEP)
+    expect(afterRemove.some((name) => name.endsWith(session.meta.id))).toBe(true)
+
+    // Opening a store prunes too: a trash left over the limit is bounded at boot.
+    seedTrash(TRASH_KEEP, TRASH_KEEP + 1)
+    expect(readdirSync(trash)).toHaveLength(TRASH_KEEP * 2)
+    open(cwd)
+    expect(readdirSync(trash)).toHaveLength(TRASH_KEEP)
   })
 
   test('a newer schemaVersion throws instead of being read as v1', () => {

@@ -14,7 +14,7 @@ describe('estimateTokens', () => {
 })
 
 describe('budget', () => {
-  test('drops the lowest-priority optional sections first', () => {
+  test('drops the highest-priority optional sections first', () => {
     const result = stackSections(
       [
         section('core.keep', 'core', 0, LONG, true),
@@ -28,6 +28,22 @@ describe('budget', () => {
 
     expect(result.sections.map((entry) => entry.id)).toEqual(['core.keep', 'task.a'])
     expect(result.tokens).toBe(200)
+  })
+
+  test('drops a caller-supplied section before the defaults it adjusts', () => {
+    // The custom slot is the end of the prompt and the least trusted part of
+    // the stack, so it is the first casualty of a budget cut.
+    const result = stackSections(
+      [
+        section('core.keep', 'core', 0, LONG, true),
+        section('context.memory', 'context', 0, LONG),
+        section('custom.instructions', 'custom', 1_000, LONG),
+      ],
+      {},
+      { budgetTokens: 200 },
+    )
+
+    expect(result.sections.map((entry) => entry.id)).toEqual(['core.keep', 'context.memory'])
   })
 
   test('breaks priority ties by the later slot, then the later id', () => {

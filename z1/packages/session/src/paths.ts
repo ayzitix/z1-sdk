@@ -21,6 +21,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -39,6 +40,11 @@ export const META_FILE = 'meta.json'
 export const EVENTS_FILE = 'events.jsonl'
 /** Held (created with `wx`) while a writer mutates one session. */
 export const LOCK_FILE = '.lock'
+
+/** `.trash` entries kept regardless of age. */
+export const TRASH_KEEP = 50
+/** Age after which a `.trash` entry is dropped whatever its position. */
+export const TRASH_KEEP_MS = 30 * 24 * 60 * 60 * 1000
 
 /** Written on create: the transcript is uncommittable by default. */
 const GITIGNORE_CONTENT = '*\n!.gitignore\n'
@@ -107,6 +113,103 @@ export function ensureSessionRoot(root: string): void {
   } catch {
     // A read-only or exotic filesystem may refuse; the caller still gets a root.
   }
+}
+
+/** Options for {@link pruneTrash}; every field has a default. */
+export interface PruneTrashOptions {
+  /**
+   * Entries this call must not delete: a trash entry name, a path inside the
+   * trash, or the session id a `remove` name ends with (`-<id>`). `remove`
+   * passes the entry it has just moved here, because neither the position nor
+   * the age of that entry is trustworthy: on a coarse filesystem, or after a
+   * clock that jumped backwards, its `<stamp>-<id>` name and its mtime both
+   * sort it as the oldest thing in the trash.
+   */
+  protect?: Iterable<string>
+  /** Entries kept regardless of age. Default {@link TRASH_KEEP}. */
+  keep?: number
+  /** Maximum age in milliseconds. Default {@link TRASH_KEEP_MS}. */
+  keepMs?: number
+  /** Clock, injectable for tests. Default `Date.now`. */
+  now?: number
+}
+
+/**
+ * Drop `.trash` entries that fell out of the retention window.
+ *
+ * `remove` is a soft delete — the directory moves instead of disappearing — but
+ * nothing ever emptied `.trash`, so a store used for months grew without a
+ * bound. The window is deliberately modest: the newest {@link TRASH_KEEP}
+ * entries survive for at most {@link TRASH_KEEP_MS}, whichever is reached
+ * first, which is enough to recover a session deleted by mistake. Everything
+ * here is best effort — a missing, unreadable or half-deleted trash is not an
+ * error, because pruning must never make `remove` fail.
+ *
+ * A protected entry is never deleted and still occupies a slot: it displaces
+ * the oldest unprotected entry instead, so the window holds at most `keep`
+ * entries. Age is `now - mtime`, and a negative age — an mtime in the future,
+ * which is what a clock that jumped backwards produces — is fresh, never old.
+ *
+ * Returns the names of the entries it deleted, newest first, for the caller's
+ * log.
+ */
+export function pruneTrash(root: string, options: PruneTrashOptions = {}): readonly string[] {
+  const keep = Math.max(0, Math.floor(options.keep ?? TRASH_KEEP))
+  const keepMs = Math.max(0, options.keepMs ?? TRASH_KEEP_MS)
+  const now = options.now ?? Date.now()
+  const dir = join(root, TRASH_DIR)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return []
+  }
+  const entries: { name: string; mtimeMs: number }[] = []
+  for (const name of names) {
+    try {
+      entries.push({ name, mtimeMs: statSync(join(dir, name)).mtimeMs })
+    } catch {
+      // Vanished between the scan and the stat: nothing left to keep.
+    }
+  }
+  // Newest first, name as the tie-break, so entries written in the same
+  // millisecond are pruned in a stable order.
+  entries.sort((left, right) =>
+    right.mtimeMs === left.mtimeMs
+      ? right.name.localeCompare(left.name)
+      : right.mtimeMs - left.mtimeMs,
+  )
+  const protect = options.protect === undefined ? [] : [...options.protect]
+  const isProtected = (name: string): boolean => {
+    for (const key of protect) {
+      // A name, a path inside this trash, or the session id a `remove` name
+      // ends with. `remove` knows the id, not the `<stamp>-<id>` trash name.
+      if (key === name || key === join(dir, name) || name.endsWith(`-${key}`)) return true
+    }
+    return false
+  }
+  // Protected entries never pay for their own slot: they take one from the
+  // window and push out the oldest unprotected entry instead, so a trash that
+  // was full before the write still ends up holding `keep` entries.
+  let budget = Math.max(0, keep - entries.filter((entry) => isProtected(entry.name)).length)
+  const removed: string[] = []
+  for (const entry of entries) {
+    if (isProtected(entry.name)) continue
+    // A negative age means the mtime is in the future — a clock that jumped
+    // backwards — and such an entry is fresh, never old.
+    const tooOld = now - entry.mtimeMs > keepMs
+    if (!tooOld && budget > 0) {
+      budget -= 1
+      continue
+    }
+    try {
+      rmSync(join(dir, entry.name), { recursive: true, force: true })
+      removed.push(entry.name)
+    } catch {
+      // A Windows handle still holds it; the next prune tries again.
+    }
+  }
+  return removed
 }
 
 /** First ancestor of `cwd` holding `.git`, or `undefined` outside a repo. */

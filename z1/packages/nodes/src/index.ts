@@ -9,6 +9,7 @@ import {
   coreGet,
   coreInput,
   coreLast,
+  coreLastText,
   coreMerge,
   coreMessage,
   coreOutput,
@@ -20,7 +21,7 @@ import { graphNodes, graphSubgraph } from './graph.ts'
 import { llmChat, llmModel, llmNodes } from './llm.ts'
 import { memoryContext, memoryNodes } from './memory.ts'
 import { promptContext, promptNodes, promptSection, promptStack, promptText } from './prompt.ts'
-import { toolCall, toolList, toolNodes } from './tools.ts'
+import { toolBackground, toolCall, toolList, toolNodes } from './tools.ts'
 
 export const PACKAGE = '@z1/nodes'
 
@@ -62,6 +63,7 @@ export {
   coreGet,
   coreInput,
   coreLast,
+  coreLastText,
   coreMerge,
   coreMessage,
   coreOutput,
@@ -86,4 +88,5 @@ export {
   toolNodes,
   toolCall,
   toolList,
+  toolBackground,
 }

@@ -277,6 +277,18 @@ test('unusable database paths fail with a clear message', () => {
   expect(() => new SqliteJournal(join(file, 'runs.db'))).toThrow(/journal: cannot open database/)
 })
 
+test('a file that is not a database is refused with its path', () => {
+  const dir = tempDir()
+  const file = join(dir, 'garbage.db')
+  // SQLite reads the header lazily, so this fails on the constructor's first
+  // statement rather than on `new DatabaseSync`; the message must still name the
+  // file instead of surfacing a bare "file is not a database".
+  writeFileSync(file, 'this is definitely not a sqlite database, at all, no')
+
+  expect(() => new SqliteJournal(file)).toThrow(/journal: cannot open database at /)
+  expect(() => new SqliteJournal(file)).toThrow(/garbage\.db: .*not a database/)
+})
+
 test('close is idempotent and further use is reported', () => {
   const journal = new SqliteJournal(':memory:')
   journal.createRun(run('r1'))

@@ -2,6 +2,8 @@ export const PACKAGE = '@z1/protocol'
 
 export type {
   AppErrorCode,
+  ApprovalAbandonedNotice,
+  ApprovalAbandonedReason,
   ApprovalMode,
   ApprovalRequestParams,
   ApprovalRequestResult,

@@ -191,6 +191,85 @@ describe('checkFsReal', () => {
       false,
     )
   })
+
+  test('`**` grants the module tree and stops at its edge', () => {
+    // A bare `**` has no literal directory to anchor on. It used to fall
+    // through to "capability pattern has no base directory" and deny every
+    // read, so a manifest asking for the whole module got nothing at all.
+    const { moduleDir, outside } = fixture()
+    const broad: ModuleCapabilities = { fs: { read: ['**'], write: ['**'] } }
+
+    expect(checkFsReal(broad, 'read', join(moduleDir, 'data', 'a.txt'), moduleDir)).toEqual({
+      ok: true,
+    })
+    // A write to a not-yet-existing directory is checked through its nearest
+    // existing ancestor, which is the module directory itself.
+    expect(checkFsReal(broad, 'write', join(moduleDir, 'out', 'new.txt'), moduleDir)).toEqual({
+      ok: true,
+    })
+    expect(checkFsReal(broad, 'read', join(outside, 'secret.txt'), moduleDir).ok).toBe(false)
+    expect(checkFsReal(broad, 'write', join(outside, 'new.txt'), moduleDir).ok).toBe(false)
+    // The lexical escape is still rejected, not normalised away.
+    expect(checkFsReal(broad, 'read', 'data/../data/a.txt', moduleDir).ok).toBe(false)
+  })
+
+  test('`**` and `${moduleDir}/**` mean the same tree in either order', () => {
+    const { moduleDir, outside } = fixture()
+    // A `**` at the front of the list used to cancel the patterns behind it:
+    // `anchor()` returned early instead of letting the loop continue.
+    const orders: ModuleCapabilities[] = [
+      { fs: { read: ['**', '${moduleDir}/data/**'] } },
+      { fs: { read: ['${moduleDir}/data/**', '**'] } },
+    ]
+
+    for (const order of orders) {
+      expect(checkFsReal(order, 'read', join(moduleDir, 'data', 'a.txt'), moduleDir)).toEqual({
+        ok: true,
+      })
+      expect(checkFsReal(order, 'read', join(outside, 'secret.txt'), moduleDir).ok).toBe(false)
+    }
+  })
+
+  test('pattern order decides which pattern is tried first, not the verdict', () => {
+    // Two narrow grants with no wide one in sight: the second pattern must get
+    // its turn when the first one does not match.
+    const { moduleDir } = fixture()
+    const narrow: ModuleCapabilities = {
+      fs: { read: ['${moduleDir}/other/**', '${moduleDir}/data/**'] },
+    }
+    expect(checkFsReal(narrow, 'read', join(moduleDir, 'data', 'a.txt'), moduleDir)).toEqual({
+      ok: true,
+    })
+    expect(checkFsReal(narrow, 'read', join(moduleDir, 'secret.txt'), moduleDir).ok).toBe(false)
+  })
+
+  test('a grant reaches a directory spelled with another case on Windows only', () => {
+    const { moduleDir, outside } = fixture()
+    mkdirSync(join(moduleDir, 'sub'))
+    writeFileSync(join(moduleDir, 'sub', 'b.txt'), 'b')
+
+    const capabilities: ModuleCapabilities = { fs: { read: ['${moduleDir}/Sub/**'] } }
+    // Windows compares paths case-insensitively, so the grant and the directory
+    // on disk are the same place; POSIX keeps them apart and must keep denying.
+    const folded = process.platform === 'win32'
+    expect(checkFsReal(capabilities, 'read', join(moduleDir, 'sub', 'b.txt'), moduleDir).ok).toBe(
+      folded,
+    )
+    // The same path spelled the way the grant spells it resolves through the
+    // real directory, which used to be denied for the case alone.
+    expect(checkFsReal(capabilities, 'read', join(moduleDir, 'Sub', 'b.txt'), moduleDir).ok).toBe(
+      folded,
+    )
+
+    // Folding case must not turn containment into a prefix test.
+    expect(
+      checkFsReal(capabilities, 'read', join(moduleDir, 'subset', 'b.txt'), moduleDir).ok,
+    ).toBe(false)
+    expect(checkFsReal(capabilities, 'read', join(outside, 'secret.txt'), moduleDir).ok).toBe(
+      false,
+    )
+    expect(checkFsReal(capabilities, 'read', 'sub/../sub/b.txt', moduleDir).ok).toBe(false)
+  })
 })
 
 describe('checkNet', () => {
@@ -343,6 +422,51 @@ describe('isPrivateAddress', () => {
     expect(classifyNetTarget('239.1.1.1')).toBe('multicast')
     expect(classifyNetTarget('240.0.0.1')).toBe('reserved')
     expect(classifyNetTarget('93.184.216.34')).toBe('public')
+  })
+
+  test('the legacy inet_aton spellings of loopback are private', () => {
+    // `getaddrinfo` and `inet_aton` accept one to four parts, each decimal,
+    // octal or hexadecimal, and every one of these reaches 127.0.0.1. A
+    // classifier that only understood four decimal octets called them public,
+    // so a `net.hosts: ["*"]` grant was allowed to open a local socket.
+    const table: Array<[string, string]> = [
+      ['127.1', 'loopback'],
+      ['127.0.1', 'loopback'],
+      ['0177.0.0.1', 'loopback'],
+      ['0x7f.0.0.1', 'loopback'],
+      ['0X7F.0.0.1', 'loopback'],
+      ['2130706433', 'loopback'],
+      ['0x7f000001', 'loopback'],
+      ['127.0.0.1', 'loopback'],
+      // The wide parser must not swallow ordinary addresses or hostnames.
+      ['8.8.8.8', 'public'],
+      ['134744072', 'public'],
+      ['0x08080808', 'public'],
+      ['4294967296', 'public'],
+      ['127.0.0.1.5', 'public'],
+      ['example.com', 'public'],
+      // The private ranges keep working in the legacy forms too.
+      ['10.1', 'private'],
+      ['192.168.1', 'private'],
+      ['169.254.169.254', 'link-local'],
+      ['0.0.0.0', 'unspecified'],
+      ['::ffff:127.0.0.1', 'loopback'],
+    ]
+    for (const [value, expected] of table) {
+      expect([value, classifyNetTarget(value)]).toEqual([value, expected])
+      expect([value, isPrivateAddress(value)]).toEqual([value, expected !== 'public'])
+    }
+  })
+
+  test('a wildcard grant still cannot reach a legacy loopback spelling', () => {
+    const wildcard: ModuleCapabilities = { net: { hosts: ['*'] } }
+    for (const host of ['127.1', '2130706433', '0x7f.0.0.1', '0177.0.0.1']) {
+      expect([host, checkNetTarget(wildcard, host, [], 80).ok]).toEqual([host, false])
+    }
+    // An explicit entry still grants it, so a module that really talks to a
+    // local service keeps a way to say so.
+    const explicit: ModuleCapabilities = { net: { hosts: ['127.1'] } }
+    expect(checkNetTarget(explicit, '127.1', [], 80)).toEqual({ ok: true })
   })
 
   test('the special-purpose blocks a naive range check calls public', () => {

@@ -20,6 +20,19 @@ function cleanPath(path: string): string {
 }
 
 /**
+ * Fold a path for comparison the way the platform compares it.
+ *
+ * Windows paths are case-insensitive, so a grant spelled `${moduleDir}/Sub/**`
+ * and the real directory `sub` name the same place, and comparing them
+ * literally denied a path the filesystem considers granted. POSIX keeps the two
+ * apart. Only comparisons fold: the paths this module returns, reports and
+ * hands back keep the case the caller or the filesystem used.
+ */
+function foldedPath(path: string): string {
+  return process.platform === 'win32' ? path.toLowerCase() : path
+}
+
+/**
  * Resolve a path or capability pattern to a cleaned POSIX form. `resolve` maps
  * a POSIX-style root (`/**`, `/tmp/**`) to the current drive on Windows and
  * leaves it untouched on POSIX; a `C:/...` path stays on its own drive.
@@ -109,6 +122,10 @@ export function checkFs(
 
   const moduleRoot = absolutePath(moduleDir, process.cwd())
   const target = absolutePath(path, moduleRoot)
+  // Windows compares paths case-insensitively, so the pattern is matched
+  // against the same fold: `Sub/**` names the directory the filesystem also
+  // reports as `sub`. Nothing is rewritten, this is a comparison only.
+  const probe = foldedPath(target)
 
   for (const pattern of patterns) {
     if (pattern.trim().length === 0) continue
@@ -116,7 +133,7 @@ export function checkFs(
 
     const expanded = resolveCapabilityPath(pattern, moduleRoot)
     const absolute = absolutePath(expanded, moduleRoot)
-    if (matchPath(absolute, target)) return { ok: true }
+    if (matchPath(foldedPath(absolute), probe)) return { ok: true }
   }
 
   return deny(`fs.${direction} path is outside the granted patterns: ${target}`)
@@ -159,6 +176,16 @@ function resolveReal(path: string): string | undefined {
  * does not become a grant for the link's destination. Symlinks that stay inside
  * the granted tree remain allowed, and a write to a not-yet-existing file is
  * checked through its nearest existing ancestor.
+ *
+ * A pattern with no literal directory (`**`) is anchored at the module
+ * directory, which is where {@link checkFs} resolves it: `**` and
+ * `${moduleDir}/**` both mean "anywhere inside the module", and neither reaches
+ * outside it. A matching pattern that cannot be anchored is skipped rather than
+ * allowed to cancel the patterns listed after it.
+ *
+ * Both the lexical and the containment comparisons fold case on Windows, where
+ * `${moduleDir}/Sub/**` and the directory `sub` are the same place. The reported
+ * paths keep their own case.
  */
 export function checkFsReal(
   capabilities: ModuleCapabilities | undefined,
@@ -194,7 +221,11 @@ export function checkFsReal(
   const anchor = (pattern: string): string | undefined => {
     const wildcard = pattern.search(/[*?[\]]/)
     const literal = wildcard < 0 ? pattern : pattern.slice(0, pattern.lastIndexOf('/', wildcard) + 1)
-    if (literal.length === 0) return undefined
+    // A pattern with no literal directory at all (`**`, `*`, `*.json`) is
+    // resolved against the module directory by `checkFs`, so its base is the
+    // module directory. Returning `undefined` here is what made a `**` grant
+    // deny every read instead of granting the whole module tree.
+    if (literal.length === 0) return realModuleRoot
 
     const expanded = resolveCapabilityPath(literal, moduleRoot)
     const absolute = absolutePath(expanded, moduleRoot)
@@ -208,20 +239,34 @@ export function checkFsReal(
   }
 
   let denied = `fs.${direction} path resolves outside the granted patterns: ${path}`
+  // The same fold `checkFs` uses: this loop repeats its lexical match, and an
+  // unfolded repeat would deny the path the first pass just allowed.
+  const foldedTargetPath = foldedPath(target)
   for (const pattern of patterns) {
     if (pattern.trim().length === 0 || hasParentSegment(pattern)) continue
 
     const expanded = resolveCapabilityPath(pattern, moduleRoot)
     const absolute = absolutePath(expanded, moduleRoot)
-    if (!matchPath(absolute, target)) continue
+    if (!matchPath(foldedPath(absolute), foldedTargetPath)) continue
 
     const base = anchor(pattern)
-    if (base === undefined) return deny(`capability pattern has no base directory: ${pattern}`)
+    if (base === undefined) {
+      // A matching pattern whose literal base cannot be resolved protects
+      // nothing, but it must not cancel the patterns listed after it: record
+      // why and let a later pattern have its say.
+      denied = `capability pattern has no base directory: ${pattern}`
+      continue
+    }
 
     // A grant anchored at the filesystem root (`/**` -> `/` on POSIX, `C:/` on
     // Windows) has a base that already ends in a slash; do not add another.
-    const prefix = base.endsWith('/') ? base : `${base}/`
-    if (realTarget === base || realTarget.startsWith(prefix)) {
+    // The containment test folds case on Windows, where the base and the real
+    // path differ only by spelling; the boundary itself is still the separator,
+    // so a sibling that merely shares a prefix stays outside.
+    const foldedBase = foldedPath(base)
+    const prefix = foldedBase.endsWith('/') ? foldedBase : `${foldedBase}/`
+    const foldedTarget = foldedPath(realTarget)
+    if (foldedTarget === foldedBase || foldedTarget.startsWith(prefix)) {
       return { ok: true }
     }
     denied = `fs.${direction} path resolves through a symlink outside the granted pattern ${pattern}: ${realTarget}`
@@ -381,6 +426,54 @@ function parseIPv4(value: string): number[] | undefined {
   return octets
 }
 
+/**
+ * One part of a legacy `inet_aton` address: decimal, octal with a leading `0`,
+ * or hexadecimal with `0x`. Anything else returns `undefined`, so a hostname is
+ * never mistaken for an address.
+ */
+function parseLegacyPart(part: string): number | undefined {
+  if (/^0x[0-9a-f]+$/.test(part)) return Number.parseInt(part.slice(2), 16)
+  // `08` and `09` are neither octal nor decimal in `inet_aton`; `0` alone is.
+  if (/^0[0-7]*$/.test(part)) return Number.parseInt(part, 8)
+  if (/^[1-9]\d*$/.test(part)) return Number(part)
+  return undefined
+}
+
+/**
+ * The legacy `inet_aton` IPv4 forms that the C library still accepts: one to
+ * four dot-separated parts, each decimal, octal or hexadecimal, where the last
+ * part fills the bytes the earlier ones left over.
+ *
+ * `parseIPv4` only understands four decimal octets, so `127.1`, `0x7f.0.0.1`,
+ * `0177.0.0.1` and `2130706433` were classified as public hostnames while
+ * `fetch` and `getaddrinfo` connected them to loopback — a wildcard grant
+ * reached a local service. Byte order follows `inet_aton`: one part is the
+ * whole 32-bit value, four parts are four octets.
+ */
+function parseIPv4Legacy(value: string): number[] | undefined {
+  const parts = value.split('.')
+  if (parts.length > 4) return undefined
+  const numbers: number[] = []
+  for (const part of parts) {
+    const parsed = parseLegacyPart(part)
+    if (parsed === undefined) return undefined
+    numbers.push(parsed)
+  }
+  const tail = numbers[numbers.length - 1]
+  if (tail === undefined) return undefined
+  const head = numbers.slice(0, -1)
+  for (const number of head) {
+    if (number > 0xff) return undefined
+  }
+  const tailBytes = 4 - head.length
+  if (tail >= 2 ** (8 * tailBytes)) return undefined
+  const octets = [...head]
+  for (let shift = tailBytes - 1; shift >= 0; shift -= 1) {
+    octets.push((tail >>> (8 * shift)) & 0xff)
+  }
+  return octets
+}
+
 /** Eight hextets, or `undefined` when `value` is not an IPv6 literal. */
 function parseIPv6(value: string): number[] | undefined {
   let text = value
@@ -490,6 +583,10 @@ function classifyIPv6(hextets: readonly number[]): NetAddressClass {
  * Classify one address literal or hostname. Hostnames are only judged on the
  * names that are private by definition (`localhost`, cloud metadata aliases);
  * everything else needs a DNS answer, which is the caller's job.
+ *
+ * Numeric literals include the legacy `inet_aton` spellings ({@link
+ * parseIPv4Legacy}), because `127.1` and `2130706433` are loopback to the
+ * resolver even though they are not four decimal octets.
  */
 export function classifyNetTarget(value: string): NetAddressClass {
   const host = normalizeHost(value)
@@ -497,7 +594,7 @@ export function classifyNetTarget(value: string): NetAddressClass {
   if (host === 'localhost' || host.endsWith('.localhost')) return 'loopback'
   if (METADATA_HOSTNAMES.has(host)) return 'link-local'
 
-  const v4 = parseIPv4(host)
+  const v4 = parseIPv4(host) ?? parseIPv4Legacy(host)
   if (v4 !== undefined) return classifyIPv4(v4)
   const v6 = parseIPv6(host)
   if (v6 !== undefined) return classifyIPv6(v6)

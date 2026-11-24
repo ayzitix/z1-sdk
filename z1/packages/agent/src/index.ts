@@ -436,6 +436,10 @@ export function buildAgentGraph(options: AgentGraphOptions): GraphDocument {
   if (!Number.isInteger(maxSteps) || maxSteps < 1) {
     throw new Error('maxSteps must be >= 1')
   }
+  // A role name is data at the template boundary and a plain string here, so an
+  // unknown one is rejected with the role list instead of failing later on an
+  // undefined section lookup.
+  templateRole(options.role)
   const prompt = promptChain(options)
   // The transcript is data the caller owns, so it is put in the seed here where
   // that node is built, instead of a post-hoc patch of the finished document.

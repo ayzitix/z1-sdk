@@ -213,11 +213,23 @@ export class OpenAiLlmService implements LlmService {
     const accumulator = new ChatAccumulator(onDelta, () => this.nextSyntheticCall())
     let finishReason: string | undefined
     let usage: ChatUsage | undefined
+    // `[DONE]` is the provider's end marker and `finish_reason` is the model's;
+    // a stream that carries neither was cut. Returning what arrived so far would
+    // hand the caller a truncated answer that looks complete.
+    let closed = false
 
     for await (const payload of readSseData(response.body)) {
-      if (payload === '[DONE]') break
+      // Some servers pad the terminator (`data: [DONE] \t`); the padding is not
+      // part of the payload, but everything else must still parse as JSON.
+      if (payload.trimEnd() === '[DONE]') {
+        closed = true
+        break
+      }
+      if (payload.length === 0) continue
       const chunk = parseObject(payload)
-      if (chunk === undefined) continue
+      if (chunk === undefined) {
+        throw new Error('openai-compatible stream sent an event that is not JSON')
+      }
       if (chunk['error'] !== undefined) throw this.streamError(chunk['error'])
       const data = chunk as WireResponse
       const choice = data.choices?.[0]
@@ -227,6 +239,9 @@ export class OpenAiLlmService implements LlmService {
       if (chunkUsage !== undefined) usage = chunkUsage
     }
 
+    if (!closed && finishReason === undefined) {
+      throw new Error('openai-compatible stream ended before completion')
+    }
     return accumulator.finish(finishReason, usage)
   }
 

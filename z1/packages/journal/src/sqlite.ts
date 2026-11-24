@@ -90,15 +90,30 @@ export class SqliteJournal implements Journal, RunJournal {
         cause: error,
       })
     }
-    // WAL turns into 'memory' for :memory:; harmless either way.
-    db.exec('PRAGMA journal_mode = WAL')
-    db.exec('PRAGMA foreign_keys = ON')
-    db.exec('PRAGMA synchronous = NORMAL')
-    // Two processes share the journal (a CLI while `z1 serve` runs, a fork from
-    // the canvas while a run appends). Without a busy handler SQLite fails
-    // `BEGIN IMMEDIATE` instantly instead of waiting for the writer.
-    db.exec('PRAGMA busy_timeout = 5000')
-    db.exec(SCHEMA)
+    // SQLite opens lazily: a file that exists but is not a database is only
+    // discovered here, on the first statement. Report it the same way as every
+    // other open failure — with the path — and close the handle so a rejected
+    // database never holds a lock.
+    try {
+      // WAL turns into 'memory' for :memory:; harmless either way.
+      db.exec('PRAGMA journal_mode = WAL')
+      db.exec('PRAGMA foreign_keys = ON')
+      db.exec('PRAGMA synchronous = NORMAL')
+      // Two processes share the journal (a CLI while `z1 serve` runs, a fork from
+      // the canvas while a run appends). Without a busy handler SQLite fails
+      // `BEGIN IMMEDIATE` instantly instead of waiting for the writer.
+      db.exec('PRAGMA busy_timeout = 5000')
+      db.exec(SCHEMA)
+    } catch (error) {
+      try {
+        db.close()
+      } catch {
+        // Already unusable; the error below is the one worth reporting.
+      }
+      throw new Error(`journal: cannot open database at ${file}: ${describe(error)}`, {
+        cause: error,
+      })
+    }
     this.#db = db
   }
 

@@ -123,6 +123,97 @@ describe('memory pair', () => {
     from.close()
   })
 
+  test('answers every invalid request with -32600 instead of silence', async () => {
+    const [from, to] = createMemoryTransportPair()
+    const peer = new JsonRpcPeer(to)
+    let handled = 0
+    peer.onRequest('initialize', () => {
+      handled += 1
+      return {
+        serverName: 'z1',
+        protocolVersion: '1',
+        capabilities: { runs: false, approvals: false, modules: false },
+      }
+    })
+    const frames: string[] = []
+    from.onMessage((text) => frames.push(text))
+
+    for (const frame of [
+      '{"jsonrpc":"1.0","id":null,"method":"initialize","params":{}}',
+      '{"jsonrpc":"2.0","id":{},"method":"initialize","params":{}}',
+      '{"jsonrpc":"2.0","id":true,"method":"initialize","params":{}}',
+      // `1e999` parses to Infinity, which would be echoed as a `null` id.
+      '{"jsonrpc":"2.0","id":1e999,"method":"initialize","params":{}}',
+    ]) {
+      from.send(frame)
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1))
+
+    // An id that cannot be echoed must not run the method as a notification.
+    expect(handled).toBe(0)
+    const replies = frames.map((text) => JSON.parse(text) as Record<string, unknown>)
+    expect(replies).toHaveLength(4)
+    for (const reply of replies) {
+      expect(reply).toMatchObject({
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: JSON_RPC_ERRORS.invalidRequest },
+      })
+    }
+    peer.close()
+    from.close()
+  })
+
+  test('answers a frame whose method is not a string instead of treating it as a response', async () => {
+    const [from, to] = createMemoryTransportPair()
+    const peer = new JsonRpcPeer(to)
+    let handled = 0
+    peer.onRequest('initialize', () => {
+      handled += 1
+      return {
+        serverName: 'z1',
+        protocolVersion: '1',
+        capabilities: { runs: false, approvals: false, modules: false },
+      }
+    })
+    const frames: string[] = []
+    from.onMessage((text) => frames.push(text))
+
+    from.send('{"jsonrpc":"2.0","id":6,"method":123,"params":{}}')
+    // A real response carries no `method` member at all: an id it does not know
+    // is still ignored, so the two can be told apart.
+    from.send('{"jsonrpc":"2.0","id":99,"result":1}')
+    await new Promise((resolve) => setTimeout(resolve, 1))
+
+    expect(handled).toBe(0)
+    expect(frames).toHaveLength(1)
+    expect(JSON.parse(frames[0] ?? '{}')).toMatchObject({
+      jsonrpc: '2.0',
+      id: 6,
+      error: { code: JSON_RPC_ERRORS.invalidRequest, message: 'invalid request: method must be a string' },
+    })
+    peer.close()
+    from.close()
+  })
+
+  test('echoes a usable id when only the version is wrong', async () => {
+    const [from, to] = createMemoryTransportPair()
+    const peer = new JsonRpcPeer(to)
+    const frames: string[] = []
+    from.onMessage((text) => frames.push(text))
+    from.send('{"jsonrpc":"1.0","id":7,"method":"initialize","params":{}}')
+
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    expect(frames).toHaveLength(1)
+    expect(JSON.parse(frames[0] ?? '{}')).toMatchObject({
+      jsonrpc: '2.0',
+      id: 7,
+      error: { code: JSON_RPC_ERRORS.invalidRequest },
+    })
+    peer.close()
+    from.close()
+  })
+
   test('times out a request when no response ever arrives', async () => {
     const silent: Transport = {
       send: () => {},

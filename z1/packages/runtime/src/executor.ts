@@ -618,7 +618,17 @@ async function runNode(input: NodeRunInput): Promise<NodeOutcome> {
             ),
           }
         }
-        // `onTimeout: 'approve'` is a deliberate allowed-once.
+        // `onTimeout: 'approve'` is a deliberate allowed-once, so it is a
+        // decision like any other and the journal has to say so: a requested
+        // approval with no decision reads back as "still waiting", and a replay
+        // would treat this node as pending instead of as allowed.
+        await deliver(context, {
+          type: 'approval.decided',
+          runId: context.runId,
+          nodeId: input.node.id,
+          path,
+          decision: 'allowed-once',
+        })
       } else {
         if (outcome.decision === 'cancelled') return { kind: 'cancelled' }
         if (outcome.decision === 'rejected') {

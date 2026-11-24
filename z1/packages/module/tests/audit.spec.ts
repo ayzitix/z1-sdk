@@ -83,4 +83,26 @@ describe('AuditLog', () => {
     writeFileSync(broken, `${JSON.stringify(raw)}\n`)
     expect(() => log.read()).toThrow(AuditChainError)
   })
+
+  test('does not detect tail truncation without an external anchor', () => {
+    // Pinned on purpose, not a gap to close here: the chain links each entry to
+    // the one before it, so a shorter chain is still internally consistent and
+    // no file can prove how many entries it used to hold. See the note at the
+    // top of `src/audit.ts`. Detecting this needs a head hash recorded outside
+    // the store, which does not exist yet.
+    const file = logFile()
+    const log = new AuditLog(file)
+    for (const type of ['propose', 'approve', 'install', 'activate'] as const) {
+      log.append({ type, moduleId: 'com.example.echo', version: '1.0.0' })
+    }
+
+    const lines = readFileSync(file, 'utf8').trimEnd().split('\n')
+    writeFileSync(file, `${lines.slice(0, 2).join('\n')}\n`)
+
+    const truncated = log.read()
+    expect(truncated).toHaveLength(2)
+    expect(truncated.map((entry) => entry.type)).toEqual(['propose', 'approve'])
+    // The surviving prefix still verifies, which is exactly the limitation.
+    expect(truncated[1]?.prev).toBe(truncated[0]?.hash)
+  })
 })

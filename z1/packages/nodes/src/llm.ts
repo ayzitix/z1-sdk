@@ -94,11 +94,18 @@ function toToolSchemas(value: Json | undefined): ToolSchema[] {
 function toChatMessages(value: Json | undefined): ChatMessage[] {
   if (!Array.isArray(value)) return []
   const messages: ChatMessage[] = []
-  for (const entry of value) {
+  for (const [index, entry] of value.entries()) {
     if (!isRecord(entry)) continue
     const role = entry['role']
     const content = entry['content']
-    if (typeof content !== 'string') continue
+    // Dropping a message here would hand the provider a broken transcript - an
+    // orphan `tool` result, a lost user turn - and the run would still report
+    // success. Name the entry instead.
+    if (typeof content !== 'string') {
+      throw new Error(
+        `z1.llm.chat: message content must be a string (role '${String(role)}', index ${String(index)})`,
+      )
+    }
     if (role !== 'system' && role !== 'user' && role !== 'assistant' && role !== 'tool') continue
 
     const message: ChatMessage = { role, content }

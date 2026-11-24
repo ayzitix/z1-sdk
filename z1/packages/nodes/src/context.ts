@@ -171,6 +171,13 @@ function safeSegment(value: string, fallback: string): string {
  */
 const MARKER_SENTINEL = '\u2063'
 
+/**
+ * The notice without its numbers, for a cap too small to hold the full one.
+ * `value` still has to fit `maxChars`, and a cut with no visible marker at all
+ * would read as a short tool result.
+ */
+const MARKER_SHORT = '… [z1: clipped] …'
+
 /** Cut at a code-point boundary, so a surrogate pair is never split. */
 function headEnd(text: string, index: number): number {
   if (index <= 0) return 0
@@ -304,7 +311,20 @@ const clip = defineNode({
     const headCut = headEnd(text, headChars)
     const tailCut = tailStart(text, text.length - tailChars)
     const finalMarker = `\n${MARKER_SENTINEL}… [z1: clipped ${String(text.length)} chars, ${String(text.length - headCut - (text.length - tailCut))} omitted${where}] …${MARKER_SENTINEL}\n`
-    const clipped = text.slice(0, headCut) + finalMarker + text.slice(tailCut)
+    let clipped = text.slice(0, headCut) + finalMarker + text.slice(tailCut)
+
+    // A cap smaller than the numbered notice cannot hold it: fall back to the
+    // short marker, then to its prefix, so `maxChars` is honoured at every size
+    // and the result never grows past the cap it was asked to respect.
+    if (clipped.length > ctx.config.maxChars) {
+      const shortHead = text.slice(0, headEnd(text, 1))
+      const shortTail = text.slice(tailStart(text, text.length - 1))
+      const short = shortHead + `\n${MARKER_SENTINEL}${MARKER_SHORT}${MARKER_SENTINEL}\n` + shortTail
+      clipped =
+        short.length <= ctx.config.maxChars
+          ? short
+          : MARKER_SHORT.slice(0, ctx.config.maxChars)
+    }
 
     return {
       value: clipped,
@@ -321,6 +341,14 @@ const SUMMARY_OPEN = '<compacted-summary>'
 const SUMMARY_CLOSE = '</compacted-summary>'
 
 /**
+ * The first heading the directive mandates. It shapes the summary, but it is
+ * not a tag: a model may reword it, so a current record is not identified by it.
+ * It stays here because a checkpoint written before `CHECKPOINT_MARKER` existed
+ * always carried it, and that older shape is still recognised.
+ */
+const CHECKPOINT_HEADING = '## Primary Request and Intent'
+
+/**
  * The summarization directive, appended as the final user message.
  *
  * Replaying the real conversation before it (rather than using a separate
@@ -333,7 +361,7 @@ const COMPACTION_INSTRUCTION = [
   '',
   'Output EXACTLY this Markdown structure, every section, in order. Terse bullets, no prose. Write "(none)" for an empty section; never omit one.',
   '',
-  '## Primary Request and Intent',
+  CHECKPOINT_HEADING,
   "- [the original and evolving goals; quote the user's exact wording where it matters]",
   '',
   '## Key Technical Concepts',
@@ -368,6 +396,24 @@ const COMPACTION_INSTRUCTION = [
 const CHECKPOINT_PREAMBLE =
   'This is an automatically generated checkpoint condensing an earlier span of the conversation to free context. Treat it as established background and build on it without restating it. Continue from the messages that follow.'
 
+/**
+ * The exact prefix of a checkpoint this node writes: the preamble, then the
+ * block that carries the summary. Writer and detector share it, so a message
+ * that merely repeats the preamble - or quotes the marker later in its body -
+ * can never pass for one of ours.
+ */
+const CHECKPOINT_OPEN = `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN}`
+
+/**
+ * An opaque tag the writer adds to every checkpoint.
+ *
+ * The body is the model's own text, so no phrase in it can identify the
+ * message: a reworded heading would make the node fail to recognise its own
+ * output and `maxCompactions` would stop working. This tag is written by the
+ * node, never by the model, so it is always there.
+ */
+const CHECKPOINT_MARKER = '<!-- z1 checkpoint -->'
+
 function messageText(message: Json): string {
   if (!isRecord(message)) return ''
   const content = message['content']
@@ -379,6 +425,30 @@ function messageText(message: Json): string {
 
 function isToolResult(message: Json): boolean {
   return isRecord(message) && message['role'] === 'tool'
+}
+
+/**
+ * Whether a message is a checkpoint this node wrote.
+ *
+ * The whole wrapper counts, not just its opening: the preamble with the block
+ * that follows it, the tag the writer adds, and the closing tag. A tool result,
+ * a spilled file or a user turn may quote any part of that text (this package's
+ * own source carries all of it), so a match on a prefix alone would let an
+ * accidental copy fill `maxCompactions` and stop compaction.
+ *
+ * A determined forgery that reproduces the wrapper still passes. That is the
+ * deliberate limit: the tag is not a signature, and a message in the context
+ * cannot be told from a hand-written copy of one. The cost of the mistake is one
+ * summary call rather than a lost transcript.
+ */
+function isCheckpoint(message: Json): boolean {
+  if (!isRecord(message) || message['role'] !== 'user') return false
+  const content = message['content']
+  if (typeof content !== 'string') return false
+  if (!content.startsWith(CHECKPOINT_OPEN) || !content.endsWith(SUMMARY_CLOSE)) return false
+  // A checkpoint written before the tag existed carried the mandated heading
+  // instead, so it still counts and a resumed run keeps its cap after upgrade.
+  return content.includes(CHECKPOINT_MARKER) || content.includes(CHECKPOINT_HEADING)
 }
 
 /**
@@ -522,9 +592,7 @@ const summarize = defineNode({
       out: true,
     }
 
-    const checkpoints = messages.filter(
-      (message) => isRecord(message) && messageText(message).includes(SUMMARY_OPEN),
-    ).length
+    const checkpoints = messages.filter(isCheckpoint).length
     if (checkpoints >= ctx.config.maxCompactions) {
       // Without a cap a transcript that stays over budget re-summarises on every
       // iteration, paying for a call that cannot help.
@@ -603,7 +671,7 @@ const summarize = defineNode({
 
     const checkpoint: Json = {
       role: 'user',
-      content: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN}\n${text}\n${SUMMARY_CLOSE}`,
+      content: `${CHECKPOINT_OPEN}\n${CHECKPOINT_MARKER}\n${text}\n${SUMMARY_CLOSE}`,
     }
     const next = [...(head === undefined ? [] : [head]), checkpoint, ...tail]
     const after = estimateMessages(next, 4)

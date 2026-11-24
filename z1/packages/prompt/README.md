@@ -52,9 +52,14 @@ const prompt = buildPrompt({
 ## Budget
 
 `tokens` is `ceil(chars / 4)` per section. Over `budgetTokens` (default 6000),
-optional sections are dropped from the lowest priority upward — ties drop the
-later slot, then the later id. `required` sections are never dropped; if they
-alone exceed the budget the stack renders anyway and reports the real total.
+optional sections are dropped from the highest priority downward — ties drop the
+later slot, then the later id. That is the end of the prompt: a caller-supplied
+section (an override, `custom.instructions`) is the first casualty, because it is
+the least trusted part of the stack and must not survive at the expense of the
+defaults it was meant to adjust. A caller that must have its instructions kept
+needs a budget that already fits the core plus them; the stack never trades a
+core rule for an override. `required` sections are never dropped; if they alone
+exceed the budget the stack renders anyway and reports the real total.
 
 ## Hash
 

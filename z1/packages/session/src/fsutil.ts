@@ -28,6 +28,39 @@ import { dirname } from 'node:path'
 const DIR_MODE = 0o700
 const FILE_MODE = 0o600
 
+/** Tries a rename gets before it is reported, and the pause between them. */
+const WRITE_ATTEMPTS = 3
+const WRITE_RETRY_MS = 20
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Rename, retrying the codes Windows reports while another process still holds
+ * the source or the destination open (`EPERM`, `EBUSY`, `ENOTEMPTY`).
+ *
+ * `fail` builds the error a caller wants once every attempt was used, so each
+ * caller can name what it was doing; the retry policy itself lives here, once.
+ */
+export function renameWithRetry(
+  from: string,
+  to: string,
+  fail: (attempts: number, cause: unknown) => Error,
+): void {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'ENOTEMPTY'
+      if (!retryable || attempt >= WRITE_ATTEMPTS) throw fail(attempt, error)
+      sleepSync(WRITE_RETRY_MS)
+    }
+  }
+}
+
 /** Best-effort directory fsync: makes a rename/new dirent durable on power loss. */
 function fsyncDir(dir: string): void {
   let fd: number | undefined
@@ -44,6 +77,14 @@ function fsyncDir(dir: string): void {
 /**
  * Write `data` so a reader sees either the old file or the new one: temp file
  * in the same directory, fsync, rename.
+ *
+ * The rename is retried briefly. On Windows a replace fails with `EPERM`/`EBUSY`
+ * for as long as another process holds the destination open, so a reader that
+ * is merely slower than this writer (or an antivirus scanning the fresh temp
+ * file) used to fail a write that would have succeeded a moment later. A
+ * failure that survives the retries is reported with the path and the cause: a
+ * bare `rename` error names only the temp file and hides which transcript was
+ * being replaced.
  */
 export function writeFileAtomic(file: string, data: string): void {
   mkdirSync(dirname(file), { recursive: true, mode: DIR_MODE })
@@ -55,7 +96,27 @@ export function writeFileAtomic(file: string, data: string): void {
   } finally {
     closeSync(fd)
   }
-  renameSync(temporary, file)
+  try {
+    renameWithRetry(
+      temporary,
+      file,
+      (attempts, cause) =>
+        new Error(
+          `session: could not acquire ${file} for an atomic write after ` +
+            `${String(attempts)} attempt${attempts === 1 ? '' : 's'}: ${describe(cause)}`,
+          { cause },
+        ),
+    )
+  } catch (error) {
+    // The temp file is this writer's own litter; never leave it behind for the
+    // next reader to mistake for a transcript.
+    try {
+      unlinkSync(temporary)
+    } catch {
+      // Already gone, or a filesystem that refuses the cleanup too.
+    }
+    throw error
+  }
   fsyncDir(dirname(file))
 }
 

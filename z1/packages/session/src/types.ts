@@ -141,7 +141,12 @@ export interface SessionStore {
   setMeta(id: string, patch: SessionMetaPatch): void
   rename(id: string, name: string): void
   archive(id: string, archived: boolean): void
-  /** Moves the session directory to `.trash/<timestamp>-<id>`; never deletes. */
+  /**
+   * Moves the session directory to `.trash/<timestamp>-<id>`; the entry itself
+   * is kept until it falls out of the trash retention window (`pruneTrash`,
+   * applied on `remove` and on opening a store), so a mistaken delete stays
+   * recoverable for a while.
+   */
   remove(id: string): void
   latest(): SessionSummary | undefined
   setCurrent(id: string): void

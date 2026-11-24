@@ -330,6 +330,64 @@ describe('z1.llm nodes', () => {
     expect(services.lastChatRequest?.tools).toEqual(tools)
   })
 
+  test('fails clearly when message content is not a string', async () => {
+    const messages = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: null, toolCalls: [{ id: 'c1', name: 'read', arguments: {} }] },
+      { role: 'tool', toolCallId: 'c1', content: '{"ok":true}' },
+    ]
+    const graph = makeGraph(
+      'chat-null-content',
+      [
+        graphNode('model1', 'z1.llm.model', { provider: 'mock', model: 'mock-1' }),
+        graphNode('msgs', 'z1.core.const', { value: messages }),
+        graphNode('chat1', 'z1.llm.chat'),
+        graphNode('out1', 'z1.core.output'),
+      ],
+      [
+        dataEdge('d1', 'model1', 'model', 'chat1', 'model'),
+        dataEdge('d2', 'msgs', 'value', 'chat1', 'messages'),
+        dataEdge('d3', 'chat1', 'text', 'out1', 'value'),
+      ],
+    )
+
+    const { result, services } = await runBuiltins({ graph })
+
+    // Dropping the message would have sent the tool result without the call it
+    // answers, and the run would still have reported success.
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain(
+      "z1.llm.chat: message content must be a string (role 'assistant', index 2)",
+    )
+    expect(services.chatCalls).toHaveLength(0)
+  })
+
+  test('rejects multimodal content parts, which the messages schema does not carry', async () => {
+    const graph = makeGraph(
+      'chat-parts',
+      [
+        graphNode('model1', 'z1.llm.model', { provider: 'mock', model: 'mock-1' }),
+        graphNode('msgs', 'z1.core.const', {
+          value: [{ role: 'user', content: [{ type: 'text', text: 'multimodal' }] }],
+        }),
+        graphNode('chat1', 'z1.llm.chat'),
+        graphNode('out1', 'z1.core.output'),
+      ],
+      [
+        dataEdge('d1', 'model1', 'model', 'chat1', 'model'),
+        dataEdge('d2', 'msgs', 'value', 'chat1', 'messages'),
+        dataEdge('d3', 'chat1', 'text', 'out1', 'value'),
+      ],
+    )
+
+    const { result, services } = await runBuiltins({ graph })
+
+    expect(result.status).toBe('failed')
+    expect(result.error).toContain("message content must be a string (role 'user', index 0)")
+    expect(services.chatCalls).toHaveLength(0)
+  })
+
   test('omits tools when no port is connected', async () => {
     const graph = makeGraph(
       'chat-no-tools',

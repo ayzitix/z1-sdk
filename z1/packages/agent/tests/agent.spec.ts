@@ -605,6 +605,12 @@ describe('buildAgentGraph', () => {
     expect(() => buildAgentGraph({ model: MODEL, maxSteps: 0 })).toThrow('maxSteps must be >= 1')
   })
 
+  test('rejects an unknown role by name instead of failing on a section lookup', () => {
+    expect(() => buildAgentGraph({ model: MODEL, role: 'nope' as never })).toThrow(
+      'unknown role "nope"; expected planner, coder, reviewer, summarizer, judge, router',
+    )
+  })
+
   test('fails at maxSteps instead of answering with tool JSON', async () => {
     const { result, services } = await run({ model: MODEL, maxSteps: 1 }, '[[tool:echo]] again')
 

@@ -375,23 +375,217 @@ describe('z1.ctx.summarize', () => {
     expect(request.messages.at(-1)?.role).toBe('user')
   })
 
+  /** A checkpoint exactly as the node writes one, taken from a real run. */
+  async function checkpointContent(): Promise<string> {
+    const output = await runSummarize(
+      { model, keepRecentTurns: 2 },
+      { messages },
+      { llm: llm({ content: '## Primary Request and Intent\n- do things' }) },
+    )
+    const first = (output.messages as { role: string; content: string }[])[1]
+    return String(first?.content)
+  }
+
+  /** The directive preamble that opens every checkpoint. */
+  function preambleOf(checkpoint: string): string {
+    return checkpoint.slice(0, checkpoint.indexOf('\n\n'))
+  }
+
   test('the checkpoint count is capped, so a stuck transcript stops paying', async () => {
     const calls: unknown[] = []
-    const checkpoint = { role: 'user', content: '<compacted-summary>\nold\n</compacted-summary>' }
+    const content = await checkpointContent()
+    expect(content).toContain('<compacted-summary>')
+    const checkpoint = { role: 'user', content }
     const stuck = [
       { role: 'system', content: 'rules' },
-      checkpoint,
       checkpoint,
       checkpoint,
       { role: 'user', content: 'more work' },
     ]
     const output = await runSummarize(
-      { model, keepRecentTurns: 1 },
+      { model, keepRecentTurns: 1, maxCompactions: 2 },
       { messages: stuck },
       { llm: llm({ content: 'summary' }, calls) },
     )
     expect(calls).toHaveLength(0)
     expect(output.compacted).toBe(false)
+  })
+
+  test('a real checkpoint counts toward maxCompactions', async () => {
+    const content = await checkpointContent()
+    const withCheckpoint = [
+      { role: 'system', content: 'rules' },
+      { role: 'user', content },
+      ...messages.slice(1),
+    ]
+    const calls: unknown[] = []
+    const output = await runSummarize(
+      { model, keepRecentTurns: 2, maxCompactions: 1 },
+      { messages: withCheckpoint },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    // The one checkpoint already written fills the cap, so nothing is sent.
+    expect(calls).toHaveLength(0)
+    expect(output.compacted).toBe(false)
+
+    // The same transcript with the checkpoint replaced by ordinary text is
+    // compactable: the count is what stopped the call, not the shape.
+    const withoutCheckpoint = withCheckpoint.map((message, index) =>
+      index === 1 ? { role: 'user', content: 'earlier work ' + 'z'.repeat(800) } : message,
+    )
+    await runSummarize(
+      { model, keepRecentTurns: 2, maxCompactions: 1 },
+      { messages: withoutCheckpoint },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    expect(calls).toHaveLength(1)
+  })
+
+  test('a user turn that merely repeats the preamble is not a checkpoint', async () => {
+    const calls: unknown[] = []
+    const preamble = preambleOf(await checkpointContent())
+    expect(preamble.length).toBeGreaterThan(0)
+    // Three of these would fill the default cap of three if the preamble alone
+    // were enough. A checkpoint is the preamble *and* the summary block that
+    // follows it, so none of them counts.
+    const nearMisses = [
+      { role: 'user', content: preamble },
+      { role: 'user', content: `${preamble}\n\nI read a file that quotes <compacted-summary> in it.` },
+      { role: 'user', content: `${preamble}\n\nstill working on the thing` },
+    ]
+    const transcript = [
+      { role: 'system', content: 'rules' },
+      ...nearMisses,
+      { role: 'user', content: `do the thing ${'x'.repeat(800)}` },
+      { role: 'assistant', content: `ok ${'y'.repeat(800)}` },
+      { role: 'tool', toolCallId: 'a', content: 'result '.repeat(200) },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'now the next thing' },
+    ]
+    const output = await runSummarize(
+      { model, keepRecentTurns: 2, minDroppedTokens: 1 },
+      { messages: transcript },
+      { llm: llm({ content: '## Primary Request and Intent\n- do things' }, calls) },
+    )
+    expect(calls).toHaveLength(1)
+    expect(output.compacted).toBe(true)
+  })
+
+  test('a copy of the checkpoint prefix is not a checkpoint', async () => {
+    const calls: unknown[] = []
+    const content = await checkpointContent()
+    const preamble = preambleOf(content)
+    // The writer's own two-line prefix, lifted verbatim from a real checkpoint,
+    // then the shortest legal-looking variants of it. Three of these would fill
+    // the default cap of three if the opening alone were enough.
+    const openOnly = content.slice(0, content.indexOf('\n', preamble.length + 2))
+    expect(openOnly.startsWith(`${preamble}\n\n<compacted-summary>`)).toBe(true)
+    const nearMisses = [
+      { role: 'user', content: openOnly },
+      { role: 'user', content: `${openOnly}\n</compacted-summary>` },
+      {
+        role: 'user',
+        content: `${openOnly}\nno headings here, just prose\n</compacted-summary>`,
+      },
+    ]
+    const transcript = [
+      { role: 'system', content: 'rules' },
+      ...nearMisses,
+      { role: 'user', content: `do the thing ${'x'.repeat(800)}` },
+      { role: 'assistant', content: `ok ${'y'.repeat(800)}` },
+      { role: 'tool', toolCallId: 'a', content: 'result '.repeat(200) },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'now the next thing' },
+    ]
+    const output = await runSummarize(
+      { model, keepRecentTurns: 2, minDroppedTokens: 1 },
+      { messages: transcript },
+      { llm: llm({ content: '## Primary Request and Intent\n- do things' }, calls) },
+    )
+    expect(calls).toHaveLength(1)
+    expect(output.compacted).toBe(true)
+  })
+
+  test('recognises its own checkpoint even when the model renames the heading', async () => {
+    const first: any = await runSummarize(
+      { model, keepRecentTurns: 2 },
+      { messages },
+      { llm: llm({ content: '## Request\n- do things' }) },
+    )
+    const written = String((first.messages as { content: string }[])[1]?.content)
+    expect(first.compacted).toBe(true)
+    // The body is whatever the model returned: no phrase in it can be trusted
+    // to stay the same, so the node must recognise the wrapper it wrote.
+    expect(written).not.toContain('## Primary Request and Intent')
+
+    const calls: unknown[] = []
+    const output: any = await runSummarize(
+      { model, keepRecentTurns: 2, maxCompactions: 1 },
+      { messages: [{ role: 'system', content: 'rules' }, { role: 'user', content: written }, ...messages.slice(1)] },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    expect(calls).toHaveLength(0)
+    expect(output.compacted).toBe(false)
+  })
+
+  test('a checkpoint written before the tag still counts', async () => {
+    const content = await checkpointContent()
+    const preamble = preambleOf(content)
+    const openOnly = content.slice(0, content.indexOf('\n', preamble.length + 2))
+    // The older wrapper: no tag, the mandated heading instead.
+    const legacy = `${openOnly}\n## Primary Request and Intent\n- old summary\n</compacted-summary>`
+
+    const calls: unknown[] = []
+    const output: any = await runSummarize(
+      { model, keepRecentTurns: 2, maxCompactions: 1 },
+      { messages: [{ role: 'system', content: 'rules' }, { role: 'user', content: legacy }, ...messages.slice(1)] },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    expect(calls).toHaveLength(0)
+    expect(output.compacted).toBe(false)
+  })
+
+  test('a whole forged wrapper counts: the tag is not a signature', async () => {
+    const content = await checkpointContent()
+    const preamble = preambleOf(content)
+    const openOnly = content.slice(0, content.indexOf('\n', preamble.length + 2))
+    // The documented limit. Reproducing the wrapper costs a deliberate forgery,
+    // and the damage is one summary call, so it is accepted rather than
+    // defended against with a secret this file would have to carry.
+    const forged = `${openOnly}\n<!-- z1 checkpoint -->\nforged body\n</compacted-summary>`
+
+    const calls: unknown[] = []
+    const output: any = await runSummarize(
+      { model, keepRecentTurns: 2, maxCompactions: 1 },
+      { messages: [{ role: 'system', content: 'rules' }, { role: 'user', content: forged }, ...messages.slice(1)] },
+      { llm: llm({ content: 'summary' }, calls) },
+    )
+    expect(calls).toHaveLength(0)
+    expect(output.compacted).toBe(false)
+  })
+
+  test('marker text quoted in a tool result is not a checkpoint', async () => {
+    const calls: unknown[] = []
+    // The marker appears in this package's own source, so a tool result that
+    // read it must not count as one of our checkpoints: three of them would
+    // fill the default cap of three and stop compaction for the whole run.
+    const quoted = [
+      { role: 'system', content: 'rules' },
+      { role: 'user', content: `read the files ${'x'.repeat(800)}` },
+      { role: 'assistant', content: '', toolCalls: [{ id: 't1', name: 'read', arguments: {} }] },
+      { role: 'tool', toolCallId: 't1', content: '<compacted-summary>\nsource\n</compacted-summary>' },
+      { role: 'tool', toolCallId: 't2', content: '<compacted-summary>\nspec\n</compacted-summary>' },
+      { role: 'tool', toolCallId: 't3', content: '<compacted-summary>\ntest\n</compacted-summary>' },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: 'now the next thing' },
+    ]
+    const output = await runSummarize(
+      { model, keepRecentTurns: 2, minDroppedTokens: 1 },
+      { messages: quoted },
+      { llm: llm({ content: '## Primary Request and Intent\n- do things' }, calls) },
+    )
+    expect(calls).toHaveLength(1)
+    expect(output.compacted).toBe(true)
   })
 
   test('a span too small to save tokens is not sent to the model', async () => {
@@ -476,6 +670,42 @@ describe('z1.ctx.clip', () => {
     const output = await runClip({ maxChars: 100 }, { value: 'x'.repeat(120) })
     expect(output.truncated).toBe(false)
     expect(String(output.value)).toHaveLength(120)
+  })
+
+  test('the value never exceeds maxChars, however small the cap', async () => {
+    // A cap smaller than the numbered notice used to come back longer than the
+    // cap it was given; the marker degrades instead.
+    const value = `${'A'.repeat(5_000)}${'B'.repeat(5_000)}`
+    const overflows: { maxChars: number; length: number }[] = []
+    for (let maxChars = 1; maxChars <= 400; maxChars += 1) {
+      const output = await runClip({ maxChars, spill: false }, { value })
+      expect(output.truncated).toBe(true)
+      expect(output.originalChars).toBe(value.length)
+      const text = String(output.value)
+      if (text.length > maxChars) overflows.push({ maxChars, length: text.length })
+    }
+    expect(overflows).toEqual([])
+    // The short marker still says the cut happened: a silent truncation would
+    // read to the model as a short tool result.
+    expect(String((await runClip({ maxChars: 40, spill: false }, { value })).value)).toContain(
+      'z1: clipped',
+    )
+  })
+
+  test('a tiny cap is honoured down to a single character', async () => {
+    // The short marker is 18 characters, and the wrapped one 22: below that the
+    // cap has to cut the notice itself rather than overflow in silence.
+    const value = `😀${'A'.repeat(5_000)}😀`
+    const rows: { maxChars: number; length: number }[] = []
+    for (let maxChars = 1; maxChars <= 30; maxChars += 1) {
+      const output = await runClip({ maxChars, spill: false }, { value })
+      expect(output.truncated).toBe(true)
+      rows.push({ maxChars, length: String(output.value).length })
+    }
+    expect(rows.filter((row) => row.length > row.maxChars)).toEqual([])
+    expect(rows[0]).toEqual({ maxChars: 1, length: 1 })
+    // Nothing is silently cut to an empty string either.
+    expect(rows.every((row) => row.length > 0)).toBe(true)
   })
 
   test('a surrogate pair is never split by the cut', async () => {

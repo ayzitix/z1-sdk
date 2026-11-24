@@ -94,9 +94,13 @@ function resolveBudget(options: StackOptions | undefined): number {
 }
 
 /**
- * Drops optional sections, least valuable first: lowest priority, then latest
- * slot, then latest id. Required sections are never candidates, so a stack made
- * only of required sections can legitimately exceed its budget.
+ * Drops optional sections from the highest priority downward, then the latest
+ * slot, then the latest id. That is the end of the prompt, the least trusted
+ * part of the stack: a caller-supplied section (an override, `custom.instructions`)
+ * is dropped before the defaults it was meant to adjust, so a budget cut never
+ * silently discards the rules a run was built on. Required sections are never
+ * candidates, so a stack made only of required sections can legitimately exceed
+ * its budget.
  */
 function applyBudget(sections: readonly StackedSection[], budget: number): StackedSection[] {
   let total = sections.reduce((sum, section) => sum + section.tokens, 0)

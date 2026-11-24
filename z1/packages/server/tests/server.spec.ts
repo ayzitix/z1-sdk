@@ -9,6 +9,7 @@ import {
   APP_ERRORS,
   JsonRpcPeer,
   type ApprovalRequestParams,
+  type ApprovalRequestResult,
   type NotificationMap,
   type SequencedEvent,
 } from '@z1/protocol'
@@ -60,6 +61,68 @@ async function connect(server: Z1Server): Promise<JsonRpcPeer> {
   peers.push(peer)
   await peer.request('initialize', { clientName: 'server-test' })
   return peer
+}
+
+/**
+ * The shipped client, plus every `approval/request` frame it was asked with.
+ *
+ * The id of a repeat is only visible on the wire: a `JsonRpcPeer` exposes the
+ * params of an inbound request, not the frame it arrived in.
+ */
+async function connectRecorded(server: Z1Server): Promise<{
+  peer: JsonRpcPeer
+  approvals: Array<Record<string, unknown>>
+}> {
+  const socket = new WebSocket(`${server.url}/ws?token=${server.token}`)
+  const approvals: Array<Record<string, unknown>> = []
+  socket.on('message', (data) => {
+    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data)
+    const frame = JSON.parse(text) as Record<string, unknown>
+    if (frame['method'] === 'approval/request') approvals.push(frame)
+  })
+  await openSocket(socket)
+  const peer = new JsonRpcPeer(new SocketTransport(socket), { requestTimeoutMs: 5_000 })
+  peers.push(peer)
+  await peer.request('initialize', { clientName: 'recorded' })
+  return { peer, approvals }
+}
+
+/**
+ * A client that speaks raw frames.
+ *
+ * A `JsonRpcPeer` drops an error for an id it is not waiting for, and the server
+ * refuses an unusable `approval/request` reply exactly that way, so the refusal
+ * is only observable on the wire.
+ */
+async function rawClient(server: Z1Server): Promise<{
+  frames: Array<Record<string, unknown>>
+  send: (frame: unknown) => void
+  waitFor: (
+    predicate: (frame: Record<string, unknown>) => boolean,
+    what: string,
+  ) => Promise<Record<string, unknown>>
+  close: () => void
+}> {
+  const socket = new WebSocket(`${server.url}/ws?token=${server.token}`)
+  await openSocket(socket)
+  const frames: Array<Record<string, unknown>> = []
+  socket.on('message', (data) => {
+    const text = Buffer.isBuffer(data) ? data.toString('utf8') : String(data)
+    frames.push(JSON.parse(text) as Record<string, unknown>)
+  })
+  return {
+    frames,
+    send: (frame) => socket.send(JSON.stringify(frame)),
+    async waitFor(predicate, what) {
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        const hit = frames.find(predicate)
+        if (hit !== undefined) return hit
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      throw new Error(`timed out waiting for ${what}`)
+    },
+    close: () => socket.close(),
+  }
 }
 
 interface NodeJson {
@@ -317,6 +380,213 @@ test('an approved node runs after approval/request is answered', async () => {
   ).rejects.toMatchObject({ code: 1003 })
 })
 
+test('an unusable approval reply is asked again and the client can answer', async () => {
+  const { server } = await makeServer()
+  const { peer, approvals } = await connectRecorded(server)
+
+  let answers = 0
+  peer.onRequest('approval/request', () => {
+    answers += 1
+    // The shipped peer sends whatever the handler returns: `null` is a legal
+    // JSON-RPC result and an illegal decision.
+    return (answers === 1 ? null : { decision: 'rejected' }) as ApprovalRequestResult
+  })
+
+  const reply = await peer.request('run.start', { graph: helloGraph({ mode: 'ask' }) })
+
+  expect(reply.status).toBe('failed')
+  expect(reply.error).toContain('APPROVAL_REJECTED')
+  // The refusal alone is invisible to this client: only a second request is.
+  expect(answers).toBe(2)
+  expect(approvals).toHaveLength(2)
+  expect(approvals[1]?.['id']).not.toBe(approvals[0]?.['id'])
+  const first = approvals[0]?.['params'] as ApprovalRequestParams
+  const second = approvals[1]?.['params'] as ApprovalRequestParams
+  // Same approval, same node: the repeat is a retry, not a new decision point.
+  expect(second.approvalId).toBe(first.approvalId)
+  expect(second.nodeId).toBe(first.nodeId)
+  expect(second.path).toBe(first.path)
+})
+
+test('three unusable approval replies hand the run to the deadline', async () => {
+  // A short deadline so the test measures the policy, not the 300s default.
+  const { server } = await makeServer({ approvalTimeoutMs: 500 })
+  const { peer, approvals } = await connectRecorded(server)
+
+  let answers = 0
+  peer.onRequest('approval/request', () => {
+    answers += 1
+    return null as unknown as ApprovalRequestResult
+  })
+
+  const startedAt = Date.now()
+  const reply = await peer.request('run.start', { graph: helloGraph({ mode: 'ask' }) })
+  const took = Date.now() - startedAt
+
+  // Three asks, then the approval is left to time out like one nobody answered.
+  expect(answers).toBe(3)
+  expect(approvals).toHaveLength(3)
+  expect(reply.status).toBe('failed')
+  expect(reply.error).toContain('timed out')
+  expect(took).toBeLessThan(5_000)
+})
+
+test('an unusable approval/request reply is answered by a repeat, not by an error frame', async () => {
+  const { server } = await makeServer()
+  const client = await rawClient(server)
+  client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientName: 'raw' } })
+  client.send({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'run.start',
+    params: { graph: helloGraph({ mode: 'ask' }), runId: 'run_refused_reply' },
+  })
+
+  const asked = await client.waitFor(
+    (frame) => frame['method'] === 'approval/request',
+    'approval/request',
+  )
+  const params = asked['params'] as { approvalId: string }
+  // A result that is not an object used to throw inside the peer: the whole
+  // server died on an unhandled rejection.
+  client.send({ jsonrpc: '2.0', id: asked['id'], result: null })
+
+  // The repeat is the refusal: a `-32602` on the answered id would be dropped by
+  // a shipped peer, and could be matched against one of its own requests.
+  const reAsked = await client.waitFor(
+    (frame) => frame['method'] === 'approval/request' && frame['id'] !== asked['id'],
+    'the repeated approval/request',
+  )
+  expect((reAsked['params'] as { approvalId: string }).approvalId).toBe(params.approvalId)
+  expect(client.frames.some((frame) => frame['error'] !== undefined)).toBe(false)
+
+  // Nothing settled the approval: the run is still open and nothing ran.
+  client.send({
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'run.get',
+    params: { runId: 'run_refused_reply' },
+  })
+  const got = await client.waitFor((frame) => frame['id'] === 3, 'run.get')
+  expect((got['result'] as { record: { status: string } }).record.status).toBe('running')
+  expect(client.frames.some((frame) => frame['id'] === 2 && frame['result'] !== undefined)).toBe(
+    false,
+  )
+
+  // A usable answer still settles it through `approval.respond`.
+  client.send({
+    jsonrpc: '2.0',
+    id: 4,
+    method: 'approval.respond',
+    params: { approvalId: params.approvalId, decision: 'rejected' },
+  })
+  await client.waitFor((frame) => frame['id'] === 4, 'approval.respond')
+  const reply = await client.waitFor(
+    (frame) => frame['id'] === 2 && frame['result'] !== undefined,
+    'the run reply',
+  )
+  expect(reply['result']).toMatchObject({ runId: 'run_refused_reply', status: 'failed' })
+  expect((reply['result'] as { error?: string }).error).toContain('APPROVAL_REJECTED')
+  client.close()
+})
+
+test('an unusable approval decision never runs the node', async () => {
+  const { server } = await makeServer()
+  const client = await rawClient(server)
+  client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientName: 'raw' } })
+
+  const cases: Array<[string, unknown]> = [
+    ['an empty object', {}],
+    ['a bare string', 'rejected'],
+    ['a null decision', { decision: null }],
+    ['an unknown decision', { decision: 'approved' }],
+  ]
+  let id = 10
+  for (const [label, result] of cases) {
+    const runId = `run_reply_${id}`
+    const startId = id
+    id += 1
+    client.send({
+      jsonrpc: '2.0',
+      id: startId,
+      method: 'run.start',
+      params: { graph: helloGraph({ mode: 'ask' }), runId },
+    })
+    const asked = await client.waitFor(
+      (frame) =>
+        frame['method'] === 'approval/request' &&
+        (frame['params'] as { runId: string }).runId === runId,
+      `approval/request for ${label}`,
+    )
+    client.send({ jsonrpc: '2.0', id: asked['id'], result })
+    // The repeat, not an error frame, is what a client can see: the same
+    // approval asked again with a fresh id.
+    const reAsked = await client.waitFor(
+      (frame) =>
+        frame['method'] === 'approval/request' &&
+        (frame['params'] as { runId: string }).runId === runId &&
+        frame['id'] !== asked['id'],
+      `the repeat for ${label}`,
+    )
+    expect((reAsked['params'] as { approvalId: string }).approvalId, label).toBe(
+      (asked['params'] as { approvalId: string }).approvalId,
+    )
+
+    // The node has not run: rejecting now fails the run instead of finding it
+    // completed, which is what an "anything but rejected is allowed" reading did.
+    const approvalId = (asked['params'] as { approvalId: string }).approvalId
+    client.send({
+      jsonrpc: '2.0',
+      id,
+      method: 'approval.respond',
+      params: { approvalId, decision: 'rejected' },
+    })
+    await client.waitFor((frame) => frame['id'] === id, `approval.respond for ${label}`)
+    id += 1
+    const reply = await client.waitFor(
+      (frame) => frame['id'] === startId,
+      `the run reply for ${label}`,
+    )
+    expect((reply['result'] as { status: string }).status, label).toBe('failed')
+    expect((reply['result'] as { error?: string }).error, label).toContain('APPROVAL_REJECTED')
+  }
+  client.close()
+})
+
+test('an unusable approval reply does not leak as an unhandled rejection', async () => {
+  const seen: string[] = []
+  const onRejection = (reason: unknown): void => {
+    seen.push(String(reason))
+  }
+  process.on('unhandledRejection', onRejection)
+  try {
+    const { server } = await makeServer()
+    const client = await rawClient(server)
+    client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientName: 'raw' } })
+    client.send({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'run.start',
+      params: { graph: helloGraph({ mode: 'ask' }), runId: 'run_no_rejection' },
+    })
+    const asked = await client.waitFor(
+      (frame) => frame['method'] === 'approval/request',
+      'approval/request',
+    )
+    client.send({ jsonrpc: '2.0', id: asked['id'], result: null })
+    await client.waitFor(
+      (frame) => frame['method'] === 'approval/request' && frame['id'] !== asked['id'],
+      'the repeated approval/request',
+    )
+    // A turn of the loop is enough for a stray rejection to surface.
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(seen).toEqual([])
+    client.close()
+  } finally {
+    process.off('unhandledRejection', onRejection)
+  }
+})
+
 test('a rejected node fails the run with APPROVAL_REJECTED', async () => {
   const { server } = await makeServer()
   const peer = await connect(server)
@@ -500,6 +770,180 @@ test('approval.respond decides an approval the client has not replied to', async
   })
   const reply = await started
   expect(reply.status).toBe('completed')
+})
+
+test('approval.respond is refused once the run is cancelled', async () => {
+  const { server } = await makeServer()
+  const peer = await connect(server)
+
+  let approvalId: string | undefined
+  const notices: Array<Record<string, unknown>> = []
+  peer.onNotification('approval.abandoned', (params) => notices.push(params))
+  peer.onRequest('approval/request', (params) => {
+    approvalId = params.approvalId
+    return new Promise<ApprovalRequestResult>(() => {})
+  })
+
+  const started = peer.request('run.start', {
+    graph: helloGraph({ mode: 'ask' }),
+    runId: 'run_cancelled_approval',
+  })
+  for (let attempt = 0; attempt < 500 && approvalId === undefined; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  expect(approvalId).toBeDefined()
+
+  await peer.request('run.cancel', { runId: 'run_cancelled_approval' })
+  // The pending record is gone with the run, so the answer is a refusal and not
+  // the silent `{}` a stale entry used to return.
+  await expect(
+    peer.request('approval.respond', { approvalId: approvalId ?? '', decision: 'allowed-once' }),
+  ).rejects.toMatchObject({
+    code: APP_ERRORS.conflict,
+    message: 'run run_cancelled_approval is not waiting for approval',
+  })
+  const cancelled = await started
+  expect(cancelled.status).toBe('cancelled')
+  expect(notices).toEqual([
+    {
+      runId: 'run_cancelled_approval',
+      approvalId: approvalId ?? '',
+      nodeId: 'template',
+      path: 'template',
+      reason: 'run-cancelled',
+    },
+  ])
+})
+
+test('a decided approval cannot be answered twice', async () => {
+  const { server } = await makeServer()
+  const peer = await connect(server)
+
+  let approvalId: string | undefined
+  peer.onRequest('approval/request', (params) => {
+    approvalId = params.approvalId
+    return new Promise<ApprovalRequestResult>(() => {})
+  })
+
+  const started = peer.request('run.start', { graph: helloGraph({ mode: 'ask' }) })
+  for (let attempt = 0; attempt < 500 && approvalId === undefined; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  expect(approvalId).toBeDefined()
+
+  // The first answer is the normal path and still resolves to `{}`.
+  await expect(
+    peer.request('approval.respond', { approvalId: approvalId ?? '', decision: 'allowed-once' }),
+  ).resolves.toEqual({})
+  expect((await started).status).toBe('completed')
+  // The second one has no entry left: a decided approval is not a switch.
+  await expect(
+    peer.request('approval.respond', { approvalId: approvalId ?? '', decision: 'rejected' }),
+  ).rejects.toMatchObject({ code: APP_ERRORS.approvalNotFound })
+})
+
+test('the server announces an approval it stopped asking about', async () => {
+  const { server } = await makeServer()
+  const peer = await connect(server)
+
+  const notices: Array<Record<string, unknown>> = []
+  peer.onNotification('approval.abandoned', (params) => notices.push(params))
+  peer.onRequest('approval/request', () => null as unknown as ApprovalRequestResult)
+
+  const started = peer.request('run.start', {
+    graph: helloGraph({ mode: 'ask' }),
+    runId: 'run_abandoned_notice',
+  })
+  for (let attempt = 0; attempt < 500 && notices.length === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+
+  expect(notices).toHaveLength(1)
+  expect(notices[0]).toMatchObject({
+    runId: 'run_abandoned_notice',
+    nodeId: 'template',
+    path: 'template',
+    reason: 'replies-exhausted',
+  })
+  const approvalId = notices[0]?.['approvalId'] as string
+  expect(approvalId).toMatch(/^apr_/)
+
+  // Knowing it was abandoned does not end the wait: `approval.respond` still
+  // decides it, which is the policy after the attempt budget.
+  await peer.request('approval.respond', { approvalId, decision: 'rejected' })
+  expect((await started).status).toBe('failed')
+})
+
+test('a second connection cannot answer an approval it did not receive', async () => {
+  const { server } = await makeServer()
+  const owner = await connect(server)
+  const stranger = await connect(server)
+
+  let approvalId: string | undefined
+  owner.onRequest('approval/request', (params) => {
+    approvalId = params.approvalId
+    return new Promise<ApprovalRequestResult>(() => {})
+  })
+
+  const started = owner.request('run.start', {
+    graph: helloGraph({ mode: 'ask' }),
+    runId: 'run_owned_approval',
+  })
+  for (let attempt = 0; attempt < 500 && approvalId === undefined; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  expect(approvalId).toBeDefined()
+
+  // The stranger knows the id and still gets the answer for an id that does not
+  // exist: it must not learn that the approval is real, nor whose run it is.
+  await expect(
+    stranger.request('approval.respond', { approvalId: approvalId ?? '', decision: 'rejected' }),
+  ).rejects.toMatchObject({
+    code: APP_ERRORS.approvalNotFound,
+    message: `unknown approval: ${approvalId ?? ''}`,
+  })
+
+  // The run is untouched and still belongs to the connection that was asked.
+  const held = await stranger.request('run.get', { runId: 'run_owned_approval' })
+  expect(held.record.status).toBe('running')
+  await owner.request('approval.respond', {
+    approvalId: approvalId ?? '',
+    decision: 'allowed-once',
+  })
+  expect((await started).status).toBe('completed')
+})
+
+test('a foreign connection is not told that an approval was abandoned', async () => {
+  const { server } = await makeServer()
+  const owner = await connect(server)
+  const stranger = await connect(server)
+
+  let approvalId: string | undefined
+  owner.onRequest('approval/request', (params) => {
+    approvalId = params.approvalId
+    return new Promise<ApprovalRequestResult>(() => {})
+  })
+
+  const started = owner.request('run.start', {
+    graph: helloGraph({ mode: 'ask' }),
+    runId: 'run_abandoned_owner',
+  })
+  for (let attempt = 0; attempt < 500 && approvalId === undefined; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  expect(approvalId).toBeDefined()
+
+  await owner.request('run.cancel', { runId: 'run_abandoned_owner' })
+  expect((await started).status).toBe('cancelled')
+
+  // The owner learns the run moved on, with the run id it already knows.
+  await expect(
+    owner.request('approval.respond', { approvalId: approvalId ?? '', decision: 'allowed-once' }),
+  ).rejects.toMatchObject({ code: APP_ERRORS.conflict })
+  // The stranger keeps seeing an id that never existed.
+  await expect(
+    stranger.request('approval.respond', { approvalId: approvalId ?? '', decision: 'allowed-once' }),
+  ).rejects.toMatchObject({ code: APP_ERRORS.approvalNotFound })
 })
 
 /** `a-input` and `b-memory` are roots; ids sort input first, so memory sees it. */
@@ -734,34 +1178,42 @@ test('run.start refuses a reused runId with a 1004 conflict', async () => {
   ).rejects.toMatchObject({ code: APP_ERRORS.conflict })
 })
 
-test('a settled run is pruned once its last subscriber disconnects', async () => {
+test('a settled run keeps one run.cancel answer across the prune', async () => {
   const { server } = await makeServer()
   const first = await connect(server)
   const started = await first.request('run.start', { graph: helloGraph() })
   expect(started.status).toBe('completed')
 
+  const refusal = { code: APP_ERRORS.conflict, message: `run ${started.runId} is already completed` }
   // While watched, the run still has server-side state.
-  await expect(first.request('run.cancel', { runId: started.runId })).resolves.toEqual({})
+  await expect(first.request('run.cancel', { runId: started.runId })).rejects.toMatchObject(refusal)
 
   first.close()
   const observer = await connect(server)
-  // `run.cancel` needs a `RunState`; once the settled run is pruned it is a
-  // not-found rather than a stale no-op abort.
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    try {
-      await observer.request('run.cancel', { runId: started.runId })
-    } catch (error) {
-      expect(error).toMatchObject({ code: APP_ERRORS.runNotFound })
-      // The journal still has the trace, and subscribe rebuilds state.
-      const replay = await observer.request('run.subscribe', { runId: started.runId })
-      expect(replay.events.length).toBeGreaterThan(0)
-      const got = await observer.request('run.get', { runId: started.runId })
-      expect(got.record.status).toBe('completed')
-      return
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2))
+  // `dropConnection` prunes a settled run once its last subscriber is gone, and
+  // the journal then answers instead. Both states must give the same refusal:
+  // the answer may not depend on whether the state is still in memory.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await expect(observer.request('run.cancel', { runId: started.runId })).rejects.toMatchObject(
+      refusal,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 5))
   }
-  throw new Error('settled run was never pruned from the runs map')
+
+  // The journal still has the trace, and subscribe rebuilds state from it.
+  const replay = await observer.request('run.subscribe', { runId: started.runId })
+  expect(replay.events.length).toBeGreaterThan(0)
+  const got = await observer.request('run.get', { runId: started.runId })
+  expect(got.record.status).toBe('completed')
+})
+
+test('run.cancel reports an unknown run as not found', async () => {
+  const { server } = await makeServer()
+  const peer = await connect(server)
+
+  await expect(peer.request('run.cancel', { runId: 'run_never_started' })).rejects.toMatchObject({
+    code: APP_ERRORS.runNotFound,
+  })
 })
 
 test('a failed listen closes the journal instead of leaking the runtime', async () => {

@@ -210,14 +210,41 @@ export class JsonRpcPeer {
     const frame = parsed as Record<string, unknown>
     const id = frame['id']
     if (frame['jsonrpc'] !== '2.0') {
-      if (isId(id)) this.#sendError(id, JSON_RPC_ERRORS.invalidRequest, 'invalid request: jsonrpc must be "2.0"')
+      // Always answer, even with an unusable id: silence would leave the other
+      // side waiting for a response that can never be matched.
+      this.#sendError(
+        isId(id) ? id : null,
+        JSON_RPC_ERRORS.invalidRequest,
+        'invalid request: jsonrpc must be "2.0"',
+      )
       return
     }
     const method = frame['method']
+    // A frame that carries a `method` member which is not a string is a broken
+    // request, not a response: routing it as one would answer it with silence.
+    if ('method' in frame && typeof method !== 'string') {
+      this.#sendError(
+        isId(id) ? id : null,
+        JSON_RPC_ERRORS.invalidRequest,
+        'invalid request: method must be a string',
+      )
+      return
+    }
     if (typeof method === 'string') {
+      // An id that cannot be echoed makes the request invalid: running it as a
+      // notification would perform the method and answer nothing.
+      if (id !== undefined && id !== null && !isId(id)) {
+        this.#sendError(
+          null,
+          JSON_RPC_ERRORS.invalidRequest,
+          'invalid request: id must be a string or a number',
+        )
+        return
+      }
       if (isId(id)) {
         void this.#handleRequest(id, method, frame['params'])
       } else {
+        // A missing id is a notification; `null` is discouraged but not echoed.
         this.#handleNotification(method, frame['params'])
       }
       return
@@ -320,8 +347,15 @@ export class JsonRpcPeer {
   }
 }
 
+/**
+ * A usable id is a string or a finite number.
+ *
+ * `JSON.parse` turns `1e999` into `Infinity`, which `JSON.stringify` writes back
+ * as `null`: such an id could never be echoed, so it is treated as invalid
+ * rather than answered with an uncorrelated `null` id.
+ */
 function isId(value: unknown): value is JsonRpcId {
-  return typeof value === 'string' || typeof value === 'number'
+  return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value))
 }
 
 /** Fault helper for a malformed payload; `code` is always `-32602`. */

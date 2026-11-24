@@ -704,14 +704,33 @@ describe('executor', () => {
   })
 
   test('approval timeout can be configured to approve', async () => {
+    const journal = new MemoryJournal()
     const result = await runApprovalGraph(
       'ask',
       createMockRuntimeServices({ approval: () => new Promise<never>(() => {}) }),
-      { policy: { timeoutMs: 10, onTimeout: 'approve' } },
+      { policy: { timeoutMs: 10, onTimeout: 'approve' }, journal },
     )
 
     expect(result.status).toBe('completed')
     expect(result.outputs).toEqual({ output: 'approved' })
+    // A timeout that approves is a decision, not a silence: an approval whose
+    // journal says only "requested" reads back as still waiting for an answer,
+    // so a replay holds the node as pending instead of as allowed.
+    const events = journal.read(result.runId)
+    expect(events.filter((event) => event.type === 'approval.requested')).toHaveLength(1)
+    const decided = events.filter((event) => event.type === 'approval.decided')
+    expect(decided).toHaveLength(1)
+    expect(decided[0]).toMatchObject({
+      runId: result.runId,
+      nodeId: 'ask',
+      path: 'ask',
+      decision: 'allowed-once',
+    })
+    // Journaled before the node ran, so a reader never sees completed work with
+    // an unanswered approval behind it.
+    const order = events.map((event) => event.type)
+    expect(order.indexOf('approval.decided')).toBeGreaterThan(order.indexOf('approval.requested'))
+    expect(order.indexOf('approval.decided')).toBeLessThan(order.lastIndexOf('node.completed'))
   })
 
   test('aborts a run while approval is pending', async () => {

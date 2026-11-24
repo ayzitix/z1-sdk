@@ -33,6 +33,7 @@ import {
   describeNodes,
   invalidParams,
   runNotFound,
+  type ApprovalAbandonedReason,
   type MethodMap,
   type RemoteMethodName,
   type RunReply,
@@ -85,6 +86,8 @@ interface PendingApproval {
   readonly path: string
   readonly connectionId: string
   readonly decide: (decision: ApprovalDecision) => void
+  /** Drop the entry without deciding: the run is gone, nothing can land. */
+  readonly abandon: (reason: ApprovalAbandonedReason) => void
 }
 
 interface ResolvedConfig {
@@ -124,6 +127,49 @@ function optionalSeq(value: unknown, field: string): number | undefined {
     throw invalidParams(`param "${field}" must be a non-negative integer`, { param: field })
   }
   return value
+}
+
+/** Decisions a client may answer `approval/request` with; `cancelled` is ours. */
+const APPROVAL_REPLY_DECISIONS = ['allowed-once', 'rejected'] as const
+
+/**
+ * How many `approval/request` frames one approval may send.
+ *
+ * A client that answers unusably is asked again, because a result has no reply
+ * channel of its own: re-asking is the only refusal a shipped peer can see. The
+ * count is bounded so a client that answers garbage forever cannot turn one
+ * blocked run into an unbounded stream of requests.
+ */
+const APPROVAL_REPLY_ATTEMPTS = 3
+
+/** How many settled approval ids are remembered for a late `approval.respond`. */
+const ABANDONED_APPROVALS_KEPT = 256
+
+/**
+ * The one refusal for an approval the caller may not see.
+ *
+ * Deliberately identical to the answer for an id nobody ever issued: a client
+ * that guesses an id must not learn whether it exists, belongs to another
+ * connection, or has already been decided.
+ */
+function unknownApproval(approvalId: string): ReturnType<typeof appFault> {
+  return appFault(APP_ERRORS.approvalNotFound, `unknown approval: ${approvalId}`, { approvalId })
+}
+
+/**
+ * The decision an `approval/request` reply carries.
+ *
+ * A reply is a *result*, not a request, so a malformed one never reaches the
+ * peer's own error path. It goes through the same guards as `approval.respond`
+ * to keep both answer paths on one contract: a value outside the set must not
+ * reach the runtime, where anything but `rejected` counts as allowed.
+ */
+function approvalReplyDecision(reply: unknown): ApprovalDecision {
+  if (typeof reply !== 'object' || reply === null || Array.isArray(reply)) {
+    throw invalidParams('an approval/request reply must be an object with a "decision"')
+  }
+  const decision = (reply as Record<string, unknown>)['decision']
+  return assertEnum(decision, APPROVAL_REPLY_DECISIONS, 'decision')
 }
 
 /** Parse issues carry zod codes, which the graph validator's union does not cover. */
@@ -200,6 +246,14 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
   }
   const runs = new Map<string, RunState>()
   const approvals = new Map<string, PendingApproval>()
+  /**
+   * Approval ids whose run stopped waiting, newest last, so a late
+   * `approval.respond` gets "not waiting" rather than "unknown approval". The
+   * owning connection is kept with it: only that connection is told the run
+   * moved on, and anyone else keeps seeing an id that does not exist.
+   * Bounded: a long-lived server must not remember every decision forever.
+   */
+  const abandonedApprovals = new Map<string, { runId: string; connectionId: string }>()
   const connections = new Set<Connection>()
 
   /** Blobs live in the shared journal, not the per-run mock artifact store. */
@@ -289,13 +343,42 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
     return nodeId
   }
 
+  /**
+   * The approval gate a run asks through, and how an unusable answer is refused.
+   *
+   * The server asks with a `approval/request` *request*, so the client answers
+   * with a JSON-RPC *result*. A result has no reply channel of its own: no error
+   * frame can say "answer again", because the ids of the two directions are
+   * separate namespaces. `{id: 2, error: -32602}` sent by the server on the id of
+   * its own request is either dropped by the client (an id it is not waiting for)
+   * or, worse, matched against an unrelated *outgoing* request the client gave
+   * the same number. A bare `-32602` is therefore never a channel.
+   *
+   * The visible channel is a second request. An unusable answer is followed by a
+   * fresh `approval/request` for the same node and path under the same
+   * `approvalId`, which the client can answer properly: the repeat *is* the
+   * refusal. The run stays `running` throughout, and `approval.respond` keeps
+   * working in parallel, so the first usable answer wins. After
+   * {@link APPROVAL_REPLY_ATTEMPTS} unusable answers the server stops asking,
+   * says so with `approval.abandoned` (a client that only ever saw replies would
+   * otherwise wait in silence) and leaves the run to the deadline below: the
+   * approval times out like one nobody answered, rather than the server
+   * inventing a decision from garbage.
+   *
+   * An entry also leaves the map when its run stops waiting: cancelled or
+   * settled, there is nothing left to decide, and a later `approval.respond`
+   * must fail instead of acknowledging a decision that reaches no node.
+   */
   function createApprovalService(runId: string, connection: Connection): ApprovalService {
     return {
       request: async (request, context) => {
         const approvalId = `apr_${randomUUID()}`
         const path = lastApprovalPath(runId, context.nodeId)
+        const params = { approvalId, runId, nodeId: context.nodeId, path, request }
         const decision = await new Promise<ApprovalDecision>((resolve, reject) => {
           let timer: ReturnType<typeof setTimeout> | undefined
+          let asked = 0
+          let announced = false
 
           function forget(): boolean {
             if (!approvals.delete(approvalId)) return false
@@ -308,6 +391,27 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
           }
           function fail(error: Error): void {
             if (forget()) reject(error)
+          }
+          /** At most one `approval.abandoned` per approval. */
+          function announce(reason: ApprovalAbandonedReason): void {
+            if (announced) return
+            announced = true
+            connection.peer.notify('approval.abandoned', {
+              runId,
+              approvalId,
+              nodeId: context.nodeId,
+              path,
+              reason,
+            })
+          }
+          function abandon(reason: ApprovalAbandonedReason): void {
+            if (!forget()) return
+            abandonedApprovals.set(approvalId, { runId, connectionId: connection.id })
+            if (abandonedApprovals.size > ABANDONED_APPROVALS_KEPT) {
+              const oldest = abandonedApprovals.keys().next().value
+              if (oldest !== undefined) abandonedApprovals.delete(oldest)
+            }
+            announce(reason)
           }
 
           timer = setTimeout(() => {
@@ -326,28 +430,32 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
             path,
             connectionId: connection.id,
             decide,
+            abandon,
           })
           connection.approvals.add(approvalId)
 
-          // A client may answer either by replying to this request (the
-          // protocol shape) or with `approval.respond`; both settle the same
-          // entry, and the first answer wins.
-          void connection.peer
-            .request('approval/request', {
-              approvalId,
-              runId,
-              nodeId: context.nodeId,
-              path,
-              request,
-            })
-            .then(
+          /** One `approval/request`; an unusable answer re-asks with a fresh id. */
+          function ask(): void {
+            asked += 1
+            void connection.peer.request('approval/request', params).then(
               (reply) => {
-                decide(reply.decision)
+                try {
+                  decide(approvalReplyDecision(reply))
+                } catch {
+                  if (asked < APPROVAL_REPLY_ATTEMPTS) ask()
+                  else announce('replies-exhausted')
+                }
               },
               () => {
+                // The request itself failed (socket closed, peer gone): nobody
+                // can answer any more, so the run stops instead of waiting out
+                // the deadline.
                 decide('cancelled')
               },
             )
+          }
+
+          ask()
         })
         return decision
       },
@@ -357,6 +465,20 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
   function notifyStatus(state: RunState): void {
     for (const subscriber of state.subscribers) {
       subscriber.peer.notify('run.status', { runId: state.runId, status: state.status })
+    }
+  }
+
+  /**
+   * Drops every approval the run was waiting for.
+   *
+   * A cancelled or settled run decides nothing more, so the entries go and a
+   * late `approval.respond` is refused instead of settling a promise nobody
+   * reads. The run's own decision paths already remove their entry through
+   * `forget`, so this only touches approvals still pending.
+   */
+  function abandonRunApprovals(runId: string, reason: ApprovalAbandonedReason): void {
+    for (const entry of [...approvals.values()]) {
+      if (entry.runId === runId) entry.abandon(reason)
     }
   }
 
@@ -407,6 +529,8 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       failure = errorMessage(error)
     } finally {
       await handle?.dispose()
+      // The run is over either way: a decision that arrives now reaches nothing.
+      abandonRunApprovals(state.runId, 'run-settled')
     }
 
     if (result === undefined) {
@@ -578,8 +702,20 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       assertParams(params, ['runId'])
       const runId = stringParam(params['runId'], 'runId')
       const state = runs.get(runId)
-      if (state === undefined) throw runNotFound(runId)
+      // A settled run keeps its state only while it has a subscriber, so the
+      // journal answers for a pruned one. Reading both keeps `run.cancel` from
+      // reporting success before the prune and an unknown run after it.
+      if (state === undefined) {
+        const record = journal.getRun(runId)
+        if (record === undefined) throw runNotFound(runId)
+        throw appFault(APP_ERRORS.conflict, `run ${runId} is already ${record.status}`, { runId })
+      }
+      if (state.status !== 'running') {
+        throw appFault(APP_ERRORS.conflict, `run ${runId} is already ${state.status}`, { runId })
+      }
       state.controller.abort()
+      // Cancelling is final for the approval too: the run will not read it.
+      abandonRunApprovals(runId, 'run-cancelled')
       return {}
     })
 
@@ -666,10 +802,21 @@ export async function startServer(options: ServerOptions): Promise<Z1Server> {
       )
       const entry = approvals.get(approvalId)
       if (entry === undefined) {
-        throw appFault(APP_ERRORS.approvalNotFound, `unknown approval: ${approvalId}`, {
-          approvalId,
-        })
+        // A decision for a run that stopped waiting is a different mistake from
+        // an id nobody ever issued, and saying which one it is matters to a UI.
+        const abandoned = abandonedApprovals.get(approvalId)
+        if (abandoned !== undefined && abandoned.connectionId === connection.id) {
+          throw appFault(APP_ERRORS.conflict, `run ${abandoned.runId} is not waiting for approval`, {
+            approvalId,
+            runId: abandoned.runId,
+          })
+        }
+        throw unknownApproval(approvalId)
       }
+      // Only the connection the request went to may decide it: a second client
+      // that learns the id must not settle a run it did not start. It gets the
+      // same answer as a guessed id, so the refusal reveals nothing.
+      if (entry.connectionId !== connection.id) throw unknownApproval(approvalId)
       entry.decide(decision)
       return {}
     })

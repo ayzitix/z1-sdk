@@ -357,6 +357,18 @@ export interface RunReply {
 
 // --- server -> client ------------------------------------------------------
 
+/**
+ * One ask for a decision, sent by the server to the client that started the run.
+ *
+ * The answer is a *result*, and a result has no reply channel of its own: no
+ * error frame can tell the client to answer again, because a JSON-RPC error
+ * carries an id from the sender's own namespace and would be dropped (or worse,
+ * matched against an unrelated pending request) on the other side. So an
+ * unusable answer is refused by sending this request again, with a fresh frame
+ * id and the same `approvalId`: a repeat is a retry of one decision, not a new
+ * decision point. `approval.respond` remains available in parallel, and the
+ * first usable answer wins.
+ */
 export interface ApprovalRequestParams {
   approvalId: string
   runId: string
@@ -413,9 +425,35 @@ export type RemoteMethodName = Exclude<keyof MethodMap, keyof ClientMethodMap>
 
 // --- server -> client notifications ---------------------------------------
 
+/**
+ * Why the server stopped asking for a decision.
+ *
+ * `replies-exhausted` is the attempt budget spent on unusable answers, with the
+ * approval still answerable through `approval.respond`; the run then waits for
+ * its deadline. `run-cancelled` and `run-settled` mean the run is no longer
+ * waiting at all, so no answer can land and `approval.respond` refuses one.
+ */
+export type ApprovalAbandonedReason = 'replies-exhausted' | 'run-cancelled' | 'run-settled'
+
+/**
+ * The server will not ask for this approval again.
+ *
+ * Sent at most once per approval, before the run waits out its deadline, so a
+ * client that only ever saw replies is not left guessing why nothing arrives.
+ */
+export interface ApprovalAbandonedNotice {
+  runId: string
+  approvalId: string
+  nodeId: string
+  /** Hierarchical execution path of the node that asked. */
+  path: string
+  reason: ApprovalAbandonedReason
+}
+
 export interface NotificationMap {
   'run.event': { runId: string; seq: number; event: RunEvent }
   'run.status': { runId: string; status: RunStatus }
+  'approval.abandoned': ApprovalAbandonedNotice
 }
 
 export type NotificationName = keyof NotificationMap

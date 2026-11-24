@@ -32,4 +32,11 @@ export {
   type SessionSummary,
 } from './types.ts'
 export { createSessionStore } from './store.ts'
-export { findRepoRoot, resolveSessionRoot } from './paths.ts'
+export {
+  findRepoRoot,
+  pruneTrash,
+  resolveSessionRoot,
+  TRASH_KEEP,
+  TRASH_KEEP_MS,
+  type PruneTrashOptions,
+} from './paths.ts'

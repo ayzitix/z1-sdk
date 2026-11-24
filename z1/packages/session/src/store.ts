@@ -15,16 +15,24 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
   statSync,
   unlinkSync,
+  utimesSync,
 } from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 import type { ChatMessage } from '@z1/node'
 
-import { appendLines, dropTornTail, acquireLock, sessionId, timestampStamp, writeFileAtomic } from './fsutil.ts'
+import {
+  acquireLock,
+  appendLines,
+  dropTornTail,
+  renameWithRetry,
+  sessionId,
+  timestampStamp,
+  writeFileAtomic,
+} from './fsutil.ts'
 import {
   EVENTS_FILE,
   LATEST_FILE,
@@ -33,6 +41,7 @@ import {
   SESSIONS_DIR,
   TRASH_DIR,
   ensureSessionRoot,
+  pruneTrash,
   resolveSessionRoot,
 } from './paths.ts'
 import {
@@ -71,6 +80,10 @@ function assertSessionId(id: string): string {
 
 function unknownSession(id: string): Error {
   return new Error(`session: unknown session ${id}`)
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function isRecord(value: Json): value is Record<string, unknown> {
@@ -457,6 +470,11 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
   const root = resolved.root
   const sessionsDir = join(root, SESSIONS_DIR)
   const defaultRepoRoot = resolved.repoRoot ?? resolve(options.cwd)
+  // Opening a store is the one moment every writer passes through, so it is
+  // where the soft-delete trash is kept bounded: a store that is opened after
+  // months of use must not inherit an ever-growing `.trash`. Best effort and
+  // never fatal — `pruneTrash` swallows its own failures.
+  pruneTrash(root)
 
   const sessionDir = (id: string): string => {
     const dir = join(sessionsDir, assertSessionId(id))
@@ -793,7 +811,22 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     const base = `${timestampStamp(new Date())}-${id}`
     let target = join(trash, base)
     for (let suffix = 1; existsSync(target); suffix += 1) target = join(trash, `${base}-${suffix}`)
-    renameSync(dir, target)
+    // A directory rename fails with `EPERM`/`EBUSY` on Windows for as long as
+    // another process still walks the source or the destination — a concurrent
+    // `createSessionStore` listing the sessions does exactly that — so the move
+    // gets the same brief retry an atomic write gets. When every attempt is
+    // used, the error names this session. Nothing has moved by then, so the
+    // session is still complete under `sessions/` and there is nothing to undo.
+    renameWithRetry(
+      dir,
+      target,
+      (attempts, cause) =>
+        new Error(
+          `session: could not move ${id} to the trash after ` +
+            `${String(attempts)} attempt${attempts === 1 ? '' : 's'}: ${describeError(cause)}`,
+          { cause },
+        ),
+    )
     // A live or stale `.lock` travels with the directory; it must not follow the
     // session into `.trash` and it must never make `remove` fail.
     try {
@@ -807,6 +840,25 @@ export function createSessionStore(options: CreateSessionStoreOptions): SessionS
     } catch {
       // No pointer, or another process already replaced it.
     }
+    // The moved entry has to look fresh to every later prune, not only to this
+    // call: it carries the source directory's mtime, and after a clock that
+    // jumped backwards (or on a filesystem with a coarse timestamp) that can be
+    // older than the whole retention window, so the next `createSessionStore`
+    // would delete the session a user deleted by mistake before it could be
+    // recovered. Best effort: `protect` still covers this call.
+    try {
+      const touched = new Date()
+      utimesSync(target, touched, touched)
+    } catch {
+      // A read-only or exotic filesystem; the entry keeps its old timestamps.
+    }
+    // Retention applies to the entry this call just wrote too, so a trash that is
+    // already over the limit is bounded here rather than at the next open. Last,
+    // because the entry is only fully settled once the lock and the pointer are
+    // cleaned up — and protected, because the entry that was just moved is the
+    // one whose name and mtime lie about its age after a clock that jumped
+    // backwards.
+    pruneTrash(root, { protect: [target] })
   }
 
   const readPointer = (): LatestPointer | undefined => {

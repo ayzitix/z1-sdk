@@ -3,6 +3,24 @@ import { canonicalJson } from './canonical.ts'
 import { writeFileAtomic } from './fsutil.ts'
 import { sha256Hex } from './integrity.ts'
 
+/**
+ * Append-only chain of module lifecycle events, one JSON entry per line.
+ *
+ * Every entry hashes the previous entry's hash, so reading the file back
+ * detects an edited entry, a reordered pair, a deleted entry in the middle and
+ * a broken `seq` (`AuditChainError`).
+ *
+ * What the chain cannot detect is **truncation of the tail**: dropping the last
+ * entries leaves a shorter chain that still verifies from {@link GENESIS_HASH},
+ * because the file carries no anchor beyond its own contents. Closing that needs
+ * a head hash recorded somewhere the module store does not control — a separate
+ * `head` file has the same problem, and a signed journal or a remote log does
+ * not exist yet. Until one does, the file's length is part of the trust
+ * boundary rather than something the chain protects, and a reader cannot tell
+ * "four events, then an attacker dropped two" from "two events". The behaviour
+ * is pinned by a test in `tests/audit.spec.ts` so it stays deliberate.
+ */
+
 export const GENESIS_HASH = '0'.repeat(64)
 
 export interface AuditEntry {

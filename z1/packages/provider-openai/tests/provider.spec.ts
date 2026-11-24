@@ -3,7 +3,22 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import type { ChatDelta, ChatMessage, ChatRequest, ToolSchema } from '@z1/node'
 import { createOpenAiLlmService } from '../src/index.ts'
 
-type Scenario = 'stream' | 'tools' | 'json' | 'fail' | 'error-chunk' | 'bad-args' | 'empty-args' | 'no-id'
+type Scenario =
+  | 'stream'
+  | 'tools'
+  | 'json'
+  | 'fail'
+  | 'error-chunk'
+  | 'bad-args'
+  | 'empty-args'
+  | 'no-id'
+  | 'bare-cr'
+  | 'no-done'
+  | 'no-completion'
+  | 'truncated-event'
+  | 'cut-mid-event'
+  | 'done-padded'
+  | 'done-padded-tail'
 
 interface Failure {
   status: number
@@ -175,6 +190,66 @@ function respond(res: ServerResponse): void {
       res.write('data: [DONE]\n\n')
       res.end()
       return
+    case 'bare-cr':
+      // A bare CR is a legal event-stream terminator, so the framing must not
+      // depend on LF being present.
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      for (const event of [
+        { choices: [{ delta: { role: 'assistant', content: 'cr' } }] },
+        { choices: [{ delta: { content: ' framed' }, finish_reason: 'stop' }] },
+      ]) {
+        res.write(`data: ${JSON.stringify(event)}\r\r`)
+      }
+      res.write('data: [DONE]\r\r')
+      res.end()
+      return
+    case 'no-done':
+      // A closing [DONE] is the provider's own marker; `finish_reason` already
+      // says the model finished.
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'half' } }] })}\n\n`)
+      res.write(
+        `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`,
+      )
+      res.end()
+      return
+    case 'no-completion':
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'cut' } }] })}\n\n`)
+      res.end()
+      return
+    case 'truncated-event':
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'a' } }] })}\n\n`)
+      // An event whose JSON stops mid-object, followed by a blank line.
+      res.write('data: {"choices":[{"delta":{"content":"b"\n\n')
+      res.end()
+      return
+    case 'cut-mid-event':
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'a' } }] })}\n\n`)
+      // The connection dies inside an event: no terminator ever arrives.
+      res.write('data: {"choices":[{"delta"')
+      res.end()
+      return
+    case 'done-padded':
+      // A server may pad the terminator; the padding is not part of the payload.
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: 'pad' }, finish_reason: 'stop' }] })}\n\n`,
+      )
+      res.write('data: [DONE] \t\n\n')
+      res.end()
+      return
+    case 'done-padded-tail':
+      // The same padding on a terminator that never got its newline.
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: 'tail' }, finish_reason: 'stop' }] })}\n\n`,
+      )
+      res.write('data: [DONE]  ')
+      res.end()
+      return
     case 'stream':
       sse(
         res,
@@ -324,6 +399,59 @@ describe('OpenAiLlmService', () => {
 
     await expect(service.chat(request())).rejects.toThrow(/upstream stream broke/)
     await expect(service.chat(request())).rejects.toThrow(/server_error/)
+  })
+
+  test('accepts a stream framed with bare CR line endings', async () => {
+    scenario = 'bare-cr'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    const result = await service.chat(request())
+
+    expect(result.message.content).toBe('cr framed')
+    expect(result.stopReason).toBe('stop')
+  })
+
+  test('accepts a stream that ends without [DONE] once finish_reason arrived', async () => {
+    scenario = 'no-done'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    const result = await service.chat(request())
+
+    expect(result.message.content).toBe('half')
+    expect(result.stopReason).toBe('stop')
+  })
+
+  test('rejects a stream that ends before completion', async () => {
+    scenario = 'no-completion'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    await expect(service.chat(request())).rejects.toThrow(/ended before completion/)
+  })
+
+  test('accepts a [DONE] terminator padded with trailing whitespace', async () => {
+    scenario = 'done-padded'
+    const first = await createOpenAiLlmService({ baseURL, apiKey: API_KEY }).chat(request())
+    expect(first.message.content).toBe('pad')
+    expect(first.stopReason).toBe('stop')
+
+    // The same padding on a terminator that never got its newline.
+    scenario = 'done-padded-tail'
+    const second = await createOpenAiLlmService({ baseURL, apiKey: API_KEY }).chat(request())
+    expect(second.message.content).toBe('tail')
+  })
+
+  test('rejects an event whose JSON is truncated instead of dropping it', async () => {
+    scenario = 'truncated-event'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    await expect(service.chat(request())).rejects.toThrow(/not JSON/)
+  })
+
+  test('rejects a stream that stops in the middle of an event', async () => {
+    scenario = 'cut-mid-event'
+    const service = createOpenAiLlmService({ baseURL, apiKey: API_KEY })
+
+    await expect(service.chat(request())).rejects.toThrow(/ended mid-event/)
   })
 
   test('throws naming the tool when streamed arguments are malformed JSON', async () => {

@@ -331,6 +331,7 @@ export {
   concat as coreConcat,
   message as coreMessage,
   last as coreLast,
+  lastText as coreLastText,
   merge as coreMerge,
   fail as coreFail,
 }
