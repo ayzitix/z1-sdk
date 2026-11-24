@@ -25,6 +25,7 @@ import {
   StartedServiceRegistry,
   cloneRegistry,
   declarationRegistry,
+  installRunProcessExitReaper,
   workerEnvironment,
 } from '@z1/node-host'
 import type { ModuleServiceLog, WorkerCapabilityDenial } from '@z1/node-host'
@@ -342,6 +343,12 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
    */
   function moduleRuntimeFor(): ModuleRuntime | undefined {
     if (!config.useModules || !hasActiveModule(modules)) return undefined
+    // A module worker spawns `process.run` children, which belong to this host
+    // and would otherwise outlive it: `runtime.close()` reaps them through
+    // `ModuleWorker.dispose()`, but a one-shot CLI that never closes needs the
+    // process `exit` hook. Installing it here (and only here) keeps it to one
+    // listener per process; the call itself is idempotent.
+    installRunProcessExitReaper()
     moduleRuntime ??= new ModuleRuntime({
       store: modules,
       // Module code sees the same workspace and fs backend as the process.

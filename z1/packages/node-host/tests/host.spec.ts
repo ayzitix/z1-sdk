@@ -34,6 +34,7 @@ const NODE_IDS = [
   'com.example.echo.llmer',
   'com.example.echo.modeller',
   'com.example.echo.tasker',
+  'com.example.echo.runner',
   'com.example.echo.denied',
   'com.example.echo.fetcher',
   'com.example.echo.subgrapher',

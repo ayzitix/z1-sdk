@@ -25,7 +25,7 @@
  * @module @z1/node-host/process-run
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 
 import type { ProcessRunOutputSegment, ProcessRunResult } from './protocol.ts'
 
@@ -36,6 +36,9 @@ export const MAX_PROCESS_MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 
 /** How long a timed-out group gets after SIGTERM before SIGKILL. */
 export const PROCESS_KILL_GRACE_MS = 1_000
+
+/** How long a force-killed group gets to report its exit before the reaper returns. */
+const POST_KILL_SETTLE_MS = 1_000
 
 /** Exact variables copied from the host environment. */
 export const PROCESS_ENV_ALLOWED_KEYS: readonly string[] = [
@@ -145,6 +148,160 @@ interface PendingSegment {
 }
 
 /**
+ * Live `runProcess` children by pid.
+ *
+ * `detached: true` puts each child in its own process group, which is what
+ * makes the timeout sweep work — and also what lets it outlive the host that
+ * spawned it. Nothing else owns these children: {@link ProcessTasks} only knows
+ * `process.start` tasks, so a host shutdown would leave every in-flight
+ * `process.run` running. This registry is what makes them ownable, so they can
+ * be reaped on dispose and on process exit.
+ *
+ * Entries are removed on `exit` and `error`; a pid is only ever signalled
+ * while its own record is still in the map.
+ */
+const liveRunProcesses = new Map<number, ChildProcess>()
+
+/** Signal the child's process group, falling back to the child alone. */
+function signalGroupOf(child: ChildProcess, signal: NodeJS.Signals): void {
+  const pid = child.pid
+  if (pid === undefined) return
+  try {
+    process.kill(-pid, signal)
+    return
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    // ESRCH: the group is already gone; nothing to signal.
+    if (code === 'ESRCH') return
+  }
+  try {
+    child.kill(signal)
+  } catch {
+    // The child may have exited between the group attempt and this call.
+  }
+}
+
+/**
+ * Signal a `detached` child so that it actually dies, falling back to a
+ * synchronous force-kill when the signal cannot be delivered.
+ *
+ * On Windows a group signal is not available (`process.kill(-pid)` throws
+ * ESRCH, as does `Taskkill` for some protected cases), and a plain SIGTERM to
+ * a console-less `detached` child can be swallowed: the process keeps running
+ * even though Node stops tracking it. A reaper therefore cannot trust that a
+ * SIGTERM landed — it has to notice the child is still there and force it.
+ * `child.kill('SIGKILL')` goes through `TerminateProcess` on Windows, so it
+ * succeeds where the graceful signal did not.
+ */
+function reapGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  signalGroupOf(child, signal)
+  if (signal === 'SIGKILL' || child.exitCode !== null || child.signalCode !== null) return
+  if (!alive(child.pid)) return
+  try {
+    child.kill('SIGKILL')
+  } catch {
+    // Already gone.
+  }
+}
+
+/** True when `pid` is still a live process (signal 0 probe). */
+function alive(pid: number | undefined): boolean {
+  if (pid === undefined) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | null)?.code === 'EPERM'
+  }
+}
+
+/**
+ * Pids currently registered as live `runProcess` children.
+ *
+ * Exposed for tests and diagnostics only: the pids are a snapshot of the
+ * registry at call time, and an entry is not a promise that the process is
+ * still running (the exit event may not have landed yet).
+ */
+export function liveRunProcessPids(): readonly number[] {
+  return [...liveRunProcesses.keys()]
+}
+
+/**
+ * Reap every live `runProcess` child: `signal` (SIGTERM by default) to each
+ * process group, {@link PROCESS_KILL_GRACE_MS} to let it shut down, then SIGKILL
+ * to whatever is left. The registry is cleared up front, so the call is
+ * idempotent and a second call (or a later entry with a reused pid) cannot
+ * signal anything twice.
+ *
+ * Used by `ModuleWorker.dispose()` and by the process `exit` hook installed in
+ * {@link installRunProcessExitReaper}. It only touches children this process
+ * spawned through {@link runProcess}; `process.start` tasks are owned by
+ * `ProcessTasks` and unaffected.
+ */
+export async function killAllRunProcesses(
+  signal: NodeJS.Signals = 'SIGTERM',
+  graceMs: number = PROCESS_KILL_GRACE_MS,
+): Promise<void> {
+  const children = [...liveRunProcesses.values()]
+  liveRunProcesses.clear()
+  for (const child of children) reapGroup(child, signal)
+  if (children.length === 0) return
+  await Promise.race([Promise.all(children.map((child) => exited(child))), delay(graceMs)])
+  for (const child of children) {
+    // `process.killed` is not reported reliably for a signalled group, so ask
+    // for the exit code instead: null means it is still running.
+    if (child.exitCode === null && child.signalCode === null) {
+      reapGroup(child, 'SIGKILL')
+    }
+  }
+  // `exit` can lag a force-kill, and a promise that resolved while the process
+  // was still going down would be a lie the caller acts on.
+  await Promise.race([Promise.all(children.map((child) => exited(child))), delay(POST_KILL_SETTLE_MS)])
+}
+
+/** Synchronous reaper for `process.on('exit')`, where nothing may be awaited. */
+function killAllRunProcessesSync(signal: NodeJS.Signals = 'SIGKILL'): void {
+  const children = [...liveRunProcesses.values()]
+  liveRunProcesses.clear()
+  for (const child of children) reapGroup(child, signal)
+}
+
+let exitHookInstalled = false
+
+/**
+ * Install the one-time `process.on('exit')` reaper.
+ *
+ * `runtime.close()` reaches `ModuleWorker.dispose()` → {@link killAllRunProcesses},
+ * but a host that ends without closing (a one-shot CLI run) never gets there,
+ * and an `exit` listener cannot await, so it SIGKILLs the groups directly.
+ * Idempotent: repeated runtime creation in one process adds one listener.
+ */
+export function installRunProcessExitReaper(): void {
+  if (exitHookInstalled) return
+  exitHookInstalled = true
+  process.on('exit', () => {
+    killAllRunProcessesSync('SIGKILL')
+  })
+}
+
+/** Resolve when the child has exited (immediately if it already has). */
+function exited(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise<void>((settle) => {
+    child.once('exit', () => {
+      settle()
+    })
+  })
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    timer.unref?.()
+  })
+}
+
+/**
  * Spawn `command` with `args`, collect up to the byte budget, and resolve with
  * the exit status. Spawn failures (e.g. `ENOENT`) reject with an actionable
  * message.
@@ -178,22 +335,24 @@ export function runProcess(
 
     /** Signal the child's process group, falling back to the child alone. */
     const signalGroup = (signal: NodeJS.Signals): void => {
-      const pid = child.pid
-      if (pid === undefined) return
-      try {
-        process.kill(-pid, signal)
-        return
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException | null)?.code
-        // ESRCH: the group is already gone; nothing to signal.
-        if (code === 'ESRCH') return
-      }
-      try {
-        child.kill(signal)
-      } catch {
-        // The child may have exited between the group attempt and this call.
-      }
+      signalGroupOf(child, signal)
     }
+
+    // Owned from the moment it has a pid: a host shutdown reaps this child the
+    // same way a timeout does. `exit` always precedes `close`, so dropping the
+    // entry there is enough; an `error` before spawn is the other way out.
+    const pid = child.pid
+    if (pid !== undefined) liveRunProcesses.set(pid, child)
+    child.on('exit', () => {
+      if (pid !== undefined && liveRunProcesses.get(pid) === child) {
+        liveRunProcesses.delete(pid)
+      }
+    })
+    child.on('error', () => {
+      if (pid !== undefined && liveRunProcesses.get(pid) === child) {
+        liveRunProcesses.delete(pid)
+      }
+    })
 
     const settle = (outcome: ProcessRunResult): void => {
       if (settled) return

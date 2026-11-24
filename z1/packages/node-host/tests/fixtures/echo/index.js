@@ -1,5 +1,7 @@
 // Plain, dependency-free ESM module used by the node-host tests. It only
 // touches `node:` builtins and the ctx proxies, exactly like a real module.
+import { join } from 'node:path'
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export const nodes = [
@@ -54,6 +56,38 @@ export const nodes = [
     async execute() {
       await delay(5000)
       return {}
+    },
+  },
+  {
+    // Starts a `process.run` child that survives on its own (writes `child.pid`
+    // immediately, `sentinel` at +3 s, then idles). The node itself finishes at
+    // once, so the child is in flight with no task holding it: only the host's
+    // reaper can stop it. `process.run` reports no pid, so the test reads the
+    // one the child wrote.
+    id: 'com.example.echo.runner',
+    version: '1.0.0',
+    title: 'Runner',
+    category: 'example',
+    inputs: [{ kind: 'data', id: 'dir', schema: { type: 'string' }, required: true }],
+    outputs: [{ kind: 'data', id: 'code', schema: { type: 'number' } }],
+    async execute(ctx) {
+      const dir = String(ctx.inputs.dir)
+      const script = [
+        `require('node:fs').writeFileSync(${JSON.stringify(join(dir, 'child.pid'))}, String(process.pid))`,
+        `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(join(dir, 'sentinel'))}, 'x'), 3000)`,
+        'setInterval(() => {}, 1000)',
+      ].join(';')
+      // No `cwd`: it must stay inside the granted `fs.read` patterns, and the
+      // temp dir the child writes into is not. The child writes by absolute
+      // path, so its working directory does not matter.
+      const result = await ctx.process.run({
+        command: process.execPath,
+        args: ['-e', script],
+        // Far longer than the test window: only the reaper can end it early.
+        timeoutMs: 60000,
+      })
+      // Disposed before the child finished: the run settles with a kill status.
+      return { code: result.code ?? -1 }
     },
   },
   {

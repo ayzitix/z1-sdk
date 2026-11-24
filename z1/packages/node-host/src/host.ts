@@ -38,6 +38,7 @@ import {
   MAX_PROCESS_TIMEOUT_MS,
   baseProcessEnv,
   clampProcessOption,
+  killAllRunProcesses,
   runProcess,
 } from './process-run.ts'
 import { ProcessTaskError, ProcessTasks } from './process-tasks.ts'
@@ -933,6 +934,10 @@ export class ModuleWorker {
     // leave a dev server running with no way to reach it. SIGTERM, bounded
     // grace, then SIGKILL.
     await this.#tasks.dispose()
+    // `process.run` children are spawned by this worker's event loop and are
+    // not tasks, so they need the same treatment: dispose, not the host, is what
+    // waits for them. Same shape — SIGTERM, bounded grace, then SIGKILL.
+    await killAllRunProcesses()
     if (child !== undefined && child.exitCode === null && child.signalCode === null) {
       // A started service may hold resources; let it release them. Node-only
       // workers never instantiated services, so they skip the round trip.
