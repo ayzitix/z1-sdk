@@ -73,6 +73,10 @@ const validArgs = {
   description: 'inspect one file',
   prompt: 'read the file and report the first line',
   tools: { enable: ['read'] },
+  // Every spec in this file was written for the v1 contract: block and return
+  // the child's result. Since 2b that is `wait: true`; the default is a
+  // background launch, which `background.spec.ts` covers.
+  wait: true,
 }
 
 interface ToolOverrides {
@@ -83,6 +87,8 @@ interface ToolOverrides {
   readonly budget?: SubagentBudget
   readonly guardCall?: SubagentCallGuard
   readonly signal?: AbortSignal
+  /** Shortcut for an `AbortController.signal`, the usual host wiring. */
+  readonly controller?: AbortController
 }
 
 function toolFor(
@@ -654,7 +660,7 @@ describe('runSubagent journal and lifecycle', () => {
     })
     const tool = toolFor(host, { timeoutMs: 10 })
 
-    const pending = tool.call(validArgs)
+    const pending = tool.call({ ...validArgs, wait: true })
     await tick()
 
     const outcome = await Promise.race([
@@ -723,8 +729,8 @@ describe('runSubagent limits', () => {
     const first = toolFor(host, { budget })
     const second = toolFor(host, { budget })
 
-    await first.call(validArgs)
-    const error = await runError(second.call(validArgs))
+    await first.call({ ...validArgs, wait: true })
+    const error = await runError(second.call({ ...validArgs, wait: true }))
 
     expect(error.code).toBe('limit_exceeded')
     expect(host.beginCalls).toHaveLength(1)
@@ -745,11 +751,11 @@ describe('runSubagent limits', () => {
     })
     const tool = toolFor(host, { budget })
 
-    const first = tool.call(validArgs)
+    const first = tool.call({ ...validArgs, wait: true })
     await tick()
     expect(host.beginCalls).toHaveLength(1)
 
-    const error = await runError(tool.call(validArgs))
+    const error = await runError(tool.call({ ...validArgs, wait: true }))
     expect(error.code).toBe('limit_exceeded')
     expect(host.beginCalls).toHaveLength(1)
 
@@ -772,7 +778,7 @@ describe('runSubagent parent cancellation', () => {
     const parent = new AbortController()
     const tool = toolFor(host, { signal: parent.signal })
 
-    const pending = tool.call(validArgs)
+    const pending = tool.call({ ...validArgs, wait: true })
     await model.pendingCall
     const runId = host.beginCalls[0]?.runId ?? ''
     // The row exists and is `running` while the child is live.

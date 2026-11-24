@@ -24,6 +24,9 @@ const validArgs = {
   description: 'inspect one file',
   prompt: 'read the file and report the first line',
   tools: { enable: ['read'] },
+  // These tests pin the v1 contract (block, return the child's result), which
+  // since 2b is `wait: true`; the background launch has its own spec file.
+  wait: true,
 }
 
 function asRecord(value: Json | undefined): Record<string, Json> {
@@ -77,6 +80,14 @@ describe('subagentToolSchema', () => {
     const toolProperties = asRecord(tools['properties'])
     expect(asRecord(toolProperties['enable'])['type']).toBe('array')
     expect(asRecord(toolProperties['disable'])['type']).toBe('array')
+
+    // 2b: `wait` is optional (absent ⇒ background) and the description says
+    // which mode to use when.
+    const wait = asRecord(properties['wait'])
+    expect(wait['type']).toBe('boolean')
+    expect(parameters['required']).not.toContain('wait')
+    expect(subagentToolSchema.description).toContain('background')
+    expect(subagentToolSchema.description).toContain('wait: true')
   })
 })
 
@@ -208,6 +219,9 @@ describe('createSubagentTool', () => {
       { ...validArgs, tools: { enable: ['read'], disable: ['reed'] } },
       { ...validArgs, description: 'd'.repeat(121) },
       { ...validArgs, prompt: 'p'.repeat(64 * 1024 + 1) },
+      // `wait` is optional, but a misspelt value must not decide the mode.
+      { ...validArgs, wait: 'flase' },
+      { ...validArgs, wait: 1 },
     ]
 
     for (const args of invalid) {

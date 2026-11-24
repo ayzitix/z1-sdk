@@ -114,7 +114,7 @@ export function parseSubagentInput(
   if (!isRecord(input)) {
     throw new SubagentError('invalid_input', 'subagent input must be an object')
   }
-  rejectUnknownKeys(input, ['description', 'prompt', 'tools'], 'subagent input')
+  rejectUnknownKeys(input, ['description', 'prompt', 'tools', 'wait'], 'subagent input')
 
   const description = input['description']
   if (typeof description !== 'string') {
@@ -214,6 +214,23 @@ export function parseSubagentInput(
     }
   }
 
+  // `wait` is the one field the model may omit, because the default is the
+  // meaningful choice: background. Any value other than a boolean or the
+  // strings an engine may legitimately produce for the same two states is a
+  // typo ("flase", 0, "no") and an error, never a silent background launch.
+  let wait: boolean | undefined
+  const rawWait = input['wait']
+  if (rawWait !== undefined) {
+    if (typeof rawWait === 'boolean') wait = rawWait
+    else if (rawWait === 'true' || rawWait === 'false') wait = rawWait === 'true'
+    else {
+      throw new SubagentError(
+        'invalid_input',
+        'subagent input.wait must be true or false when present',
+      )
+    }
+  }
+
   return {
     description,
     prompt,
@@ -221,6 +238,7 @@ export function parseSubagentInput(
       enable: enableNames,
       ...(disableNames === undefined ? {} : { disable: disableNames }),
     },
+    ...(wait === undefined ? {} : { wait }),
   }
 }
 

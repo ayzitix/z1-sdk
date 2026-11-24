@@ -47,6 +47,8 @@ const validArgs = {
   description: 'inspect one file',
   prompt: 'read the file and report the first line',
   tools: { enable: ['read'] },
+  // The v1 contract this file pins is `wait: true` since 2b.
+  wait: true,
 }
 
 function toolFor(host: ReturnType<typeof createFakeHost>) {

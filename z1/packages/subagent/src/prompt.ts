@@ -10,6 +10,20 @@ function label(name: string): string {
 }
 
 /**
+ * The one rule about `wait`, stated for the model in both places it reads: the
+ * `subagent` tool description and a subagent's own system prompt (a child of
+ * depth 0 could not delegate in v1, but the rule is about the tool it does not
+ * have yet and must not be guessed at differently).
+ *
+ * `wait: true` blocks and returns the child's text; the default launches the
+ * child in the background and returns a run id. The choice is made once, by
+ * the caller, and it is a mistake to call the tool a second time to "check" a
+ * background child: its output arrives on its own.
+ */
+export const SUBAGENT_WAIT_GUIDANCE =
+  '`subagent` runs the child in the background by default: the call returns `{ runId, status: "running" }` at once and the child\'s output arrives at the start of a later turn. Pass `wait: true` only when you need the answer to continue this step; use the default for independent work you can start now and read later.'
+
+/**
  * The custom system section for a child agent.
  *
  * It states the exact grant, that the grant is closed, and what a blocked child
@@ -26,6 +40,8 @@ export function subagentSystemPrompt(options: SubagentPromptOptions): string {
   return [
     'You are a subagent. The parent agent delegated one self-contained task to you.',
     'Your final message is the only thing the parent sees. You cannot ask questions or wait for input during this run, and you cannot delegate to another agent.',
+    '',
+    SUBAGENT_WAIT_GUIDANCE,
     '',
     '## Fixed tool grant',
     tools,

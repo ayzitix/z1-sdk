@@ -2,6 +2,7 @@ import type { Json, ToolSchema } from '@z1/node'
 import type { ToolService } from '@z1/runtime'
 
 import { normalizeToolName } from './grant.ts'
+import { SUBAGENT_WAIT_GUIDANCE } from './prompt.ts'
 import { runSubagent } from './run.ts'
 import {
   MAX_SUBAGENT_DESCRIPTION_LENGTH,
@@ -26,7 +27,7 @@ export { restrictToolService } from './restrict.ts'
 export const subagentToolSchema: ToolSchema = {
   name: SUBAGENT_TOOL_NAME,
   description:
-    'Delegate one self-contained task to a child agent that does not see this conversation. Choose the exact tools it may use; the child cannot delegate further.',
+    `Delegate one self-contained task to a child agent that does not see this conversation. Choose the exact tools it may use; the child cannot delegate further. ${SUBAGENT_WAIT_GUIDANCE}`,
   parameters: {
     type: 'object',
     additionalProperties: false,
@@ -64,27 +65,39 @@ export const subagentToolSchema: ToolSchema = {
           },
         },
       },
+      wait: {
+        type: 'boolean',
+        description:
+          'Default false: return { runId, status: "running" } immediately and deliver the result at a later turn. true: block now and return the result text. Use true only when the answer is needed to continue.',
+      },
     },
   },
 }
 
 function resultJson(result: SubagentToolResult): Json {
+  const running = result.status === 'running'
   return {
     runId: result.runId,
     status: result.status,
     tools: [...result.tools],
     denied: [...result.denied],
     output: result.output,
-    // The machine-readable code travels next to the text, so a host that
-    // branches on `errorCode` never has to parse the message; `isError` is the
-    // same channel `z1.tool.call` uses for a failed tool.
-    ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
-    ...(result.message === undefined ? {} : { message: result.message }),
-    ...(result.partial === undefined ? {} : { partial: result.partial }),
-    ...(result.steps === undefined ? {} : { steps: result.steps }),
-    ...(result.elapsedMs === undefined ? {} : { elapsedMs: result.elapsedMs }),
-    ...(result.detail === undefined ? {} : { detail: result.detail }),
-    isError: result.status !== 'completed',
+    // A background launch is not a failure and carries no outcome fields; the
+    // host learns the outcome from the launch handle, never from this object.
+    ...(running
+      ? {}
+      : {
+          // The machine-readable code travels next to the text, so a host that
+          // branches on `errorCode` never has to parse the message; `isError` is
+          // the same channel `z1.tool.call` uses for a failed tool.
+          ...(result.errorCode === undefined ? {} : { errorCode: result.errorCode }),
+          ...(result.message === undefined ? {} : { message: result.message }),
+          ...(result.partial === undefined ? {} : { partial: result.partial }),
+          ...(result.steps === undefined ? {} : { steps: result.steps }),
+          ...(result.elapsedMs === undefined ? {} : { elapsedMs: result.elapsedMs }),
+          ...(result.detail === undefined ? {} : { detail: result.detail }),
+        }),
+    isError: !running && result.status !== 'completed',
     text: result.text,
   }
 }

@@ -40,6 +40,12 @@ export interface SubagentInput {
   readonly description: string
   readonly prompt: string
   readonly tools: SubagentToolSelection
+  /**
+   * `true` waits for the child and returns its result text; omitted or `false`
+   * runs it in the background and returns `{ runId, status: 'running' }` at
+   * once. Parsed by {@link parseSubagentInput}.
+   */
+  readonly wait?: boolean
 }
 
 /**
@@ -426,6 +432,36 @@ export interface SubagentToolOptions {
    * events, so a host cannot confuse the two.
    */
   readonly onEvent?: (event: RunEventWithRunId) => void
+  /**
+   * Called once a background child's run row exists and the child is about to
+   * start, with a handle the host keeps in order to observe and stop it. It is
+   * the background counterpart of `onEvent`: the *result* arrives through
+   * `handle.result`, never as a tool result.
+   *
+   * A host that loses the handle cannot stop the child but does not leak it:
+   * the child is still bounded by `timeoutMs` and its budget slot is released
+   * when it ends.
+   */
+  readonly onBackground?: (handle: SubagentLaunch) => void
+}
+
+/** A launch the model must not wait for: the run exists, the outcome does not. */
+export interface SubagentLaunch {
+  /** The launch result the tool call returns: `{ status: 'running' }`. */
+  readonly result: SubagentBackgroundResult
+  /**
+   * Resolves with the child's final result (a finished child is a result, never
+   * a throw - the same rule `wait: true` follows) or rejects only when the
+   * final run row could not be recorded, mirroring the foreground path.
+   */
+  readonly done: Promise<SubagentToolResult>
+  /**
+   * Stop the child now. Idempotent; a child that already settled ignores it.
+   * The child records `cancelled` (never `failed`), exactly like a host signal.
+   */
+  cancel(reason?: unknown): void
+  /** The child's own controller; it is never wired to the parent turn's. */
+  readonly controller: AbortController
 }
 
 /** A child event. Every `RunEvent` already carries `runId`; this names it. */
@@ -444,10 +480,18 @@ export type RunEventWithRunId = RunEvent & { readonly runId: string }
  * A failed run does not throw: the caller gets this object with `isError: true`
  * on the tool channel (see `call`), so the code survives the tool boundary the
  * way `z1.tool.call`'s `{ isError: true }` result does.
+ *
+ * A background launch is a {@link SubagentLaunch}: the tool call resolves
+ * before the child has an outcome, and the outcome reaches the host through the
+ * launch task's promise, never as a tool result.
  */
 export interface SubagentToolResult {
   readonly runId: string
-  readonly status: SubagentToolStatus
+  /**
+   * `running` only on a {@link SubagentBackgroundResult}; every entry of a
+   * finished result is the package's tool status.
+   */
+  readonly status: SubagentToolStatus | 'running'
   readonly tools: readonly string[]
   readonly denied: readonly string[]
   /** The child's answer; empty when it produced none. */
@@ -471,6 +515,17 @@ export interface SubagentToolResult {
   readonly message?: string
   /** The model-facing block, `\n`-separated; starts with the data preamble. */
   readonly text: string
+}
+
+/**
+ * What a background launch returns in the model's step: the run exists, it is
+ * not finished, and its result will not come back through this tool call.
+ *
+ * `text` is the model-facing block (one line plus the run id), so the model
+ * knows the child was started and that it must not wait for it.
+ */
+export interface SubagentBackgroundResult extends SubagentToolResult {
+  readonly status: 'running'
 }
 
 /** The host-side tool: a schema plus the callable implementation. */

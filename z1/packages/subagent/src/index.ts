@@ -19,6 +19,7 @@ export {
 export type {
   RestrictToolServiceOptions,
   RunEventWithRunId,
+  SubagentBackgroundResult,
   SubagentBudgetOptions,
   SubagentCallGuard,
   SubagentErrorCode,
@@ -29,6 +30,7 @@ export type {
   SubagentInput,
   SubagentInputLimits,
   SubagentInventory,
+  SubagentLaunch,
   SubagentReservation,
   SubagentRunHandle,
   SubagentRunOverrides,
@@ -47,12 +49,14 @@ export type {
   WithSubagentToolOptions,
 } from './types.ts'
 export { normalizeToolName, parseSubagentInput, resolveToolGrant } from './grant.ts'
-export { subagentSystemPrompt } from './prompt.ts'
+export { SUBAGENT_WAIT_GUIDANCE, subagentSystemPrompt } from './prompt.ts'
 export type { SubagentPromptOptions } from './prompt.ts'
 export {
   MAX_SUBAGENT_RESULT_TEXT,
+  SUBAGENT_LAUNCH_LINE,
   SUBAGENT_RESULT_PREAMBLE,
   assistantTexts,
+  backgroundLaunchText,
   neutraliseChildText,
   partialText,
   resultText,
@@ -62,7 +66,12 @@ export {
   toolStatus,
   truncateText,
 } from './result.ts'
-export type { SubagentResultInput, SubagentResultSection, SubagentResultText } from './result.ts'
+export type {
+  SubagentLaunchTextInput,
+  SubagentResultInput,
+  SubagentResultSection,
+  SubagentResultText,
+} from './result.ts'
 export {
   createSubagentTool,
   restrictToolService,

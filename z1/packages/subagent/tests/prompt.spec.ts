@@ -46,6 +46,14 @@ describe('subagentSystemPrompt', () => {
     }
   })
 
+  test('explains `wait` so a child delegating later chooses the right mode', () => {
+    const prompt = subagentSystemPrompt({ tools: ['read'] })
+
+    expect(prompt).toContain('runs the child in the background by default')
+    expect(prompt).toContain('wait: true')
+    expect(prompt).toContain('only when you need the answer to continue')
+  })
+
   test('is deterministic and lists only the exact grant', () => {
     const first = subagentSystemPrompt({ tools: ['read'] })
     const second = subagentSystemPrompt({ tools: ['read'] })
