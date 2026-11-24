@@ -7,6 +7,15 @@ import type { ModuleManifest } from './types.ts'
 /** Names skipped by the integrity walk and by the proposal copy. */
 const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git'])
 
+/**
+ * Files the store itself writes into a module directory after its digest has
+ * been taken: `installed.json` is the install record, added to the payload
+ * copy once `directoryIntegrity` has already been checked against the proposal
+ * (`store.ts`, `install`). Hashing it would make a digests-vs-record check fail
+ * by construction, so it is store metadata, not payload, in both directions.
+ */
+export const STORE_METADATA_FILES = new Set(['installed.json'])
+
 export interface IntegrityFile {
   /** Path relative to the module root, always with POSIX separators. */
   path: string
@@ -18,8 +27,14 @@ export function sha256Hex(data: string | Uint8Array): string {
   return createHash('sha256').update(data).digest('hex')
 }
 
+/**
+ * The single skip rule for payload files. `walkIntegrityFiles` (hashing),
+ * `copyPayload` (proposal and install copies) and any digest recomputed over
+ * an already-installed directory all go through it, so a file that is not
+ * hashed is also not copied, and vice versa.
+ */
 function shouldSkipFile(name: string): boolean {
-  return name.endsWith('.log')
+  return name.endsWith('.log') || STORE_METADATA_FILES.has(name)
 }
 
 function toPosixPath(path: string): string {
@@ -29,7 +44,9 @@ function toPosixPath(path: string): string {
 /**
  * Recursively collect the files that make up a module payload. `node_modules`,
  * `.git` and `*.log` are excluded because they are either build artefacts or
- * runtime noise that must not change a module's identity.
+ * runtime noise that must not change a module's identity; `installed.json` is
+ * excluded because the store writes it after hashing, so an installed
+ * directory must hash exactly like the payload it was copied from.
  */
 export function walkIntegrityFiles(root: string): IntegrityFile[] {
   const files: IntegrityFile[] = []

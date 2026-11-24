@@ -13,7 +13,7 @@ import { join, resolve } from 'node:path'
 import { AuditLog } from './audit.ts'
 import type { AuditEntry } from './audit.ts'
 import { canonicalJson } from './canonical.ts'
-import { copyPayload, directoryIntegrity } from './integrity.ts'
+import { copyPayload, directoryIntegrity, STORE_METADATA_FILES } from './integrity.ts'
 import { compareVersions, ModuleManifestError, parseManifest, serviceMode } from './manifest.ts'
 import { writeFileAtomic } from './fsutil.ts'
 import type {
@@ -57,6 +57,7 @@ export type ModuleStoreErrorCode =
   | 'invalid-manifest'
   | 'entry-missing'
   | 'integrity-conflict'
+  | 'metadata-conflict'
   | 'not-proposed'
   | 'not-installed'
   | 'corrupt-installed'
@@ -446,6 +447,19 @@ export class ModuleStore {
     // A source shipped without package.json still installs as ESM: the copy
     // gains one, and the source digest is computed as if it already had it so
     // both sides agree.
+    // A source must not ship store metadata. `installed.json` is written by the
+    // store after it hashes a module, and `copyPayload` drops it, so a source
+    // copy would silently lose a file its author meant to install. Refusing it
+    // keeps the boundary between payload and store state an explicit rule
+    // rather than a side effect of the copy filter.
+    const planted = [...STORE_METADATA_FILES].filter((name) => existsSync(resolve(source, name)))
+    if (planted.length > 0) {
+      throw new ModuleStoreError(
+        'metadata-conflict',
+        `a module source must not contain store metadata: ${planted.join(', ')}`,
+      )
+    }
+
     const sourceAdditions = existsSync(join(source, 'package.json'))
       ? {}
       : { 'package.json': MODULE_PACKAGE_JSON }

@@ -59,4 +59,23 @@ describe('directoryIntegrity', () => {
 
     expect(directoryIntegrity(noisy, manifest())).toBe(directoryIntegrity(clean, manifest()))
   })
+
+  test('ignores installed.json written by the store after hashing', () => {
+    const directory = temporary()
+    writeModule(directory)
+    const recorded = directoryIntegrity(directory, manifest())
+
+    // The install record is produced by `ModuleStore.install` after the copy
+    // has been hashed and verified; recomputing must still match it.
+    writeFileSync(
+      join(directory, 'installed.json'),
+      `${JSON.stringify(
+        { manifest: manifest(), integrity: recorded, installedAt: 1_700_000_000_000 },
+        null,
+        2,
+      )}\n`,
+    )
+
+    expect(directoryIntegrity(directory, manifest())).toBe(recorded)
+  })
 })

@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
-import { ModuleStore } from '../src/index.ts'
+import { directoryIntegrity, ModuleStore } from '../src/index.ts'
 import { manifest, writeModule } from './fixtures.ts'
 
 const created: string[] = []
@@ -80,6 +80,28 @@ describe('ModuleStore install and grants', () => {
     expect(store.grants()).toHaveLength(1)
     expect(store.get(id)?.integrity).toBe(proposed.integrity)
     expect(store.audit().map((entry) => entry.type)).toEqual(['propose', 'install', 'approve'])
+  })
+
+  test('the installed directory recomputes to the recorded integrity', () => {
+    const { store, source } = setup()
+    const proposed = store.propose(source)
+    const installed = store.approve(id, '1.0.0')
+
+    // `installed.json` lives inside the directory it describes, so a verifier
+    // that recomputes the digest of an installed module must skip it.
+    expect(existsSync(join(installed.directory, 'installed.json'))).toBe(true)
+    expect(directoryIntegrity(installed.directory, installed.manifest)).toBe(proposed.integrity)
+
+    store.activate(id, '1.0.0')
+    expect(directoryIntegrity(installed.directory, installed.manifest)).toBe(proposed.integrity)
+  })
+
+  test('a source carrying store metadata is refused, not silently stripped', () => {
+    // `copyPayload` drops `installed.json`, so without an explicit refusal a
+    // source that shipped one would lose a file its author meant to install.
+    const { store, source } = setup()
+    writeFileSync(join(source, 'installed.json'), '{"integrity":"forged"}')
+    expect(() => store.propose(source)).toThrow(/must not contain store metadata/)
   })
 
   test('install is idempotent and does not duplicate audit entries', () => {
