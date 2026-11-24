@@ -470,6 +470,11 @@ export function runProcess(
       // Own process group: a timeout can signal the whole tree, and the group
       // is swept for orphans once the leader exits.
       detached: true,
+      // On Windows `detached` alone allocates a console *window* for the child,
+      // so every tool call flashed one on the user's screen. The process group
+      // still works with the window hidden: the tool's output comes back
+      // through the pipes, and cancellation still signals the whole tree.
+      windowsHide: true,
       stdio: [options.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     })
 

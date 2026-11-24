@@ -1055,6 +1055,10 @@ export class ModuleWorker {
     const child = spawn(process.execPath, args, {
       cwd: this.#moduleDir,
       env,
+      // A module worker is an implementation detail: on Windows a spawn without
+      // this allocates a console window, and the user sees one per module
+      // installation. Its stdout/stderr come back through the pipes.
+      windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     })
     this.#child = child

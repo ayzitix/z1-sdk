@@ -208,6 +208,9 @@ export class ProcessTasks {
         shell: false,
         // Own process group: a dev server's children die with one group signal.
         detached: true,
+        // Same reason as `process.run`: without it Windows opens a console
+        // window for the child. A background process is supposed to be unseen.
+        windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
     } catch (error) {
