@@ -38,8 +38,12 @@ import {
   MAX_PROCESS_TIMEOUT_MS,
   baseProcessEnv,
   clampProcessOption,
+  executionProcessOwner,
   killAllRunProcesses,
+  killRunProcessesFor,
   runProcess,
+  serviceCallProcessOwner,
+  type RunProcessOwner,
 } from './process-run.ts'
 import { ProcessTaskError, ProcessTasks } from './process-tasks.ts'
 import type {
@@ -56,7 +60,11 @@ import type {
 const PACKAGE = '@z1/node-host'
 
 const HANDSHAKE_TIMEOUT_MS = 10_000
-const KILL_GRACE_MS = 2_000
+/**
+ * How long a cancelled execution has to acknowledge before the host SIGKILLs
+ * its worker. Exported so a test can wait past it instead of hard-coding 2 s.
+ */
+export const KILL_GRACE_MS = 2_000
 /** How long `dispose()` waits for the child's `disposed` handshake. */
 const DISPOSE_GRACE_MS = 2_000
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -205,6 +213,11 @@ interface PendingExecution {
 
 interface PendingServiceCall {
   readonly id: number
+  /**
+   * Owner token for every `process.run` child this call spawns, so a cancel or
+   * a timeout can reap them — the module is inside the RPC and cannot.
+   */
+  readonly owner: RunProcessOwner
   readonly serviceId: string
   readonly method: string
   readonly onDelta: ((delta: unknown) => void) | undefined
@@ -859,6 +872,7 @@ export class ModuleWorker {
     return new Promise<unknown>((resolveValue, rejectValue) => {
       const pending: PendingServiceCall = {
         id,
+        owner: serviceCallProcessOwner(id),
         serviceId,
         method,
         onDelta: options.onDelta,
@@ -871,6 +885,10 @@ export class ModuleWorker {
 
       pending.timer = setTimeout(() => {
         if (pending.settled) return
+        // Kill first, then cancel: a service blocked inside `process.run`
+        // cannot observe `service-cancel` at all. Ending its child group makes
+        // the RPC reject, so the call unwinds on its own terms.
+        killRunProcessesFor(pending.owner)
         this.#settleServiceCall(pending, {
           ok: false,
           error: new Error(
@@ -906,6 +924,9 @@ export class ModuleWorker {
       this.#abortExecution(execution, reason)
     }
     for (const pending of [...this.#serviceCalls.values()]) {
+      // Same order as `#abortExecution`: the child is the part no module-side
+      // signal can stop while the module is inside `process.run`.
+      killRunProcessesFor(pending.owner)
       this.#send({ t: 'service-cancel', id: pending.id })
       this.#settleServiceCall(pending, { ok: false, error: new Error(reason) })
     }
@@ -1166,7 +1187,19 @@ export class ModuleWorker {
       const method = raw['method']
       if (typeof callId !== 'number' || typeof method !== 'string') return
       const execution = this.#executions.get(executionId)
-      void this.#handleCall(child, callId, method, raw['args'], execution)
+      // The worker sends the service-call id as the execution id for RPCs a
+      // service makes inside a call (`worker.ts`), so a service's child is
+      // attributed to the call the timeout/cancel paths can actually kill. An
+      // id in neither map is a call made outside any execution (a factory);
+      // there is no cancel path for such an id, so its child is only reachable
+      // through `killAllRunProcesses` and lives to its own `timeoutMs`.
+      const owner =
+        execution !== undefined
+          ? executionProcessOwner(execution.id)
+          : this.#serviceCalls.has(executionId)
+            ? serviceCallProcessOwner(executionId)
+            : executionProcessOwner(executionId)
+      void this.#handleCall(child, callId, method, raw['args'], execution, owner)
       return
     }
     if (type === 'result') {
@@ -1439,6 +1472,23 @@ export class ModuleWorker {
 
   #abortExecution(execution: PendingExecution, reason: string): void {
     if (execution.settled) return
+    // ORDER: kill the child groups of this execution BEFORE sending `cancel`.
+    //
+    // A node blocked inside `process.run` is waiting on this host: `ctx.signal`
+    // cannot fire into it, so the child process must be ended here or the node
+    // can never unwind. Killing the group (SIGTERM, then SIGKILL after the
+    // grace) makes the RPC reject with a capability error; the node's own
+    // `catch` then sees `ctx.signal.aborted` and acknowledges `cancelled`,
+    // which disarms the 2 s kill timer below. Sending `cancel` first would
+    // leave the same stuck node in the same state and the timer would SIGKILL
+    // the whole module worker — taking every concurrent execution with it.
+    //
+    // The reverse risk is time-bound, not a wedge: a node that starts a new
+    // `process.run` after this point is still answered by the host. On Windows
+    // the worker kill below takes that child's tree with it; on POSIX the
+    // worker is SIGKILLed alone and the new runProcess child, being a detached
+    // group leader, lives to its own `timeoutMs` or until `dispose()`.
+    killRunProcessesFor(executionProcessOwner(execution.id))
     // Name the execution: the child may be running nodes of other runs.
     this.#send({ t: 'cancel', id: execution.id, reason })
     // The child acknowledges with `cancelled` once its node has unwound, and
@@ -1497,15 +1547,24 @@ export class ModuleWorker {
     else pending.reject(outcome.error)
   }
 
+  /**
+   * Serve one capability RPC.
+   *
+   * `owner` names the execution or service call that will receive the result,
+   * so a spawned `process.run` child can be attributed to it and killed when
+   * that work is cancelled. It is the caller's identity, never anything the
+   * module sends.
+   */
   async #handleCall(
     child: ChildProcess,
     callId: number,
     method: string,
     args: unknown,
     execution: PendingExecution | undefined,
+    owner: RunProcessOwner,
   ): Promise<void> {
     try {
-      const value = await this.#dispatch(child, callId, method, args, execution)
+      const value = await this.#dispatch(child, callId, method, args, execution, owner)
       if (this.#child !== child) return
       this.#send({ t: 'call-result', callId, ok: true, value: value ?? null })
     } catch (error) {
@@ -1536,6 +1595,7 @@ export class ModuleWorker {
     method: string,
     args: unknown,
     execution: PendingExecution | undefined,
+    owner: RunProcessOwner,
   ): Promise<unknown> {
     const nodeId = execution?.nodeId ?? 'module'
     const scope = execution?.scope
@@ -1676,7 +1736,7 @@ export class ModuleWorker {
             )
           }
         }
-        return this.#runProcess(request)
+        return this.#runProcess(request, owner)
       }
       case 'process.start': {
         if (!isRecord(args)) throw new Error('process.start requires { command }')
@@ -1847,13 +1907,20 @@ export class ModuleWorker {
     return { path: directory, entries }
   }
 
-  /** Spawn the validated request with the inherited allowlist and shared cap. */
-  #runProcess(request: ProcessRunArguments): Promise<ProcessRunResult> {
+  /**
+   * Spawn the validated request with the inherited allowlist and shared cap.
+   *
+   * `owner` is recorded in the child's registry entry: when the execution or
+   * service call that asked for this child is cancelled or times out, the host
+   * reaps this process group instead of SIGKILLing the whole worker.
+   */
+  #runProcess(request: ProcessRunArguments, owner: RunProcessOwner): Promise<ProcessRunResult> {
     return runProcess(request.command, request.args, {
       cwd: resolve(this.#moduleDir, request.cwd ?? this.#moduleDir),
       env: baseProcessEnv(request.env),
       timeoutMs: request.timeoutMs,
       maxOutputBytes: request.maxOutputBytes,
+      owner,
       ...(request.stdin === undefined ? {} : { stdin: request.stdin }),
     })
   }

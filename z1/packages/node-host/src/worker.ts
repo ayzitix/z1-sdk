@@ -155,6 +155,13 @@ interface ModuleServiceContext {
 interface ServiceCallContext {
   readonly runId: string
   readonly signal: AbortSignal
+  /**
+   * The host's id for this service call. Capability RPCs sent from inside the
+   * call carry it as their execution id, which is how the host attributes a
+   * `process.run` child (and later a cancel) to this call rather than to a node
+   * execution — without it every service RPC looked like execution 0.
+   */
+  readonly callId: number
 }
 
 const callContext = new AsyncLocalStorage<ServiceCallContext>()
@@ -457,7 +464,10 @@ function serviceContext(
   serviceId: string,
   started: Map<string, Record<string, unknown>>,
 ): ModuleServiceContext {
-  const invoke = (method: string, args: unknown): Promise<unknown> => call(0, method, args)
+  // Outside a call (a factory, a getter read between calls) there is no call
+  // to attribute the RPC to; `0` is the host's "no execution" id.
+  const owner = (): number => callContext.getStore()?.callId ?? 0
+  const invoke = (method: string, args: unknown): Promise<unknown> => call(owner(), method, args)
   const current = (): ServiceCallContext | undefined => callContext.getStore()
   return {
     moduleId: metadata.moduleId,
@@ -494,7 +504,7 @@ function serviceContext(
     },
     llm: {
       chat: (chatRequest, onDelta) =>
-        call(0, 'llm.chat', chatRequest, onDelta) as Promise<ChatResult>,
+        call(owner(), 'llm.chat', chatRequest, onDelta) as Promise<ChatResult>,
       get: (request) =>
         invoke('llm.get', {
           provider: request.provider,
@@ -745,7 +755,7 @@ async function runServiceCall(
   const controller = new AbortController()
   serviceCallSignals.set(id, controller)
   try {
-    const produced = await callContext.run({ runId, signal: controller.signal }, async () => {
+    const produced = await callContext.run({ runId, signal: controller.signal, callId: id }, async () => {
       const instance = services.get(serviceId)
       if (instance === undefined) {
         throw new Error(`module entry does not export service "${serviceId}"`)

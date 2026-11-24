@@ -66,6 +66,37 @@ export interface RunProcessOptions {
   maxOutputBytes: number
   /** Everything written to the child's stdin, which is then closed. */
   stdin?: string
+  /**
+   * The execution or service call that asked for this child.
+   *
+   * A child lives outside the worker: cancelling a module's execution does not
+   * stop it, and a module stuck inside `process.run` cannot react to the
+   * cancel at all. Tagging the child with its owner is what lets the host kill
+   * exactly the child of the call being cancelled — see
+   * {@link killRunProcessesFor}. Children without an owner are only reachable
+   * through {@link killAllRunProcesses}.
+   *
+   * An owned child's lifetime is therefore **the call**, not the process. A
+   * tool that starts a long-running child (a dev server, a watcher) and returns
+   * early keeps it only while nobody cancels that call; on cancel the whole
+   * group is SIGTERMed and then SIGKILLed. Before ownership existed such a
+   * child survived until the runtime was disposed. A tool that needs a child to
+   * outlive its call must use `process.start`, which `ProcessTasks` owns.
+   */
+  owner?: RunProcessOwner
+}
+
+/** An opaque token identifying the execution or service call that owns a child. */
+export type RunProcessOwner = string
+
+/** Owner token for a node execution, unique per worker. */
+export function executionProcessOwner(executionId: number): RunProcessOwner {
+  return `execution:${executionId}`
+}
+
+/** Owner token for a service call, unique per worker. */
+export function serviceCallProcessOwner(callId: number): RunProcessOwner {
+  return `service-call:${callId}`
 }
 
 /** True when `key` is on the inherited-environment allowlist. */
@@ -162,6 +193,18 @@ interface PendingSegment {
  */
 const liveRunProcesses = new Map<number, ChildProcess>()
 
+/**
+ * The same children, grouped by the execution or service call that spawned
+ * them.
+ *
+ * `liveRunProcesses` answers "everything"; this index answers "the children of
+ * *this* call", which is what a cancel needs: one child must not be able to
+ * outlive the call that started it, but killing a sibling call's child is just
+ * as wrong. Both registries are written and cleared together, under the same
+ * identity guards, so an owner never outlives its last child.
+ */
+const liveRunProcessesByOwner = new Map<RunProcessOwner, Set<ChildProcess>>()
+
 /** Signal the child's process group, falling back to the child alone. */
 function signalGroupOf(child: ChildProcess, signal: NodeJS.Signals): void {
   const pid = child.pid
@@ -227,6 +270,100 @@ export function liveRunProcessPids(): readonly number[] {
 }
 
 /**
+ * Pids currently attributed to `owner`.
+ *
+ * Same caveats as {@link liveRunProcessPids}; the owner index is diagnostic and
+ * a cancel path only. Exposed for tests.
+ */
+export function liveRunProcessPidsFor(owner: RunProcessOwner): readonly number[] {
+  const children = liveRunProcessesByOwner.get(owner)
+  if (children === undefined) return []
+  const pids: number[] = []
+  for (const child of children) {
+    if (child.pid !== undefined) pids.push(child.pid)
+  }
+  return pids
+}
+
+/**
+ * Record a spawned child in both registries. The identity check on the pid is
+ * the same in both, so a reused pid can never be attributed to the wrong child.
+ */
+function registerRunProcess(child: ChildProcess, pid: number, owner: RunProcessOwner | undefined): void {
+  liveRunProcesses.set(pid, child)
+  if (owner === undefined) return
+  let children = liveRunProcessesByOwner.get(owner)
+  if (children === undefined) {
+    children = new Set()
+    liveRunProcessesByOwner.set(owner, children)
+  }
+  children.add(child)
+}
+
+/**
+ * Drop a child from both registries, using the same identity guard for each so
+ * a reused pid is never attributed to the wrong child.
+ */
+function unregisterRunProcess(
+  child: ChildProcess,
+  pid: number | undefined,
+  owner: RunProcessOwner | undefined,
+): void {
+  if (pid !== undefined && liveRunProcesses.get(pid) === child) {
+    liveRunProcesses.delete(pid)
+  }
+  if (owner === undefined) return
+  const children = liveRunProcessesByOwner.get(owner)
+  if (children === undefined) return
+  children.delete(child)
+  if (children.size === 0) liveRunProcessesByOwner.delete(owner)
+}
+
+/**
+ * Kill every `runProcess` child started by one execution or service call.
+ *
+ * This is the module-agnostic half of cancellation: a module blocked inside
+ * `process.run` cannot observe `ctx.signal` (it is inside the RPC), so the host
+ * is the only party that can end the child. Once the child dies the RPC
+ * rejects, the node unwinds, and its `cancelled` acknowledgement disarms the
+ * worker kill timer — which is why the caller must kill the child *before*
+ * sending `cancel`, not after.
+ *
+ * SIGTERM goes to each process group immediately, SIGKILL to whatever is still
+ * alive after `graceMs`. {@link reapGroup} already falls back to a force-kill
+ * on Windows, where a console-less `detached` child swallows SIGTERM.
+ *
+ * The owner index is cleared up front, so the call is idempotent and a second
+ * cancel (or a pid reuse) cannot signal the same group twice. Synchronous on
+ * purpose: the caller has to be able to kill *and then* send `cancel` without
+ * awaiting a grace period. The timer is unref'd, so a pending SIGKILL never
+ * keeps the host alive.
+ */
+export function killRunProcessesFor(
+  owner: RunProcessOwner,
+  signal: NodeJS.Signals = 'SIGTERM',
+  graceMs: number = PROCESS_KILL_GRACE_MS,
+): void {
+  const children = liveRunProcessesByOwner.get(owner)
+  if (children === undefined) return
+  // Detach the owner up front: a second cancel finds nothing to signal. The pid
+  // entries stay owned by the "everything" path until each child exits (its
+  // `exit` handler drops them), so `killAllRunProcesses` still sees them.
+  liveRunProcessesByOwner.delete(owner)
+  const pending = [...children]
+  for (const child of pending) reapGroup(child, signal)
+  if (signal === 'SIGKILL') return
+  const timer = setTimeout(() => {
+    for (const child of pending) {
+      // `exit` normally deregisters the child long before this; a signal code
+      // is not reported reliably for a signalled group, so ask for the code.
+      if (child.exitCode === null && child.signalCode === null) reapGroup(child, 'SIGKILL')
+    }
+  }, graceMs)
+  timer.unref?.()
+}
+
+/**
  * Reap every live `runProcess` child: `signal` (SIGTERM by default) to each
  * process group, {@link PROCESS_KILL_GRACE_MS} to let it shut down, then SIGKILL
  * to whatever is left. The registry is cleared up front, so the call is
@@ -244,6 +381,8 @@ export async function killAllRunProcesses(
 ): Promise<void> {
   const children = [...liveRunProcesses.values()]
   liveRunProcesses.clear()
+  // "Everything" is every owner: the index cannot outlive the pid registry.
+  liveRunProcessesByOwner.clear()
   for (const child of children) reapGroup(child, signal)
   if (children.length === 0) return
   await Promise.race([Promise.all(children.map((child) => exited(child))), delay(graceMs)])
@@ -263,6 +402,7 @@ export async function killAllRunProcesses(
 function killAllRunProcessesSync(signal: NodeJS.Signals = 'SIGKILL'): void {
   const children = [...liveRunProcesses.values()]
   liveRunProcesses.clear()
+  liveRunProcessesByOwner.clear()
   for (const child of children) reapGroup(child, signal)
 }
 
@@ -339,19 +479,17 @@ export function runProcess(
     }
 
     // Owned from the moment it has a pid: a host shutdown reaps this child the
-    // same way a timeout does. `exit` always precedes `close`, so dropping the
-    // entry there is enough; an `error` before spawn is the other way out.
+    // same way a timeout does, and a cancel reaps it by owner. `exit` always
+    // precedes `close`, so dropping the entry there is enough; an `error`
+    // before spawn is the other way out.
     const pid = child.pid
-    if (pid !== undefined) liveRunProcesses.set(pid, child)
+    const owner = options.owner
+    if (pid !== undefined) registerRunProcess(child, pid, owner)
     child.on('exit', () => {
-      if (pid !== undefined && liveRunProcesses.get(pid) === child) {
-        liveRunProcesses.delete(pid)
-      }
+      unregisterRunProcess(child, pid, owner)
     })
     child.on('error', () => {
-      if (pid !== undefined && liveRunProcesses.get(pid) === child) {
-        liveRunProcesses.delete(pid)
-      }
+      unregisterRunProcess(child, pid, owner)
     })
 
     const settle = (outcome: ProcessRunResult): void => {
