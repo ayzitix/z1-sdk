@@ -101,13 +101,17 @@ export const toolCreateSchema: ToolSchema = {
 /**
  * Is the decorator enabled for this process?
  *
- * Off unless `Z1_TOOL_CREATOR` is `1` (or `true`). The bootstrap reads its
+ * On by default: `tool.create` is a system tool — it shows up in every listing
+ * and is refused by `delete`, so the only way to remove it is at its source.
+ * `Z1_TOOL_CREATOR` set to `0`, `false`, `off` or `no` (trimmed, any case) turns
+ * it off; an unset, empty or unknown value leaves it on. The bootstrap reads its
  * resolved environment, not `process.env` directly, so a test or a host that
  * supplies `env` decides for itself.
  */
 export function toolCreatorEnabled(env: Record<string, string | undefined> = process.env): boolean {
   const value = env[TOOL_CREATOR_ENV]?.trim().toLowerCase()
-  return value === '1' || value === 'true'
+  if (value === undefined || value === '') return true
+  return value !== '0' && value !== 'false' && value !== 'off' && value !== 'no'
 }
 
 /**

@@ -149,10 +149,23 @@ test('a run model turns tool.create into one two-message model call', async () =
   }
 })
 
-test('the switch is off by default, so the tool is absent', async () => {
+test('the tool is present by default and gone when the switch says off', async () => {
   vi.stubEnv('Z1_TOOL_SDK_PATH', fakeSdk)
-  const runtime = await makeRuntime({})
+
+  // Default: system tool, listed beside the run's own tools.
+  const on = await makeRuntime({})
+  const onHandle = await on.beginRun({ approval, llm: fakeLlm(), model: MODEL })
+  try {
+    expect((await onHandle.services.tools.list()).map((schema) => schema.name)).toContain(
+      'tool.create',
+    )
+  } finally {
+    await onHandle.dispose()
+  }
+
+  // `Z1_TOOL_CREATOR=0`: the run's own tool service answers, as it always did.
   const llm = fakeLlm()
+  const runtime = await makeRuntime({ Z1_TOOL_CREATOR: '0' })
   const handle = await runtime.beginRun({ approval, llm, model: MODEL })
 
   try {

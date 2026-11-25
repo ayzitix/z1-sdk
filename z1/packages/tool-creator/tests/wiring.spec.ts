@@ -26,21 +26,24 @@ import { fakeInner } from './fakes.ts'
  * one file, so the branch is what is worth pinning.
  */
 describe('the Z1_TOOL_CREATOR switch', () => {
-  test('is off when unset or set to anything but 1/true', () => {
-    expect(toolCreatorEnabled({})).toBe(false)
-    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: '0' })).toBe(false)
-    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: 'yes' })).toBe(false)
-    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: '   ' })).toBe(false)
-  })
-
-  test('is on for "1" and "true", in any case', () => {
+  test('is on by default and stays on for anything but an explicit falsey value', () => {
+    expect(toolCreatorEnabled({})).toBe(true)
     expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: '1' })).toBe(true)
     expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: ' TRUE ' })).toBe(true)
+    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: '   ' })).toBe(true)
+    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: 'whatever' })).toBe(true)
+  })
+
+  test('is off for 0, false, off and no, in any case', () => {
+    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: '0' })).toBe(false)
+    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: ' OFF ' })).toBe(false)
+    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: 'false' })).toBe(false)
+    expect(toolCreatorEnabled({ [TOOL_CREATOR_ENV]: 'No' })).toBe(false)
   })
 
   test('off hands the run the tool service it already had', () => {
     const inner = fakeInner(['read'])
-    const tools = toolCreatorEnabled({})
+    const tools = toolCreatorEnabled({ [TOOL_CREATOR_ENV]: '0' })
       ? createToolCreatorService({ inner, workspace: '/work' })
       : inner
 
