@@ -174,7 +174,7 @@ describe('createZ2qPort', () => {
         ],
       },
       capabilities: { lines: ['Writes workspace files matching "**/*.md".'], risk: 'writes' },
-      next: 'run `z1-tool install /work/.z2q/proposals/tool.find-todos-1-1` to install it',
+      next: 'run `z1 tool install /work/.z2q/proposals/tool.find-todos-1-1` to install it',
     })
   })
 

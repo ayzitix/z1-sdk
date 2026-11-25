@@ -94,7 +94,7 @@ describe('createToolCreatorService', () => {
         ],
       },
       capabilities: { lines: ['Reads workspace files matching "**/*".'], risk: 'read-only' },
-      next: `run \`z1-tool install ${PROPOSALS}\` to install it`,
+      next: `run \`z1 tool install ${PROPOSALS}\` to install it`,
     })
     // The whole point of the tool: it proposes, a person installs.
     expect(port.installs).toEqual([])

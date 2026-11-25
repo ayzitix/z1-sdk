@@ -4,7 +4,7 @@
  * One tool sits next to the tools a run already has: the model asks for a tool
  * in plain language, and the answer is a reviewed, built, smoke-tested
  * **proposal** with a capability summary a person can approve. Installation is
- * never part of the tool — `z1-tool install <projectDir>` is the human step,
+ * never part of the tool — `z1 tool install <projectDir>` is the human step,
  * and keeping it out of the model's reach is the whole approval story.
  *
  * Everything the model sends is validated here by hand, in the shape the other
@@ -71,7 +71,7 @@ export interface ToolCreatorServiceOptions {
 export const toolCreateSchema: ToolSchema = {
   name: TOOL_CREATE_NAME,
   description:
-    'Create a z1 tool from a plain-language request. The z2q creator writes the source, reviews it, retries with the exact issues, builds the project and smoke-tests it, then returns a proposal: name, version, sha256, what it may touch, its risk class and the next step. Nothing is installed — a person installs the proposal with `z1-tool install <projectDir>` after reading the capability lines.',
+    'Create a z1 tool from a plain-language request. The z2q creator writes the source, reviews it, retries with the exact issues, builds the project and smoke-tests it, then returns a proposal: name, version, sha256, what it may touch, its risk class and the next step. Nothing is installed — a person installs the proposal with `z1 tool install <projectDir>` (the standalone binary is `z1-tool`) after reading the capability lines.',
   parameters: {
     type: 'object',
     additionalProperties: false,

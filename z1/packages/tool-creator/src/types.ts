@@ -101,9 +101,16 @@ export type ToolGenerate = (request: {
   issues?: readonly unknown[]
 }) => Promise<string>
 
-/** The command a person runs to install a proposal; the tool never runs it. */
+/**
+ * The command a person runs to install a proposal; the tool never runs it.
+ *
+ * `z1 tool` is the z1 console's route to the same binary (`z1-tool` in the
+ * SDK's own package), and it is the one that exists wherever the console does:
+ * a proposal whose next step needed a separate install to have a command on
+ * PATH was printed with a command the user could not run.
+ */
 export function toolInstallCommand(projectDir: string): string {
-  return `z1-tool install ${projectDir}`
+  return `z1 tool install ${projectDir}`
 }
 
 /**
