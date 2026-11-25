@@ -13,6 +13,7 @@ import { section } from './helpers.ts'
 const ROLES: readonly RoleId[] = ['planner', 'coder', 'reviewer', 'summarizer', 'judge', 'router']
 
 const CORE_HEADINGS = [
+  '## Language',
   '## Success',
   '## Safety',
   '## Working context',
@@ -30,10 +31,11 @@ const snapshot = readFileSync(new URL('./__snapshots__/default.txt', import.meta
 
 describe('DEFAULT_SECTIONS', () => {
   test('is core identity plus the approved headings, all required', () => {
-    expect(DEFAULT_SECTIONS).toHaveLength(12)
+    expect(DEFAULT_SECTIONS).toHaveLength(13)
     expect(DEFAULT_SECTIONS.every((entry) => entry.slot === 'core' && entry.required)).toBe(true)
     expect(DEFAULT_SECTIONS.map((entry) => entry.id)).toEqual([
       'core.identity',
+      'core.language',
       'core.success',
       'core.non_negotiables',
       'core.graph',
@@ -47,7 +49,7 @@ describe('DEFAULT_SECTIONS', () => {
       'core.output',
     ])
     expect(DEFAULT_SECTIONS.map((entry) => entry.priority)).toEqual([
-      0, 10, 20, 30, 35, 40, 50, 60, 70, 80, 90, 100,
+      0, 5, 10, 20, 30, 35, 40, 50, 60, 70, 80, 90, 100,
     ])
   })
 
@@ -166,7 +168,7 @@ describe('buildPrompt', () => {
     const two = buildPrompt({ role: 'reviewer' })
     expect(one.hash).toBe(two.hash)
     expect(one.text).toBe(two.text)
-    expect(PROMPT_VERSION).toBe('6')
+    expect(PROMPT_VERSION).toBe('7')
   })
 
   test('matches the committed default snapshot', () => {

@@ -6,11 +6,16 @@ import type { PromptSection, PromptVars, StackOptions, StackResult } from './typ
  * Bumped whenever the default text or the stack semantics change, so a stored
  * prompt hash can be tied to the version that produced it.
  *
+ * 7: the language rule became its own required `core.language` section, right
+ * after the identity. It used to be the sixth bullet of `core.communication`,
+ * where a small model ignored it in a long technical answer and replied in
+ * English to a message in Russian.
+ *
  * 6: `core.loop` requires every `subagent` launch to be announced in the same
  * step. A run suspended under 5 resumes into a different system prompt, which
  * is what the version exists to make visible.
  */
-export const PROMPT_VERSION = '6'
+export const PROMPT_VERSION = '7'
 
 export interface BuildPromptOptions {
   /** Role delta appended after the core. Defaults to `coder`. */
