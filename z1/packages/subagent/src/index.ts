@@ -6,12 +6,18 @@ export {
   DEFAULT_SUBAGENT_MAX_DEPTH,
   DEFAULT_SUBAGENT_MAX_STEPS,
   DEFAULT_SUBAGENT_MAX_TOTAL,
+  DEFAULT_SUBAGENT_REPORT_GRACE_MS,
+  DEFAULT_SUBAGENT_TIME_BUDGET_MS,
   DEFAULT_SUBAGENT_TIMEOUT_MS,
   MAX_SUBAGENT_DESCRIPTION_LENGTH,
+  MAX_SUBAGENT_MAX_STEPS,
   MAX_SUBAGENT_PROMPT_BYTES,
+  MAX_SUBAGENT_TIME_MINUTES,
   MAX_SUBAGENT_TOOL_ENTRIES,
   MAX_SUBAGENT_TOOL_NAME_LENGTH,
+  MIN_SUBAGENT_TIME_MINUTES,
   SUBAGENT_HANDOFF_RATIO,
+  SUBAGENT_REPORT_TIMEOUT_MS,
   SUBAGENT_TOOL_NAME,
   SubagentBudget,
   SubagentError,
@@ -51,20 +57,27 @@ export type {
   WithSubagentToolOptions,
 } from './types.ts'
 export { normalizeToolName, parseSubagentInput, resolveToolGrant } from './grant.ts'
-export { SUBAGENT_WAIT_GUIDANCE, subagentSystemPrompt } from './prompt.ts'
-export type { SubagentPromptOptions } from './prompt.ts'
+export {
+  SUBAGENT_HANDOFF_REQUEST,
+  SUBAGENT_WAIT_GUIDANCE,
+  subagentHandoffRequest,
+  subagentSystemPrompt,
+} from './prompt.ts'
+export type { SubagentPromptOptions, SubagentStopReason } from './prompt.ts'
 export {
   MAX_SUBAGENT_RESULT_TEXT,
   SUBAGENT_LAUNCH_LINE,
   SUBAGENT_RESULT_PREAMBLE,
   assistantTexts,
   backgroundLaunchText,
+  contextLimitDetail,
   neutraliseChildText,
   partialText,
   resultText,
   statusLine,
   stepCapDetail,
   stepLimitSteps,
+  timeLimitDetail,
   toolStatus,
   truncateText,
 } from './result.ts'
@@ -80,4 +93,10 @@ export {
   subagentToolSchema,
   withSubagentTool,
 } from './tool.ts'
-export { denyApprovalService, runSubagent, subagentBudgetFor } from './run.ts'
+export {
+  denyApprovalService,
+  resolveChildBudgets,
+  runSubagent,
+  subagentBudgetFor,
+} from './run.ts'
+export type { ChildBudgetInput } from './run.ts'

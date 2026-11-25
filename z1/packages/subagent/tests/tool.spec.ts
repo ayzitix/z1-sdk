@@ -5,6 +5,9 @@ import type { ToolService } from '@z1/runtime'
 
 import {
   createSubagentTool,
+  MAX_SUBAGENT_MAX_STEPS,
+  MAX_SUBAGENT_TIME_MINUTES,
+  MIN_SUBAGENT_TIME_MINUTES,
   restrictToolService,
   subagentToolSchema,
   withSubagentTool,
@@ -88,6 +91,15 @@ describe('subagentToolSchema', () => {
     expect(parameters['required']).not.toContain('wait')
     expect(subagentToolSchema.description).toContain('background')
     expect(subagentToolSchema.description).toContain('wait: true')
+
+    // The soft time budget is the one bound the parent agent may choose per
+    // call: bounded, integer, optional, and it says what an expired budget does.
+    const timeMinutes = asRecord(properties['timeMinutes'])
+    expect(timeMinutes['type']).toBe('integer')
+    expect(timeMinutes['minimum']).toBe(MIN_SUBAGENT_TIME_MINUTES)
+    expect(timeMinutes['maximum']).toBe(MAX_SUBAGENT_TIME_MINUTES)
+    expect(String(timeMinutes['description'])).toContain('partial')
+    expect(parameters['required']).not.toContain('timeMinutes')
   })
 })
 
@@ -204,6 +216,24 @@ describe('createSubagentTool', () => {
 
     await expect(tool.call(validArgs)).rejects.toMatchObject({ code: 'child_failed' })
     expect(host.handles[0]?.disposed).toBe(true)
+  })
+
+  test('a maxSteps above the loop ceiling is rejected before any child starts', async () => {
+    // `z1.flow.loop` validates `maxIterations` as int().min(1).max(10_000), so
+    // 10_001 used to build a graph and fail inside `buildAgentGraph` - after
+    // `beginRun`, with no row and a message that never names the option.
+    const host = createFakeHost({ tools: [schema('read')], llm: staticLlm('ok').llm })
+    const tool = createSubagentTool({ model: MODEL, host, inventory, maxSteps: MAX_SUBAGENT_MAX_STEPS + 1 })
+
+    const error = await tool.call(validArgs).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    )
+    expect(error).toBeInstanceOf(SubagentError)
+    expect((error as SubagentError).code).toBe('invalid_input')
+    expect((error as SubagentError).message).toContain('maxSteps must be <= 10000')
+    expect(host.beginCalls).toEqual([])
+    expect(host.handles).toEqual([])
   })
 
   test('an invalid grant has no side effects', async () => {

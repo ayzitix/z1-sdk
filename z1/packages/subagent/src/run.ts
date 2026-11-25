@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { buildAgentGraph } from '@z1/agent'
 import { graphDigest } from '@z1/graph'
-import type { ApprovalDecision, ChatMessage, ToolSchema } from '@z1/node'
+import type { ApprovalDecision, ChatMessage, Json, ToolCall, ToolSchema } from '@z1/node'
 import {
   runGraph,
   type ApprovalService,
@@ -12,24 +12,33 @@ import {
 } from '@z1/runtime'
 
 import { normalizeToolName, parseSubagentInput, resolveToolGrant } from './grant.ts'
-import { SUBAGENT_HANDOFF_REQUEST, subagentSystemPrompt } from './prompt.ts'
+import {
+  subagentHandoffRequest,
+  subagentSystemPrompt,
+  type SubagentStopReason,
+} from './prompt.ts'
 import {
   backgroundLaunchText,
+  contextLimitDetail,
   partialText,
   resultText,
   stepCapDetail,
   stepLimitSteps,
+  timeLimitDetail,
 } from './result.ts'
 import { restrictToolService } from './restrict.ts'
 import {
   DEFAULT_SUBAGENT_CONTEXT_WINDOW,
   DEFAULT_SUBAGENT_MAX_DEPTH,
   DEFAULT_SUBAGENT_MAX_STEPS,
-  DEFAULT_SUBAGENT_TIMEOUT_MS,
+  DEFAULT_SUBAGENT_REPORT_GRACE_MS,
+  DEFAULT_SUBAGENT_TIME_BUDGET_MS,
   MAX_SUBAGENT_DESCRIPTION_LENGTH,
+  MAX_SUBAGENT_MAX_STEPS,
   MAX_SUBAGENT_PROMPT_BYTES,
   MAX_SUBAGENT_TOOL_ENTRIES,
   SUBAGENT_HANDOFF_RATIO,
+  SUBAGENT_REPORT_TIMEOUT_MS,
   SUBAGENT_TOOL_NAME,
   SubagentBudget,
   SubagentError,
@@ -61,7 +70,17 @@ interface NormalizedOptions {
   readonly toolName: string
   readonly depth: number
   readonly maxSteps: number
-  readonly timeoutMs: number
+  /**
+   * The host's soft wall-clock budget, in milliseconds. A model-facing
+   * `timeMinutes` may lower it for one child; `resolveChildBudgets` decides.
+   */
+  readonly timeBudgetMs: number
+  /**
+   * The host's hard outer guard, or `undefined` when the host did not set one.
+   * `undefined` is meaningful: `resolveChildBudgets` then derives the guard from the
+   * *child's* budget (soft + grace), which a per-call `timeMinutes` can lower.
+   */
+  readonly timeoutMs: number | undefined
   /**
    * The token count at which the child stops working and reports instead.
    * Derived once from the window and `SUBAGENT_HANDOFF_RATIO`, so every path
@@ -88,17 +107,59 @@ function errorMessage(error: unknown): string {
 
 /**
  * The prompt-side token count from a chat node's `usage` record, when the
- * provider reported one. `promptTokens` is the OpenAI-compatible field; a
- * provider that reports only `totalTokens` still gives a usable floor.
+ * provider reported one.
+ *
+ * `inputTokens` is the SDK's own field (`ChatUsage` in `@z1/node`), so it is
+ * checked first: a real provider reports `{ inputTokens, outputTokens }`, and
+ * looking only for the OpenAI-compatible spelling is what made the hand-off
+ * unreachable outside tests. The remaining keys are tolerated because a host
+ * may wire a provider adapter that speaks `prompt_tokens` or a bare total, and
+ * `totalTokens` is a usable floor when nothing prompt-side exists.
  */
 function promptTokensOf(usage: unknown): number | undefined {
   if (typeof usage !== 'object' || usage === null) return undefined
   const record = usage as Record<string, unknown>
-  for (const key of ['promptTokens', 'prompt_tokens', 'totalTokens', 'total_tokens']) {
+  for (const key of [
+    'inputTokens',
+    'input_tokens',
+    'promptTokens',
+    'prompt_tokens',
+    'totalTokens',
+    'total_tokens',
+  ]) {
     const value = record[key]
     if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.round(value)
   }
   return undefined
+}
+
+/**
+ * The transcript estimate from the child loop's budget node.
+ *
+ * `@z1/agent` runs `z1.ctx.budget` every iteration; its `tokens` output is a
+ * character-based estimate of the messages about to be sent. It is a *fallback*
+ * for a provider that reports no usage at all, and it is deliberately the
+ * weaker number: it counts the messages and nothing else, so it cannot see the
+ * tool schemas the provider also bills, and it is computed before the iteration
+ * it gates. Using it as an authority would fire the hand-off early on a
+ * tool-heavy child; ignoring it altogether would let such a child run into a
+ * provider error with no report.
+ */
+function budgetTokensOf(outputs: unknown): number | undefined {
+  if (typeof outputs !== 'object' || outputs === null) return undefined
+  const tokens = (outputs as Record<string, unknown>)['tokens']
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return undefined
+  return Math.round(tokens)
+}
+
+/** The larger of the two token readings; either one alone when only it exists. */
+function largerTokens(
+  reported: number | undefined,
+  estimated: number | undefined,
+): number | undefined {
+  if (reported === undefined) return estimated
+  if (estimated === undefined) return reported
+  return Math.max(reported, estimated)
 }
 
 function integerOption(
@@ -197,9 +258,23 @@ function normalizeOptions(options: SubagentToolOptions): NormalizedOptions {
     'maxSteps',
     1,
   )
-  const timeoutMs = integerOption(
-    options.timeoutMs ?? DEFAULT_SUBAGENT_TIMEOUT_MS,
-    'timeoutMs',
+  // The loop's schema cannot express more than this, so a larger cap would build
+  // a graph and fail inside `buildAgentGraph` - after `beginRun`, with no run row
+  // and an invalid-graph message that never names `maxSteps`. Reject it here.
+  if (maxSteps > MAX_SUBAGENT_MAX_STEPS) {
+    throw new SubagentError(
+      'invalid_input',
+      `maxSteps must be <= ${String(MAX_SUBAGENT_MAX_STEPS)} (the agent loop's iteration ceiling), got ${String(maxSteps)}`,
+    )
+  }
+  // The hard guard is deliberately optional at this layer: its default depends
+  // on the child's effective soft budget, which a per-call `timeMinutes` can
+  // lower. `resolveChildBudgets` fills it in.
+  const timeoutMs =
+    options.timeoutMs === undefined ? undefined : integerOption(options.timeoutMs, 'timeoutMs', 1)
+  const timeBudgetMs = integerOption(
+    options.timeBudgetMs ?? DEFAULT_SUBAGENT_TIME_BUDGET_MS,
+    'timeBudgetMs',
     1,
   )
   const maxDescriptionLength = Math.min(
@@ -247,6 +322,7 @@ function normalizeOptions(options: SubagentToolOptions): NormalizedOptions {
     toolName,
     depth,
     maxSteps,
+    timeBudgetMs,
     timeoutMs,
     handoffTokens,
     contextWindow,
@@ -262,6 +338,45 @@ function normalizeOptions(options: SubagentToolOptions): NormalizedOptions {
     onBackground: options.onBackground,
     runs,
   }
+}
+
+export interface ChildBudgetInput {
+  /** The host's soft budget, in milliseconds. */
+  readonly timeBudgetMs: number
+  /** The host's explicit hard guard; omitted means "derive it from the budget". */
+  readonly timeoutMs?: number
+  /** The model's request for this child; it may only lower the host budget. */
+  readonly timeMinutes?: number
+}
+
+/**
+ * The two deadlines of one child, after the model's optional `timeMinutes`.
+ *
+ * The soft budget is the interesting one: it ends the run *gracefully* (abort,
+ * then a tool-free report). The hard guard exists only to bound a child whose
+ * graceful stop is stuck, so its default is the soft budget plus
+ * {@link DEFAULT_SUBAGENT_REPORT_GRACE_MS} - strictly later, or it would fire
+ * while the report is being written and turn a `partial` into a `child_timeout`.
+ *
+ * An explicit `timeoutMs` wins over that derivation even when it is *shorter*
+ * than the soft budget, and then the hard guard is the honest deadline: the
+ * child is killed at `timeoutMs` and the result is `child_timeout` with no
+ * report. The two timers race in `runChildGraph`; a tie is resolved in favour
+ * of the timeout in `settleChild`, because a child that overran its absolute
+ * bound must not get another model call.
+ */
+export function resolveChildBudgets(
+  input: ChildBudgetInput,
+): { readonly timeBudgetMs: number; readonly timeoutMs: number } {
+  // The model may only lower the host's budget: a parent that asks for 90
+  // minutes cannot buy more than the host allows, and one that asks for 2 gets
+  // a shorter leash on this child alone.
+  const requested = input.timeMinutes === undefined ? undefined : input.timeMinutes * 60_000
+  const timeBudgetMs =
+    requested === undefined ? input.timeBudgetMs : Math.min(requested, input.timeBudgetMs)
+  const timeoutMs =
+    input.timeoutMs ?? Math.max(1, timeBudgetMs + DEFAULT_SUBAGENT_REPORT_GRACE_MS)
+  return { timeBudgetMs, timeoutMs }
 }
 
 function toolSchemas(
@@ -380,6 +495,132 @@ function cancelSource(hostAborted: boolean, timedOut: boolean): 'external' | 'in
   return undefined
 }
 
+/** The facts that decide how a finished child is reported. */
+export interface ChildStopFacts {
+  /** The *host's* signal (or a background child's `cancel()`), never the controller. */
+  readonly hostAborted: boolean
+  /** The hard `timeoutMs` guard fired. */
+  readonly timedOut: boolean
+  /**
+   * The budget that stopped the child *first*, recorded when it aborted the
+   * run. When a slow stop crosses both budgets, the one that fired first is the
+   * one that ended the work, so it is the one the report names.
+   */
+  readonly stopCause: SubagentStopReason | undefined
+}
+
+/**
+ * Whether a finished child is a *graceful* stop, and why - or `undefined` when
+ * it is not one (it completed, broke, was cancelled, or timed out).
+ *
+ * The precedence, in one place, because getting it wrong is what silently
+ * dropped the report:
+ *
+ * 1. a real host abort is a cancellation, even when a budget had also expired:
+ *    the parent will never read the output, so a report turn would spend a
+ *    model call on nobody's behalf;
+ * 2. a hard timeout beats both budgets: an absolute bound is not renegotiable,
+ *    and the report is a model call the child was not granted. Making the report
+ *    safe here would mean keeping the client alive past a deadline the host
+ *    chose to enforce, which is exactly what a deadline is for;
+ * 3. otherwise the recorded cause decides. It is not re-derived here, and in
+ *    particular a crossed *later* budget can never rename the stop: a run that
+ *    hit the window at 09:00 and the clock at 09:01 stopped on the window.
+ */
+export function gracefulStopReason(
+  facts: ChildStopFacts,
+): SubagentStopReason | undefined {
+  if (facts.hostAborted || facts.timedOut) return undefined
+  return facts.stopCause
+}
+
+
+/**
+ * The result for a run the host cancelled, and the row that goes with it.
+ *
+ * Shared by the ordinary cancellation path and the late one - a `cancel()` or a
+ * Ctrl-C that lands while the hand-off report is being written - so the two can
+ * never disagree about the status, the message or the row.
+ *
+ * The row is rewritten to the same final status the graph wrote, and stays
+ * `cancelled` even when (rarely) the run had no chance to write its own
+ * `run.cancelled`. The message names the parent so the CLI can render a
+ * cancellation as one. A journal that also rejects the write during a host
+ * abort is not worth replacing the cancellation with.
+ */
+async function cancelResult(input: {
+  readonly setup: ChildSetup
+  readonly shared: {
+    readonly runId: string
+    readonly tools: readonly string[]
+    readonly denied: readonly string[]
+    readonly steps: number
+    readonly elapsedMs: number
+  }
+  readonly kept: string | undefined
+  readonly startLost: boolean
+  readonly hostAborted: boolean
+  readonly message: string
+}): Promise<SubagentToolResult> {
+  const { setup, shared, kept } = input
+  const journal = setup.limits.host.journal
+  const runs = setup.limits.runs
+  if (!input.startLost) {
+    await ensureTerminalEvent(
+      journal,
+      shared.runId,
+      terminalEventFor('cancelled', shared.runId, input.message),
+    )
+  }
+  if (runs !== undefined) {
+    try {
+      await recordFinalStatus(runs, shared.runId, 'cancelled')
+    } catch (error) {
+      if (!input.hostAborted) throw error
+    }
+  }
+  return {
+    ...shared,
+    status: 'cancelled',
+    errorCode: 'child_cancelled',
+    output: '',
+    ...(kept === undefined ? {} : { partial: kept }),
+    message: `subagent child_cancelled: ${input.message}`,
+    detail: input.message,
+    text: resultText({
+      runId: shared.runId,
+      status: 'cancelled',
+      errorCode: 'child_cancelled',
+      steps: shared.steps,
+      elapsedMs: shared.elapsedMs,
+      tools: shared.tools,
+      denied: shared.denied,
+      ...(kept === undefined ? {} : { partial: kept }),
+      detail: input.message,
+    }).text,
+  }
+}
+
+
+/**
+ * Whether the graceful-stop path owes the journal a `run.failed`.
+ *
+ * The row it writes is `failed`, so the trace must end with a matching event
+ * unless the graph already ended in a way that is true in its own right:
+ *
+ * - `cancelled` - the internal abort of the budget, which the executor journals
+ *   as `run.cancelled`; the row says `failed`, so the events need the correction;
+ * - `undefined` - the graph threw instead of returning, so no terminal event was
+ *   written at all;
+ * - `failed` - already the status the row names;
+ * - `completed` - never reaches the call: `settleChild` skips the graceful branch
+ *   for a completed graph, so the row stays `completed` and its own
+ *   `run.completed` stays last. The arm is kept so the predicate stays total.
+ */
+export function owesFailedEvent(result: RunResult | undefined): boolean {
+  return result === undefined || result.status === 'cancelled'
+}
+
 /** The single decision point: the terminal row and error for a finished run. */
 type ChildOutcome =
   | { readonly kind: 'cancelled'; readonly message: string }
@@ -451,6 +692,10 @@ interface ChildSetup {
   readonly grant: { readonly names: readonly string[]; readonly denied: readonly string[] }
   readonly schemas: readonly ToolSchema[]
   readonly graph: ReturnType<typeof buildAgentGraph>
+  /** This child's soft wall-clock budget, after any model-facing `timeMinutes`. */
+  readonly timeBudgetMs: number
+  /** This child's hard outer guard; see `resolveChildBudgets` for the defaulting rule. */
+  readonly timeoutMs: number
 }
 
 /**
@@ -470,6 +715,11 @@ async function beginChild(
   limits: NormalizedOptions,
   childRunId: string,
 ): Promise<ChildSetup> {
+  const budgets = resolveChildBudgets({
+    timeBudgetMs: limits.timeBudgetMs,
+    ...(limits.timeoutMs === undefined ? {} : { timeoutMs: limits.timeoutMs }),
+    ...(parsed.timeMinutes === undefined ? {} : { timeMinutes: parsed.timeMinutes }),
+  })
   const grant = resolveToolGrant(parsed.tools, {
     inventory: limits.inventory,
     toolName: limits.toolName,
@@ -529,6 +779,18 @@ async function beginChild(
       return schema
     })
 
+    // `contextWindow` is deliberately *not* forwarded to the graph, even though
+    // the loop's budget node knows the option. The node's compaction trigger is
+    // `floor((window - min(reserveTokens, window)) * threshold)` with a
+    // 16 384-token default reserve, so a 10 000-token child window would clamp
+    // the usable window to 1 and put the compaction threshold at token 1: every
+    // step would summarise the transcript. The budget node therefore keeps its
+    // documented 128k default, and the hand-off bounds the child instead:
+    // 75% of a 10 000-token window is 7 500 tokens, far below the 94 873-token
+    // point at which the node would ask for compaction. For a child window in
+    // (0, ~126 500) tokens the hand-off always fires first; at the 128k default
+    // the two nearly coincide, and compaction - a summarise-and-continue, not a
+    // stop - may run first, which only shrinks the transcript.
     const graph = buildAgentGraph({
       model: limits.model,
       tools: schemas,
@@ -549,7 +811,16 @@ async function beginChild(
       })
     }
 
-    return { limits, childRunId, child, grant, schemas, graph }
+    return {
+      limits,
+      childRunId,
+      child,
+      grant,
+      schemas,
+      graph,
+      timeBudgetMs: budgets.timeBudgetMs,
+      timeoutMs: budgets.timeoutMs,
+    }
   } catch (error) {
     await child.dispose()
     throw error
@@ -562,14 +833,15 @@ interface ChildRun {
   readonly thrown: unknown
   readonly steps: number
   readonly timedOut: boolean
+  /**
+   * Which budget ended the run *first*: the soft time budget (`'time'`) or the
+   * context hand-off (`'context'`). Recorded at abort time, not derived
+   * afterwards, because a slow stop can cross both and the report has to name
+   * the one that actually stopped it.
+   */
+  readonly stopCause: SubagentStopReason | undefined
   readonly startLost: boolean
   readonly lostStartError: unknown
-  /**
-   * The child crossed the context hand-off threshold, so it stopped working
-   * while it still could report. `settleChild` turns this into the `partial`
-   * status and asks for the report.
-   */
-  readonly handoffReached: boolean
 }
 
 /**
@@ -599,14 +871,15 @@ async function runChildGraph(
   // callback sees exactly these events and never the parent's.
   let steps = 0
   let timedOut = false
-  let thrown: unknown
   /**
-   * Whether the child crossed the hand-off threshold. Read from the chat
-   * node's `usage` port on every step: that number is the provider's own count
-   * of what the next request will carry, which is exactly what the window
-   * limit applies to.
+   * The first budget that stopped the child, or `undefined` if none did. Set
+   * with `??=`: whichever fires first owns the report, so a hand-off that is
+   * already unwinding is not renamed by the clock (or the reverse).
    */
-  let handoffReached = false
+  let stopCause: SubagentStopReason | undefined
+  let thrown: unknown
+  /** The last transcript estimate the loop's budget node published. */
+  let budgetTokens: number | undefined
   const forward = limits.onEvent
   const childEvents = (event: RunEvent): void => {
     if (event.type === 'node.started' && /^loop\/\d+\/chat$/.test(event.path)) {
@@ -619,14 +892,29 @@ async function runChildGraph(
         }
       }
     }
+    // The loop's budget node is the fallback measure of a child whose provider
+    // reports no usage: it estimates the transcript it is about to send. It runs
+    // *before* the chat node of the same iteration, so the newest value here
+    // lags the turn that just finished by that turn's own messages - and it
+    // cannot see tool schemas at all. Hence: a floor, never an authority.
+    if (event.type === 'node.completed' && event.path !== undefined && /^loop\/\d+\/budget$/.test(event.path)) {
+      const estimate = budgetTokensOf(event.outputs)
+      if (estimate !== undefined) budgetTokens = estimate
+    }
     // The budget is checked on the *result* of a step, before the next one
     // starts: crossing the threshold must stop the work, not truncate a step
     // that is already in flight.
     if (event.type === 'node.completed' && event.path !== undefined && /^loop\/\d+\/chat$/.test(event.path)) {
       const usage = (event.outputs as Record<string, unknown> | undefined)?.['usage']
-      const tokens = promptTokensOf(usage)
+      // The stricter of the two readings. The provider's count is authoritative
+      // for the request it made; the estimate counts the whole transcript
+      // including the system prompt, which a provider may or may not bill. Taking
+      // the larger means a provider that reports nothing, or reports only part of
+      // the prompt, cannot keep a child working past a window that is in fact
+      // nearly full - the failure that costs the report.
+      const tokens = largerTokens(promptTokensOf(usage), budgetTokens)
       if (tokens !== undefined && tokens >= limits.handoffTokens) {
-        handoffReached = true
+        stopCause ??= 'context'
         // Stop the graph here: the work must end at the threshold, not at the
         // next provider failure. The report is written afterwards, from what
         // the run already produced.
@@ -645,10 +933,24 @@ async function runChildGraph(
     signals.host === undefined
       ? controller.signal
       : AbortSignal.any([signals.host, controller.signal])
+  /**
+   * The soft budget: stop the work, keep the report.
+   *
+   * It aborts the same controller the timeout does, so the graph resolves
+   * `cancelled` - which is why `settleChild` reads its own flag rather than the
+   * run's status. The two timers race; if the hard one fires in the same tick
+   * the timeout wins (see `resolveChildBudgets`), because an absolute bound is not
+   * renegotiable.
+   */
+  const budgetTimer = setTimeout(() => {
+    if (timedOut) return
+    stopCause ??= 'time'
+    controller.abort()
+  }, setup.timeBudgetMs)
   const timer = setTimeout(() => {
     timedOut = true
     controller.abort()
-  }, limits.timeoutMs)
+  }, setup.timeoutMs)
   let result: RunResult | undefined
   // Ledger awareness: a host journal that refuses `run.started` leaves no
   // row a terminal event could attach to (`SqliteJournal` rejects appends to
@@ -692,6 +994,7 @@ async function runChildGraph(
     thrown = error
   } finally {
     clearTimeout(timer)
+    clearTimeout(budgetTimer)
     // `runGraph` turns a throw while starting into a `failed` result whose
     // error *is* the thrown message, so a lost `run.started` shows up here
     // and never reaches the ledger wrapper's catch. The phrase is
@@ -703,12 +1006,20 @@ async function runChildGraph(
       lostStartError = failure
     }
   }
-  return { result, thrown, steps, timedOut, startLost, lostStartError, handoffReached }
+  return {
+    result,
+    thrown,
+    steps,
+    timedOut,
+    stopCause,
+    startLost,
+    lostStartError,
+  }
 }
 
 /**
- * Ask the child's own model for a status report, when the run stopped at the
- * context threshold instead of finishing.
+ * Ask the child's own model for a status report, when the run stopped at a
+ * budget instead of finishing.
  *
  * This is the one turn that is allowed to run *after* the graph has ended, and
  * it is deliberately tool-free: the child cannot continue the work, it can only
@@ -716,77 +1027,246 @@ async function runChildGraph(
  * text comes from the same transcript the child produced, not from a summary of
  * a summary.
  *
- * A failure here is not fatal: the caller keeps whatever the run already had
- * (its last text), because a missing hand-off is still better than a lost run.
+ * `reason` selects the opening line of the request only; the five questions are
+ * the same, because a reader needs the same facts whether the child ran out of
+ * window or out of time.
+ *
+ * Two things can go wrong and neither is fatal: the provider can fail, and it
+ * can hang. `LlmService.chat` takes no signal, so the cap is a race against
+ * {@link SUBAGENT_REPORT_TIMEOUT_MS} rather than a cancellation - the run keeps
+ * whatever the child already had, because a missing report is still better than
+ * a lost run.
  */
 async function handoffReport(
   setup: ChildSetup,
   events: readonly RunEvent[],
+  reason: SubagentStopReason,
 ): Promise<string | undefined> {
   const llm = setup.child.services.llm
   if (llm === undefined) return undefined
   const messages = transcriptOf(events)
   if (messages.length === 0) return undefined
+  let cap: ReturnType<typeof setTimeout> | undefined
   try {
-    const result = await llm.chat({
+    const reply = llm.chat({
       model: setup.limits.model,
-      messages: [...messages, { role: 'user', content: SUBAGENT_HANDOFF_REQUEST }],
-      // No tools: the window is nearly full and the work is stopping. Offering
-      // them would only invite another round.
+      messages: [...messages, { role: 'user', content: subagentHandoffRequest(reason) }],
+      // No tools: the window is nearly full (or the clock is gone) and the work
+      // is stopping. Offering them would only invite another round.
       tools: [],
     })
+    const deadline = new Promise<undefined>((resolve) => {
+      cap = setTimeout(() => {
+        resolve(undefined)
+      }, SUBAGENT_REPORT_TIMEOUT_MS)
+    })
+    // A race, not a cancellation: the pending promise keeps its handlers, so a
+    // late rejection cannot surface as an unhandled one.
+    const result = await Promise.race([reply, deadline])
+    if (result === undefined) return undefined
     const text = result.message.content
     return typeof text === 'string' && text.trim().length > 0 ? text.trim() : undefined
   } catch {
     // A provider that fails here loses only the summary, not the run.
     return undefined
+  } finally {
+    if (cap !== undefined) clearTimeout(cap)
   }
 }
 
-/** The child's transcript as chat messages, dropping what the model cannot read. */
+/**
+ * The loop's merged transcript, as the next iteration would see it.
+ *
+ * `@z1/agent` keeps the conversation on `messagesMerge` and feeds it to
+ * `outValue` (`d19`), so `messagesMerge`'s `value` *is* the loop state; reading
+ * the event rather than rebuilding it is what keeps the order the child saw.
+ * `outValue` itself is not used: `z1.core.output` declares no output ports and
+ * returns `{}`, so its `node.completed` carries no transcript at all.
+ *
+ * `ctxMerge` is the same array one step earlier in the turn (post-compaction,
+ * pre-answer) and is only a fallback for a graph without the merge.
+ */
+const LOOP_TRANSCRIPT = /^loop\/\d+\/(?:messagesMerge|ctxMerge)$/
+
+/**
+ * The child's transcript as chat messages, in the order the model saw them.
+ *
+ * The old implementation collected `outputs.message` from *every* completed
+ * node, which produced a transcript no provider would accept: the assistant
+ * message appeared twice per turn (`chat` and `assistantMsg` are two nodes over
+ * one message) and the system message landed after the user message, because
+ * the prompt stack completes after the seed. A report written from that is a
+ * report written from a broken conversation.
+ *
+ * So the loop's own merged transcript is used verbatim: it is the array the next
+ * iteration would have sent, so it is ordered, deduplicated, post-compaction and
+ * provider-valid by construction - every assistant `toolCalls` is followed by
+ * its results, because the loop only merges them together. Rebuilding that by
+ * hand is how the duplicates and the misplaced system message got in.
+ *
+ * The newest merge is one turn behind a stop: the hand-off aborts the body right
+ * after the chat node, so that turn's messages were never merged (and its tool
+ * results do not exist). Its *text* still reaches the parent through the kept
+ * partial, and inventing the missing half here would put an assistant
+ * `toolCalls` with no tool results in front of a provider.
+ *
+ * The collected fallback is only for a run that never completed an iteration:
+ * system messages first, one assistant message per turn.
+ */
 function transcriptOf(events: readonly RunEvent[]): readonly ChatMessage[] {
-  const messages: ChatMessage[] = []
+  return lastLoopTranscript(events) ?? collectedTranscript(events)
+}
+
+/** The newest loop transcript snapshot, validated as `ChatMessage[]`. */
+function lastLoopTranscript(events: readonly RunEvent[]): readonly ChatMessage[] | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined || event.type !== 'node.completed') continue
+    if (event.path === undefined || !LOOP_TRANSCRIPT.test(event.path)) continue
+    const value = (event.outputs as Record<string, unknown> | undefined)?.['value']
+    if (!Array.isArray(value)) continue
+    const messages = toChatMessages(value)
+    if (messages.length > 0) return messages
+  }
+  return undefined
+}
+
+/**
+ * The transcript of a run that never completed a loop iteration: the events
+ * themselves, ordered so the result is still a legal conversation.
+ */
+function collectedTranscript(events: readonly RunEvent[]): readonly ChatMessage[] {
+  const system: ChatMessage[] = []
+  const rest: ChatMessage[] = []
+  let previous: ChatMessage | undefined
   for (const event of events) {
     if (event.type !== 'node.completed') continue
-    const outputs = event.outputs as Record<string, unknown> | undefined
-    const message = outputs?.['message']
-    if (typeof message !== 'object' || message === null) continue
-    const record = message as Record<string, unknown>
+    // `assistantMsg` repeats the assistant message the `chat` node already
+    // reported; keeping both is what doubled every turn.
+    if (event.path !== undefined && event.path.endsWith('/assistantMsg')) continue
+    const message = chatMessageOf(event.outputs)
+    if (message === undefined) continue
+    if (message.role === 'system') {
+      // The prompt stack completes after the seed, so a system message found in
+      // event order is not at the position the provider expects.
+      if (!system.some((entry) => entry.content === message.content)) system.push(message)
+      continue
+    }
+    if (message.role === 'assistant' && previous?.role === 'assistant' && sameMessage(previous, message)) {
+      continue
+    }
+    previous = message
+    rest.push(message)
+  }
+  return [...system, ...rest]
+}
+
+/** Structural equality for two chat messages, on the fields a model reads. */
+function sameMessage(left: ChatMessage, right: ChatMessage): boolean {
+  return (
+    left.content === right.content &&
+    JSON.stringify(left.toolCalls ?? []) === JSON.stringify(right.toolCalls ?? []) &&
+    left.toolCallId === right.toolCallId
+  )
+}
+
+/** One `ChatMessage` from a node's `outputs.message`, or `undefined`. */
+function chatMessageOf(outputs: unknown): ChatMessage | undefined {
+  if (typeof outputs !== 'object' || outputs === null) return undefined
+  const message = (outputs as Record<string, unknown>)['message']
+  if (typeof message !== 'object' || message === null) return undefined
+  const validated = toChatMessages([message])
+  return validated[0]
+}
+
+/**
+ * Validate a transcript read from an event as `ChatMessage[]`.
+ *
+ * A malformed entry is dropped rather than forwarded: the report turn is the
+ * one place a bad message would reach a provider with no node in between to
+ * report it. `toolCalls` and `toolCallId` are kept, because a `tool` message
+ * without its call is exactly what makes a provider reject a transcript.
+ */
+function toChatMessages(value: readonly unknown[]): ChatMessage[] {
+  const messages: ChatMessage[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
     const role = record['role']
     const content = record['content']
-    if (typeof role !== 'string' || typeof content !== 'string') continue
+    if (typeof content !== 'string') continue
     if (role !== 'system' && role !== 'user' && role !== 'assistant' && role !== 'tool') continue
-    messages.push(message as ChatMessage)
+    const message: ChatMessage = { role, content }
+    if (typeof record['toolCallId'] === 'string') message.toolCallId = record['toolCallId']
+    const toolCalls = toToolCalls(record['toolCalls'])
+    if (toolCalls.length > 0) message.toolCalls = toolCalls
+    messages.push(message)
   }
   return messages
+}
+
+/** The `toolCalls` array of an assistant message, keeping its call ids. */
+function toToolCalls(value: unknown): ToolCall[] {
+  if (!Array.isArray(value)) return []
+  const calls: ToolCall[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
+    const record = entry as Record<string, unknown>
+    const id = record['id']
+    const name = record['name']
+    if (typeof id !== 'string' || typeof name !== 'string') continue
+    calls.push({ id, name, arguments: (record['arguments'] ?? null) as Json })
+  }
+  return calls
 }
 
 /**
  * Turn one finished child graph into the result the host reads, and write the
  * terminal row.
  *
- * `aborted` is the snapshot of the child's own controller: `true` means
- * someone stopped the child (`cancel()`, `/exit`, or the foreground turn's
- * Ctrl-C), so the row is `cancelled` and never `failed`. It is the only fact
- * that separates "the parent went away" from "the child broke", which is why
- * it is read here, after the run, rather than before it.
+ * `hostAborted` is a *getter* over the host's signal - `runForeground` passes
+ * `hostSignal?.aborted` and a background child passes its `cancel()` flag -
+ * never the child's own controller. That matters because the child's controller
+ * is also what the soft time budget and the context hand-off abort: those are
+ * graceful stops that still report, and reading the controller here would
+ * report every one of them as a parent cancellation.
  *
- * A background child passes its `cancel()` flag, not the controller's: the
- * timeout aborts that same controller, and a timed-out child is `failed`, not
- * `cancelled`.
+ * It is a getter, not a snapshot, because the report turn takes time: a Ctrl-C
+ * (foreground) or a `cancel()` (background) can arrive while the report is in
+ * flight, and the run must then be reported as the cancellation it is. So the
+ * value is read again after the report, and the cancel wins.
+ *
+ * So the precedence is:
+ *
+ * 1. a real host abort - `cancelled`/`child_cancelled`, no report, even when a
+ *    budget had already expired;
+ * 2. a hard timeout - `child_timeout`, no report (see `resolveChildBudgets`: an
+ *    absolute bound is not renegotiable, and the report turn is a model call
+ *    the child was not granted);
+ * 3. an expired soft budget or a crossed context threshold, *for a run that did
+ *    not complete* - `partial` with the tool-free hand-off report; a completed
+ *    graph is never re-labelled, because it already has the answer the report
+ *    would only describe;
+ * 4. a step cap - `partial`/`child_failed` with the step-cap detail, no report;
+ * 5. everything else, as the graph resolved it.
+ *
+ * Steps 1-3 are decided here, before the cancelled/failed return, because the
+ * graph resolves `cancelled` for the internal abort of steps 2 and 3; doing it
+ * after that return is what made a hand-off unreachable.
  */
 async function settleChild(
   setup: ChildSetup,
   run: ChildRun,
   elapsedMs: number,
-  aborted: boolean,
+  hostAborted: () => boolean,
 ): Promise<SubagentToolResult> {
   const { limits, childRunId, grant } = setup
   const journal = limits.host.journal
   const runs = limits.runs
   const { result, thrown, steps, timedOut, startLost, lostStartError } = run
+  const aborted = hostAborted()
 
-  const outcome = childOutcome(aborted, timedOut, limits.timeoutMs, childRunId, result, thrown)
+  const outcome = childOutcome(aborted, timedOut, setup.timeoutMs, childRunId, result, thrown)
 
   // A run whose journal row was never durable has nothing to report *about*:
   // `SqliteJournal` refused `run.started`, so the row this package created is
@@ -819,6 +1299,98 @@ async function settleChild(
     denied: [...grant.denied],
     steps: stepped,
     elapsedMs,
+  }
+
+  // A completed graph is completed: it has an answer, so there is nothing to hand
+  // off. This is not tidiness. `Journal.append` may be a promise a host journal
+  // yields on, so the soft timer can fire *inside* the awaited append of
+  // `run.completed` - the run has already produced its output at that point. With
+  // the cause recorded ("time") and no completion check, the report turn would
+  // replace that output with a summary of it, rewrite the row to `failed`, and
+  // leave `run.completed` as the last event: a finished child silently losing
+  // its answer.
+  //
+  // A host abort and a hard timeout are decided by `childOutcome` above and still
+  // win over a completed graph, which is why this only suppresses the *graceful*
+  // stop (and with it the report call) rather than short-circuiting the whole
+  // function. The completed result itself is built at the bottom, by the one
+  // place that records `completed`.
+  const completedRun = result?.status === 'completed'
+  const stopReason = completedRun
+    ? undefined
+    : gracefulStopReason({ hostAborted: aborted, timedOut, stopCause: run.stopCause })
+  if (stopReason !== undefined) {
+    // Read *before* the report: it is what the child had said by the time the
+    // budget stopped it, and the report turn may fail or be cancelled.
+    const kept = partialText(childEventsSeen())
+    const report = await handoffReport(setup, childEventsSeen(), stopReason)
+
+    // The report turn is a model call, so it is a window in which the host can
+    // still change its mind. A cancel that arrives here is the real outcome of
+    // the run - the parent is gone and will never read the report - so it wins
+    // over the `partial` this branch was about to return, and the row is
+    // `cancelled` rather than `failed`.
+    if (hostAborted()) {
+      return await cancelResult({
+        setup,
+        shared,
+        kept,
+        startLost,
+        hostAborted: true,
+        message: `run ${childRunId} was cancelled by the parent while its report was being written`,
+      })
+    }
+
+    const detail =
+      stopReason === 'time'
+        ? timeLimitDetail(setup.timeBudgetMs, stepped, report !== undefined)
+        : contextLimitDetail(stepped, SUBAGENT_HANDOFF_RATIO, report !== undefined)
+    const errorCode = stopReason === 'time' ? 'time_limit' : 'context_limit'
+    // The run's *row* stays `failed`: the graph failed the run it was given (it
+    // was aborted mid-turn and produced no completed answer), and a background
+    // child's `/agents` entry must not claim otherwise. What the parent needs -
+    // "stopped, here is what is left" - travels in the result instead.
+    if (runs !== undefined) {
+      try {
+        await recordFinalStatus(runs, childRunId, 'failed')
+      } catch {
+        // The report is the useful artefact; a broken journal cannot be repaired.
+      }
+    }
+    // An aborted graph writes `run.cancelled` while the row above says `failed`,
+    // and a graph that threw leaves no terminal event at all; either way the
+    // package owes the journal the event its row names, the same way the timeout
+    // branch does.
+    if (!startLost && owesFailedEvent(result)) {
+      await ensureTerminalEvent(
+        journal,
+        childRunId,
+        terminalEventFor('failed', childRunId, detail),
+      )
+    }
+    return {
+      ...shared,
+      status: 'partial',
+      errorCode,
+      // A report is the answer; the child's own last text is the fallback, so a
+      // failed or empty report never throws away what the child had said.
+      output: report ?? '',
+      ...(report === undefined && kept !== undefined ? { partial: kept } : {}),
+      message: `subagent ${errorCode}: ${detail}`,
+      detail,
+      text: resultText({
+        runId: childRunId,
+        status: 'partial',
+        errorCode,
+        steps: stepped,
+        elapsedMs,
+        tools: shared.tools,
+        denied: shared.denied,
+        output: report ?? '',
+        ...(report === undefined && kept !== undefined ? { partial: kept } : {}),
+        detail,
+      }).text,
+    }
   }
 
   if (outcome.kind === 'cancelled' || outcome.kind === 'failed') {
@@ -858,38 +1430,14 @@ async function settleChild(
     const kept = partialText(childEventsSeen())
 
     if (status === 'cancelled') {
-      // The row is rewritten to the same final status the graph wrote, and
-      // stays `cancelled` even when (rarely) the run had no chance to write
-      // its own `run.cancelled`. The message names the parent so the CLI can
-      // render a cancellation as one. A journal that also rejects the write
-      // during a host abort is not worth replacing the cancellation with.
-      if (runs !== undefined) {
-        try {
-          await recordFinalStatus(runs, childRunId, 'cancelled')
-        } catch (error) {
-          if (!aborted) throw error
-        }
-      }
-      return {
-        ...shared,
-        status: 'cancelled',
-        errorCode: 'child_cancelled',
-        output: '',
-        ...(kept === undefined ? {} : { partial: kept }),
-        message: `subagent child_cancelled: ${outcome.message}`,
-        detail: outcome.message,
-        text: resultText({
-          runId: childRunId,
-          status: 'cancelled',
-          errorCode: 'child_cancelled',
-          steps: stepped,
-          elapsedMs,
-          tools: shared.tools,
-          denied: shared.denied,
-          ...(kept === undefined ? {} : { partial: kept }),
-          detail: outcome.message,
-        }).text,
-      }
+      return await cancelResult({
+        setup,
+        shared,
+        kept,
+        startLost,
+        hostAborted: aborted,
+        message: outcome.message,
+      })
     }
 
     if (runs !== undefined) {
@@ -910,7 +1458,7 @@ async function settleChild(
     // text (`after 1 of 1 model turn`) - and `/agents` prints this `detail` -
     // so the derived sentence is used here as well as in `resultText`.
     const detail =
-      toolStatusValue === 'partial' && stepped !== undefined
+      toolStatusValue === 'partial'
         ? stepCapDetail(stepped, limits.maxSteps, kept !== undefined)
         : outcome.message
     const text = resultText({
@@ -936,50 +1484,6 @@ async function settleChild(
       message: `subagent ${code}: ${detail}`,
       detail,
       text,
-    }
-  }
-
-  // The context threshold: the child stopped because its window was nearly
-  // full, not because the task was finished or broken. That is `partial` -
-  // the same status a step cap earns - and it carries a report, because a
-  // reader needs to know what is done, what is not, and how to continue.
-  //
-  // This branch runs before the `completed` check on purpose: a run that filled
-  // its window can still resolve as `completed` (it had an answer in hand), and
-  // calling that "done" would hide the fact that the work was cut short. It
-  // ranks *below* a real cancellation: the user stopping a child is still a
-  // cancellation, whatever the window was doing at the time.
-  if (run.handoffReached && !aborted) {
-    const report = await handoffReport(setup, childEventsSeen())
-    const detail = `stopped at ${String(Math.round(SUBAGENT_HANDOFF_RATIO * 100))}% of the context window after ${String(stepped)} model ${
-      stepped === 1 ? 'turn' : 'turns'
-    }${report === undefined ? '; the report could not be produced' : ''}`
-    if (runs !== undefined) {
-      try {
-        await recordFinalStatus(runs, childRunId, 'failed')
-      } catch {
-        // The report is the useful artefact; a broken journal cannot be repaired.
-      }
-    }
-    return {
-      ...shared,
-      status: 'partial',
-      errorCode: 'context_limit',
-      output: report ?? '',
-      ...(report === undefined ? {} : { partial: report }),
-      message: `subagent context_limit: ${detail}`,
-      detail,
-      text: resultText({
-        runId: childRunId,
-        status: 'partial',
-        errorCode: 'context_limit',
-        steps: stepped,
-        elapsedMs,
-        tools: shared.tools,
-        denied: shared.denied,
-        output: report ?? '',
-        detail,
-      }).text,
     }
   }
 
@@ -1122,14 +1626,21 @@ async function finish(launched: {
  *
  * `ToolService.call()` has no run/node/signal context, so the host passes its
  * cancellation through `options.signal` explicitly. The child runs on
- * `AbortSignal.any([options.signal, timeout])`; `childOutcome` decides the one
- * terminal status and callers see it in the journal row and, in the returned
- * `SubagentToolResult`, as `status` plus `errorCode`:
+ * `AbortSignal.any([options.signal, controller])`, where `controller` is aborted
+ * by the hard timeout, the soft time budget and the context hand-off;
+ * `settleChild` decides the one terminal status and callers see it in the
+ * journal row and, in the returned `SubagentToolResult`, as `status` plus
+ * `errorCode`:
  *
- * - host signal aborted  → `cancelled` (`child_cancelled`), row `cancelled`
- * - `timeoutMs` expired  → `timeout` (`child_timeout`), row `failed`
- * - step cap exhausted   → `partial` (`child_failed`), row `failed`
- * - anything else        → `failed` (`child_failed` / `no_output` /
+ * - host signal aborted   → `cancelled` (`child_cancelled`), row `cancelled`,
+ *   no report
+ * - `timeoutMs` expired   → `timeout` (`child_timeout`), row `failed`, no report
+ * - soft time budget      → `partial` (`time_limit`), row `failed`, with report,
+ *   unless the graph had already completed
+ * - context hand-off      → `partial` (`context_limit`), row `failed`, with
+ *   report, same exception
+ * - step cap exhausted    → `partial` (`child_failed`), row `failed`
+ * - anything else         → `failed` (`child_failed` / `no_output` /
  *   `child_suspended`) or `completed`
  *
  * A run that ends badly is a *result*, not a throw: the tool surface can only
@@ -1165,11 +1676,12 @@ async function runForeground(
       host: hostSignal,
     })
     const elapsedMs = Date.now() - startedAt
-    // Snapshot after the run settled: by then the host signal is final, and
-    // its `aborted` flag is the one fact that separates a parent cancellation
-    // from a child failure.
-    const aborted = hostSignal?.aborted === true
-    return await settleChild(setup, run, elapsedMs, aborted)
+    // A *getter*, not a snapshot: the host signal is the one fact that separates
+    // a parent cancellation from a child failure, and it can still become true
+    // while the hand-off report is being written. `settleChild` reads it again
+    // after that turn, so a Ctrl-C during the report cancels the run instead of
+    // being overwritten by the `partial` the report would have produced.
+    return await settleChild(setup, run, elapsedMs, () => hostSignal?.aborted === true)
   } finally {
     await finish(launched)
   }
@@ -1232,10 +1744,10 @@ async function runBackground(
   const launched = await launch(input, options)
   const { setup } = launched
   const controller = new AbortController()
-  // A background child's only "parent" is `cancel()`: the timeout also aborts
-  // the controller, so the aborted flag cannot tell the two apart. This flag
-  // can, and it is what makes a cancelled child `cancelled` and a timed-out
-  // one `timeout`.
+  // A background child's only "parent" is `cancel()`: the timeout, the soft
+  // budget and the hand-off all abort the same controller, so the controller's
+  // own flag cannot tell them apart. This flag can, and it is what makes a
+  // cancelled child `cancelled` and a stopped one `partial`.
   let cancelled = false
   let settled = false
   let resolveDone!: (value: SubagentToolResult) => void
@@ -1264,7 +1776,12 @@ async function runBackground(
     done,
     controller,
     cancel: (reason?: unknown): void => {
-      if (settled || controller.signal.aborted) return
+      // Only `settled` stops a cancellation. Testing `controller.signal.aborted`
+      // here would swallow the one cancel that matters most: by the time a
+      // hand-off report is being written the controller is *already* aborted by
+      // the budget, so the host's `cancel()` would be ignored and the parent
+      // would still be handed a report it asked not to receive.
+      if (settled) return
       cancelled = true
       controller.abort(reason)
     },
@@ -1279,7 +1796,9 @@ async function runBackground(
     const startedAt = Date.now()
     try {
       const run = await runChildGraph(setup, promptOf(input), { foreground: controller, host: undefined })
-      const result = await settleChild(setup, run, elapsed(startedAt), cancelled)
+      // The getter, not the value: `cancel()` can still fire while the report
+      // turn runs, and that cancellation must win.
+      const result = await settleChild(setup, run, elapsed(startedAt), () => cancelled)
       await finish(launched)
       settled = true
       resolveDone(result)

@@ -3,8 +3,10 @@ import {
   DEFAULT_SUBAGENT_MAX_DEPTH,
   MAX_SUBAGENT_DESCRIPTION_LENGTH,
   MAX_SUBAGENT_PROMPT_BYTES,
+  MAX_SUBAGENT_TIME_MINUTES,
   MAX_SUBAGENT_TOOL_ENTRIES,
   MAX_SUBAGENT_TOOL_NAME_LENGTH,
+  MIN_SUBAGENT_TIME_MINUTES,
   SUBAGENT_TOOL_NAME,
   SubagentError,
   SubagentGrantError,
@@ -114,7 +116,11 @@ export function parseSubagentInput(
   if (!isRecord(input)) {
     throw new SubagentError('invalid_input', 'subagent input must be an object')
   }
-  rejectUnknownKeys(input, ['description', 'prompt', 'tools', 'wait'], 'subagent input')
+  rejectUnknownKeys(
+    input,
+    ['description', 'prompt', 'tools', 'wait', 'timeMinutes'],
+    'subagent input',
+  )
 
   const description = input['description']
   if (typeof description !== 'string') {
@@ -231,6 +237,27 @@ export function parseSubagentInput(
     }
   }
 
+  // The parent's own wall-clock cap for this child. It is validated here, not
+  // clamped: a model that asks for 0 or 7 days made a request the host cannot
+  // honour silently, and a child silently run for a week is the failure mode
+  // this option exists to prevent.
+  let timeMinutes: number | undefined
+  const rawTimeMinutes = input['timeMinutes']
+  if (rawTimeMinutes !== undefined) {
+    if (
+      typeof rawTimeMinutes !== 'number' ||
+      !Number.isInteger(rawTimeMinutes) ||
+      rawTimeMinutes < MIN_SUBAGENT_TIME_MINUTES ||
+      rawTimeMinutes > MAX_SUBAGENT_TIME_MINUTES
+    ) {
+      throw new SubagentError(
+        'invalid_input',
+        `subagent input.timeMinutes must be an integer between ${String(MIN_SUBAGENT_TIME_MINUTES)} and ${String(MAX_SUBAGENT_TIME_MINUTES)} minutes, got ${String(rawTimeMinutes)}`,
+      )
+    }
+    timeMinutes = rawTimeMinutes
+  }
+
   return {
     description,
     prompt,
@@ -239,6 +266,7 @@ export function parseSubagentInput(
       ...(disableNames === undefined ? {} : { disable: disableNames }),
     },
     ...(wait === undefined ? {} : { wait }),
+    ...(timeMinutes === undefined ? {} : { timeMinutes }),
   }
 }
 

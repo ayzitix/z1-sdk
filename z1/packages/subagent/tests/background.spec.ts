@@ -23,6 +23,7 @@ import {
   schema,
   staticLlm,
   tick,
+  workingLlm,
 } from './fakes.ts'
 
 const MODEL = { provider: 'mock', model: 'mock-1' } as const
@@ -215,6 +216,83 @@ describe('background launch', () => {
     await host.launches[1]?.done
     expect(budget.active).toBe(0)
     expect(budget.total).toBe(2)
+  })
+
+  test('a background child that runs out of time reports partial/time_limit', async () => {
+    // The soft budget is not a foreground-only rule: a child launched to run on
+    // its own is the one most likely to outlive the user's patience, so its
+    // time_limit has to arrive through the launch handle too.
+    const journal = createTestJournal()
+    const child = workingLlm({ delayMs: 5, report: 'Done: background work.' })
+    const host = launchingHost({ tools: [schema('read')], llm: child.llm, journal })
+    const tool = createSubagentTool({
+      model: MODEL,
+      host,
+      inventory,
+      timeBudgetMs: 60,
+      onBackground: (launch) => host.launches.push(launch),
+    })
+
+    const launched = await tool.call(backgroundArgs)
+    expect(launched.status).toBe('running')
+    const final = await host.launches[0]!.done
+
+    expect(final.status).toBe('partial')
+    expect(final.errorCode).toBe('time_limit')
+    expect(final.detail).toMatch(/^stopped at the 60ms time budget after \d+ model turns?$/)
+    expect(final.output).toBe('Done: background work.')
+    expect(child.reportRequests).toHaveLength(1)
+    expect(journal.runs.get(launched.runId)?.status).toBe('failed')
+    expect(host.handles[0]?.disposed).toBe(true)
+  })
+
+  test('a cancel() during the hand-off report wins over the report', async () => {
+    // The window the review found: by the time the report turn starts, the
+    // budget has already aborted the child's controller, so a `cancel()` that
+    // tested `controller.signal.aborted` was ignored. The parent then received a
+    // report it had explicitly cancelled, and the row said `failed`.
+    //
+    // The stop is the token hand-off, not a wall-clock budget: the turn it fires
+    // on is a count (600 tokens a turn against a 10 000-token window), so the
+    // test does not depend on how fast the machine runs.
+    const journal = createTestJournal()
+    const child = workingLlm({
+      inputTokensPerTurn: 600,
+      gateReport: true,
+      text: (turn) => `working on step ${String(turn)}`,
+    })
+    const host = launchingHost({ tools: [schema('read')], llm: child.llm, journal })
+    const tool = createSubagentTool({
+      model: MODEL,
+      host,
+      inventory,
+      contextWindow: 10_000,
+      onBackground: (launch) => host.launches.push(launch),
+    })
+
+    const launched = await tool.call(backgroundArgs)
+    expect(launched.status).toBe('running')
+    const launch = host.launches[0]!
+
+    // Wait until the report turn is actually in flight, then cancel.
+    await child.reportStarted
+    expect(child.reportRequests).toHaveLength(1)
+    launch.cancel('user changed their mind')
+    child.releaseReport('this report must not be delivered')
+
+    const final = await launch.done
+    expect(final.status).toBe('cancelled')
+    expect(final.errorCode).toBe('child_cancelled')
+    expect(final.output).toBe('')
+    expect(final.detail).toContain('cancelled by the parent')
+    expect(final.text).not.toContain('this report must not be delivered')
+    // The child's own last text survives as the kept partial, as on any cancel.
+    expect(final.partial).toBe('working on step 13')
+    expect(journal.runs.get(launched.runId)?.status).toBe('cancelled')
+    expect(
+      (journal.events.get(launched.runId) ?? []).filter((event) => event.type === 'run.cancelled'),
+    ).toHaveLength(1)
+    expect(host.handles[0]?.disposed).toBe(true)
   })
 
   test('a cancelled background child records cancelled, not failed', async () => {

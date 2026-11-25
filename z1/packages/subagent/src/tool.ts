@@ -7,7 +7,9 @@ import { runSubagent } from './run.ts'
 import {
   MAX_SUBAGENT_DESCRIPTION_LENGTH,
   MAX_SUBAGENT_PROMPT_BYTES,
+  MAX_SUBAGENT_TIME_MINUTES,
   MAX_SUBAGENT_TOOL_ENTRIES,
+  MIN_SUBAGENT_TIME_MINUTES,
   SUBAGENT_TOOL_NAME,
   SubagentError,
   subagentErrorTap,
@@ -69,6 +71,13 @@ export const subagentToolSchema: ToolSchema = {
         type: 'boolean',
         description:
           'Omit this. The child runs in the background: your turn ends at the launch, and the report arrives by itself in a later turn without the user typing. Pass true only when the very next line of this same step cannot be written without the child\'s value - not merely because you want the answer.',
+      },
+      timeMinutes: {
+        type: 'integer',
+        minimum: MIN_SUBAGENT_TIME_MINUTES,
+        maximum: MAX_SUBAGENT_TIME_MINUTES,
+        description:
+          `Optional wall-clock cap for this child, in whole minutes (${String(MIN_SUBAGENT_TIME_MINUTES)}-${String(MAX_SUBAGENT_TIME_MINUTES)}). Omit it to use the host budget. Use it when this delegation must be quick: a lookup or a single-file edit. When the cap is reached the child stops taking new work, writes a short hand-off report, and you get \`partial\` with that report. It can only lower the host budget, never raise it.`,
       },
     },
   },

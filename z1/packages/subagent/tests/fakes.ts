@@ -278,3 +278,135 @@ export function gatedLlm(): GatedLlm {
 export function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0))
 }
+
+export interface WorkingLlmOptions {
+  /**
+   * Prompt tokens the provider reports on a turn, as a *per-turn increment*: a
+   * real `inputTokens` is the size of the prompt the provider was given, so it
+   * grows with the transcript. Turn `n` therefore reports `n * this`.
+   *
+   * Omitted, the model reports no `usage` at all - the shape that made the
+   * budget-node fallback necessary.
+   */
+  readonly inputTokensPerTurn?: number
+  /**
+   * Assistant text per child turn, or a function of the turn number. Long text
+   * drives the transcript estimate; distinct text makes "the child's last text"
+   * a testable fact.
+   */
+  readonly text?: string | ((turn: number) => string)
+  /** Answer of the tool-free report turn. */
+  readonly report?: string
+  /** Make the report turn throw, the way a provider fails a request. */
+  readonly failReport?: boolean
+  /** Answer the report turn with empty content instead of text. */
+  readonly emptyReport?: boolean
+  /** Artificial work time per child turn, in milliseconds. */
+  readonly delayMs?: number
+  /**
+   * Answer with plain text (no tool call) from this turn on, so the child graph
+   * *completes*. Used to pit a completion against a budget timer.
+   */
+  readonly finalAfterTurns?: number
+  /** The text of that final answer. */
+  readonly finalText?: string
+  /**
+   * Hold the report turn open until the test releases it, so a cancellation can
+   * arrive *while* the report is being written - the window that decides
+   * whether a late `cancel()` is honoured.
+   */
+  readonly gateReport?: boolean
+}
+
+export interface WorkingLlm {
+  readonly llm: LlmService
+  /** Every model call, in order: child turns and the one report turn alike. */
+  readonly requests: ChatRequest[]
+  /** Only the tool-free report calls; the child's own turns always carry tools. */
+  readonly reportRequests: ChatRequest[]
+  /** Completed child turns, i.e. calls that produced a tool call. */
+  get turns(): number
+  /** Resolves once a report turn is in flight; needs `gateReport`. */
+  readonly reportStarted: Promise<void>
+  /** Let a gated report turn answer; needs `gateReport`. */
+  releaseReport(reply?: string): void
+}
+
+/**
+ * A child model that never stops on its own: every turn emits a tool call, so
+ * the loop keeps going until a budget, a cap or a cancel ends it.
+ *
+ * A call with an empty `tools` array is the report turn - the runner makes it
+ * tool-free on purpose - so one model can serve both and the test can count how
+ * many reports were asked for. That count is the assertion that separates "the
+ * child stopped gracefully and reported" from "the child was cut off".
+ */
+export function workingLlm(options: WorkingLlmOptions = {}): WorkingLlm {
+  const requests: ChatRequest[] = []
+  const reportRequests: ChatRequest[] = []
+  let turns = 0
+  let started!: () => void
+  const reportStarted = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  let release!: (reply: string) => void
+  const released = new Promise<string>((resolve) => {
+    release = resolve
+  })
+  return {
+    requests,
+    reportRequests,
+    reportStarted,
+    releaseReport: (reply = 'late report') => release(reply),
+    get turns(): number {
+      return turns
+    },
+    llm: {
+      async chat(request: ChatRequest): Promise<ChatResult> {
+        requests.push(request)
+        const isReport = request.tools !== undefined && request.tools.length === 0
+        if (isReport) {
+          reportRequests.push(request)
+          if (options.failReport === true) throw new Error('provider request failed')
+          const gated = options.gateReport === true
+          if (gated) started()
+          const content = gated
+            ? await released
+            : options.emptyReport === true
+              ? ''
+              : (options.report ?? 'hand-off report')
+          return {
+            message: { role: 'assistant', content },
+            toolCalls: [],
+            stopReason: 'stop',
+          }
+        }
+        if (options.delayMs !== undefined && options.delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, options.delayMs))
+        }
+        turns += 1
+        if (options.finalAfterTurns !== undefined && turns >= options.finalAfterTurns) {
+          return {
+            message: { role: 'assistant', content: options.finalText ?? 'final answer' },
+            toolCalls: [],
+            stopReason: 'stop',
+          }
+        }
+        const text = typeof options.text === 'function' ? options.text(turns) : (options.text ?? '')
+        return {
+          message: { role: 'assistant', content: text },
+          toolCalls: [{ id: `call_${String(turns)}`, name: 'read', arguments: {} }],
+          stopReason: 'tool_calls',
+          ...(options.inputTokensPerTurn === undefined
+            ? {}
+            : {
+                usage: {
+                  inputTokens: options.inputTokensPerTurn * turns,
+                  outputTokens: 10,
+                },
+              }),
+        }
+      },
+    },
+  }
+}

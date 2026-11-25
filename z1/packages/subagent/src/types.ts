@@ -24,8 +24,93 @@ export const MAX_SUBAGENT_TOOL_NAME_LENGTH = 128
 export const DEFAULT_SUBAGENT_MAX_DEPTH = 1
 export const DEFAULT_SUBAGENT_MAX_CHILDREN = 4
 export const DEFAULT_SUBAGENT_MAX_TOTAL = 8
-export const DEFAULT_SUBAGENT_MAX_STEPS = 24
+
+/**
+ * The child loop cap the agent loop itself can express.
+ *
+ * `z1.flow.loop` validates `maxIterations` as `int().min(1).max(10_000)`, so a
+ * larger value cannot be represented in a graph at all: it would build fine and
+ * fail later, inside `buildAgentGraph`, as an invalid-graph error with no run
+ * row and no useful message. `maxSteps` is checked against this bound when the
+ * options are normalised, so the failure names the option.
+ */
+export const MAX_SUBAGENT_MAX_STEPS = 10_000
+
+/**
+ * The child loop cap when the host does not set one: a runaway guard, not a
+ * working limit.
+ *
+ * It is `@z1/agent`'s own `maxSteps` ceiling (10 000), so a child inherits the
+ * parent's bound instead of a tighter one nobody could explain. A cap is a bad
+ * primary limit for a delegation: the work is sized by the task, not by a turn
+ * count, and a child stopped at 24 turns loses the *next action* even when its
+ * window and its wall-clock budget are both barely used. The real limits are
+ * the 75% context hand-off ({@link SUBAGENT_HANDOFF_RATIO}) and the soft time
+ * budget ({@link DEFAULT_SUBAGENT_TIME_BUDGET_MS}), both of which end the run
+ * with a report instead of an error.
+ *
+ * The cap stays configurable: a host that wants a lower bound (tests, cost
+ * control) passes `maxSteps` and gets `partial`/`child_failed` with the
+ * step-cap detail. A value above {@link MAX_SUBAGENT_MAX_STEPS} is rejected as
+ * `invalid_input` rather than left to fail inside the graph.
+ */
+export const DEFAULT_SUBAGENT_MAX_STEPS = MAX_SUBAGENT_MAX_STEPS
+
+/**
+ * A historical hard guard, retained for compatibility. **It is not the
+ * default**: the default hard guard is the child's soft time budget plus
+ * {@link DEFAULT_SUBAGENT_REPORT_GRACE_MS} (42 minutes for the 40-minute
+ * default budget), so the graceful stop always gets to write its report first.
+ *
+ * A timeout is `child_timeout` with **no report**, unlike the soft budget, so
+ * an explicit `timeoutMs` shorter than `timeBudgetMs` disables the hand-off
+ * report entirely: the child is killed before it can write one. That includes
+ * passing this constant explicitly (`timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS`,
+ * four minutes), which will stop every child before its 40-minute budget is
+ * reached. Use `resolveChildBudgets({ timeBudgetMs })` from `@z1/subagent` to
+ * derive a bound that still leaves room for the report.
+ */
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 240_000
+
+/**
+ * Soft wall-clock budget of one child run: 40 minutes.
+ *
+ * The context hand-off bounds a child by *tokens*, which says nothing about a
+ * task that is slow rather than large - a child waiting on a build, a network
+ * call or a pathological retry loop burns the user's patience without filling
+ * its window. At this budget the child stops taking new work, writes the same
+ * kind of hand-off report, and the parent gets `partial`/`time_limit` instead
+ * of a bare truncation. The default matches the ceiling this package already
+ * documented for a delegation (`DEFAULT_SUBAGENT_TIMEOUT_MS` used to be the
+ * only bound), now applied as a graceful stop rather than a kill.
+ */
+export const DEFAULT_SUBAGENT_TIME_BUDGET_MS = 40 * 60 * 1000
+
+/**
+ * Room the report turn gets after either stop, in milliseconds.
+ *
+ * The soft budget aborts the graph and *then* asks for the report, so the hard
+ * timer must be strictly later than the soft one: `timeBudgetMs + this` is the
+ * default `timeoutMs`. Without the grace the hard timer would fire while the
+ * report is being written and turn a `partial` into a `child_timeout`.
+ */
+export const DEFAULT_SUBAGENT_REPORT_GRACE_MS = 2 * 60 * 1000
+
+/**
+ * Hard cap on the report turn itself, in milliseconds.
+ *
+ * The report is one tool-free model call appended to an already-large
+ * transcript, so it can stall like any other call. `LlmService.chat` takes no
+ * signal, so this is a race, not a cancellation: the run keeps whatever the
+ * child had and says the report could not be produced.
+ */
+export const SUBAGENT_REPORT_TIMEOUT_MS = 60_000
+
+/** Smallest wall-clock cap a caller may ask for on one child, in minutes. */
+export const MIN_SUBAGENT_TIME_MINUTES = 1
+
+/** Largest wall-clock cap a caller may ask for on one child, in minutes. */
+export const MAX_SUBAGENT_TIME_MINUTES = 120
 
 /**
  * Fraction of the context window at which a child stops working and reports.
@@ -61,6 +146,18 @@ export interface SubagentInput {
    * once. Parsed by {@link parseSubagentInput}.
    */
   readonly wait?: boolean
+  /**
+   * The parent agent's own wall-clock cap for this child, in whole minutes
+   * ({@link MIN_SUBAGENT_TIME_MINUTES}..{@link MAX_SUBAGENT_TIME_MINUTES}).
+   *
+   * A parent that knows a task must not run for an hour - a quick lookup it
+   * delegated only to keep its own context clean - can say so instead of
+   * burning the host default. Omitted, the host's `timeBudgetMs` applies.
+   * The model may only *lower* the budget: a request above the host's is
+   * clamped to it, and an out-of-range value is rejected with an
+   * `invalid_input` {@link SubagentError} rather than silently corrected.
+   */
+  readonly timeMinutes?: number
 }
 
 /**
@@ -130,8 +227,22 @@ export type SubagentErrorCode =
    * The child stopped at the context hand-off threshold rather than finishing
    * or breaking. `partial`, not `failed`: it did work and it reported what
    * remains, which is the useful outcome when a window runs out.
+   *
+   * Only a run that did *not* finish reaches this code: a graph that produced
+   * its answer keeps `completed`, even when the threshold was crossed while the
+   * last event was being written.
    */
   | 'context_limit'
+  /**
+   * The child stopped at its soft wall-clock budget rather than finishing or
+   * breaking. Same shape as `context_limit`: `partial` with a hand-off report,
+   * because running out of *time* says nothing about the work being wrong.
+   *
+   * Like `context_limit`, it is only for a run that did not finish: a timer that
+   * fires while a completed run's terminal event is being appended does not
+   * discard that run's answer.
+   */
+  | 'time_limit'
 
 /**
  * The stable token every `SubagentError` message starts with. A host that only
@@ -390,9 +501,11 @@ export interface SubagentHost {
 /**
  * What a finished delegation reports.
  *
- * `partial` is a child that used up its step cap: it is not `failed`, because
- * a child that ran out of steps has usually done most of the work, and its
- * last text is carried so the parent can decide what to do with it.
+ * `partial` is a child that ran out of a budget rather than out of work: it hit
+ * its step cap, its context hand-off point or its soft time budget. It is not
+ * `failed`, because such a child has usually done most of the work, and its
+ * last text (or its hand-off report) is carried so the parent can decide what
+ * to do with it.
  */
 export type SubagentToolStatus = 'completed' | 'failed' | 'cancelled' | 'timeout' | 'partial'
 
@@ -409,7 +522,16 @@ export interface SubagentToolOptions {
    * depth 0: a child never receives the subagent tool.
    */
   readonly depth?: number
-  /** Child agent loop cap; defaults to 24. */
+  /**
+   * Child agent loop cap; defaults to {@link DEFAULT_SUBAGENT_MAX_STEPS}
+   * (10 000, the parent loop's own ceiling).
+   *
+   * This is a runaway guard, not the working limit: a child is meant to stop at
+   * its context hand-off or its time budget, both of which produce a report. A
+   * host that sets a lower cap gets `partial`/`child_failed` with the step-cap
+   * detail instead. Above {@link MAX_SUBAGENT_MAX_STEPS} the option is rejected
+   * as `invalid_input`, because the loop node cannot express a larger cap.
+   */
   readonly maxSteps?: number
   /**
    * The child model's context window, in tokens. The child stops taking new
@@ -419,9 +541,31 @@ export interface SubagentToolOptions {
    */
   readonly contextWindow?: number
   /**
-   * Child graph-run timeout; defaults to 240_000 ms. This does not cover
-   * `beginRun`, child tool re-listing, journal setup/update, or `dispose`;
-   * those are host responsibilities.
+   * Soft wall-clock budget of one child run; defaults to
+   * {@link DEFAULT_SUBAGENT_TIME_BUDGET_MS} (40 minutes).
+   *
+   * When it expires the child stops taking new work and writes the same
+   * tool-free hand-off report the context hand-off writes; the result is
+   * `partial`/`time_limit`. A model-facing `timeMinutes` may lower it for one
+   * call, never raise it. Like `timeoutMs` it covers the child graph run, not
+   * `beginRun`, child tool re-listing, journal setup or `dispose`.
+   */
+  readonly timeBudgetMs?: number
+  /**
+   * Hard outer guard of one child graph run, in milliseconds.
+   *
+   * Default: the child's effective soft budget plus
+   * {@link DEFAULT_SUBAGENT_REPORT_GRACE_MS}, so the graceful stop always gets
+   * to write its report before this timer fires. An explicit value shorter than
+   * the soft budget wins (the closer deadline is the honest one) and the run
+   * ends as `child_timeout` with **no report** - the child is killed before it
+   * can write one. That includes passing the historical
+   * {@link DEFAULT_SUBAGENT_TIMEOUT_MS} (four minutes), which pre-empts the
+   * 40-minute budget entirely; `resolveChildBudgets({ timeBudgetMs })` derives a
+   * bound that keeps room for the report.
+   *
+   * Neither guard covers `beginRun`, child tool re-listing, journal
+   * setup/update, or `dispose`; those are host responsibilities.
    */
   readonly timeoutMs?: number
   /** May only lower the 120-character contract cap. */
@@ -536,7 +680,7 @@ export interface SubagentToolResult {
   readonly detail?: string
   /**
    * The failed-run message, prefixed with a stable machine token:
-   * `subagent child_timeout: graph run … timed out after 240000ms`. Present
+   * `subagent child_timeout: graph run … timed out after <timeoutMs>ms`. Present
    * exactly when `status` is not `completed`; a host that only gets the text
    * of a failed result can still match the code.
    */

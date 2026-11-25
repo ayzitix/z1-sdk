@@ -175,7 +175,11 @@ export interface SubagentResultInput {
   readonly status: SubagentToolStatus
   readonly errorCode?: SubagentErrorCode
   readonly steps?: number
-  /** The cap that stopped the child, when `status` is `partial`. */
+  /**
+   * The cap that stopped the child, when `status` is `partial` *and* a step cap
+   * is what stopped it. Its presence is the signal: a context or time hand-off
+   * is also `partial` with steps and passes its own `detail` instead.
+   */
   readonly maxSteps?: number
   readonly elapsedMs?: number
   readonly tools?: readonly string[]
@@ -266,6 +270,46 @@ export function stepCapDetail(
 }
 
 /**
+ * The `detail` sentence for a child stopped at the context hand-off.
+ *
+ * It names the *fraction of the window* and the number of model turns, because
+ * those are the two facts that explain the outcome: the child was stopped with
+ * a quarter of its window spare, after N turns of real work. A missing report
+ * is stated in the same sentence rather than left for the reader to infer from
+ * an empty body.
+ */
+export function contextLimitDetail(
+  turns: number,
+  ratio: number,
+  hasReport: boolean,
+): string {
+  const percent = Math.round(ratio * 100)
+  const tail = hasReport ? '' : '; the report could not be produced'
+  return `stopped at ${String(percent)}% of the context window after ${modelTurns(turns)}${tail}`
+}
+
+/**
+ * The `detail` sentence for a child stopped at its soft time budget.
+ *
+ * The budget is rendered in the unit it was set in: a whole number of minutes
+ * reads as `40-minute`, and a sub-minute budget (tests, and a host that wants a
+ * short leash) reads as milliseconds, because `0-minute` would be a lie about a
+ * bound that did fire.
+ */
+export function timeLimitDetail(
+  budgetMs: number,
+  turns: number,
+  hasReport: boolean,
+): string {
+  const unit =
+    budgetMs >= 60_000 && budgetMs % 60_000 === 0
+      ? `${String(budgetMs / 60_000)}-minute`
+      : `${String(budgetMs)}ms`
+  const tail = hasReport ? '' : '; the report could not be produced'
+  return `stopped at the ${unit} time budget after ${modelTurns(turns)}${tail}`
+}
+
+/**
  * Build the result text. It is deliberately short: it goes into the parent's
  * context on every delegation, next to the transcript. The full child
  * transcript stays in its journal and in `/agents`; the `run:` line names the
@@ -296,9 +340,12 @@ export function resultText(input: SubagentResultInput): SubagentResultText {
   const note =
     answer === undefined && partial !== undefined ? 'the text above is partial work; it is not the answer.' : undefined
   // A step-capped child's detail is derived here, not from a message: it has to
-  // agree with the `status: partial … N steps` row above it.
+  // agree with the `status: partial … N steps` row above it. The derivation is
+  // keyed on `maxSteps`, which only the step-cap path sets: a context or time
+  // hand-off is also `partial` with steps, and deriving a cap sentence for it
+  // would report the wrong limit with the wrong numbers.
   const detail =
-    input.status === 'partial' && input.steps !== undefined
+    input.status === 'partial' && input.steps !== undefined && input.maxSteps !== undefined
       ? stepCapDetail(input.steps, input.maxSteps, body !== undefined)
       : input.detail === undefined
         ? undefined

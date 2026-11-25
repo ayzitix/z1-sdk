@@ -20,10 +20,12 @@ import type { ChatResult, Json } from '@z1/node'
 import type { LlmService, RunEvent } from '@z1/runtime'
 
 import {
+  contextLimitDetail,
   createSubagentTool,
   MAX_SUBAGENT_RESULT_TEXT,
   neutraliseChildText,
   resultText,
+  timeLimitDetail,
   SUBAGENT_RESULT_PREAMBLE,
   stepCapDetail,
   stepLimitSteps,
@@ -519,5 +521,71 @@ describe('the error code survives a tool-surface boundary', () => {
     expect(result['errorCode']).toBe('child_timeout')
     expect(result['isError']).toBe(true)
     expect(host.handles[0]?.disposed).toBe(true)
+  })
+})
+
+/**
+ * Two budgets, two sentences.
+ *
+ * A context or time hand-off is also `status: partial` with a `steps` count, so
+ * the step-cap derivation used to claim it: `resultText` built
+ * `stopped by the step cap after 13 of 13 model turns` for a run that never
+ * touched a step cap, and the real reason was lost. The derivation is now keyed
+ * on `maxSteps`, which only the step-cap path sets.
+ */
+describe('the stop reason decides the detail sentence', () => {
+  test('a context hand-off keeps its own detail, not a step-cap sentence', () => {
+    const detail = contextLimitDetail(13, 0.75, true)
+    expect(detail).toBe('stopped at 75% of the context window after 13 model turns')
+    const text = resultText({
+      runId: 'run_ctx',
+      status: 'partial',
+      errorCode: 'context_limit',
+      steps: 13,
+      output: 'Done: read 13 files.',
+      detail,
+    })
+    expect(text.text).toContain(`detail: ${detail}`)
+    expect(text.text).not.toContain('step cap')
+    expect(text.detail).toBe(detail)
+  })
+
+  test('a time hand-off names the budget, in seconds when it is sub-minute', () => {
+    expect(timeLimitDetail(2_400_000, 12, true)).toBe(
+      'stopped at the 40-minute time budget after 12 model turns',
+    )
+    expect(timeLimitDetail(60_000, 1, true)).toBe(
+      'stopped at the 1-minute time budget after 1 model turn',
+    )
+    // A host that sets a 100 ms leash must not read `0-minute`.
+    expect(timeLimitDetail(100, 3, true)).toBe('stopped at the 100ms time budget after 3 model turns')
+  })
+
+  test('a missing report is part of the same sentence', () => {
+    expect(contextLimitDetail(2, 0.75, false)).toBe(
+      'stopped at 75% of the context window after 2 model turns; the report could not be produced',
+    )
+    expect(timeLimitDetail(100, 2, false)).toContain('; the report could not be produced')
+  })
+
+  test('the step-cap path is unchanged: maxSteps is what selects it', () => {
+    const text = resultText({
+      runId: 'run_cap',
+      status: 'partial',
+      errorCode: 'child_failed',
+      steps: 2,
+      maxSteps: 2,
+      detail: 'ignored: the cap is what stopped this run',
+    })
+    expect(text.detail).toBe('stopped by the step cap after 2 of 2 model turns; no text produced')
+    // And a `partial` without `maxSteps` trusts the caller's detail.
+    const handoff = resultText({
+      runId: 'run_ctx',
+      status: 'partial',
+      errorCode: 'context_limit',
+      steps: 2,
+      detail: 'stopped at 75% of the context window after 2 model turns',
+    })
+    expect(handoff.detail).toBe('stopped at 75% of the context window after 2 model turns')
   })
 })
