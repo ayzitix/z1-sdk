@@ -79,6 +79,9 @@
       "@z1/template": [
         "./packages/template/src/index.ts"
       ],
+      "@z1/tool-creator": [
+        "./packages/tool-creator/src/index.ts"
+      ],
       "@z1/cli": [
         "./apps/cli/src/index.ts"
       ]

@@ -18,7 +18,7 @@ import { SqliteJournal } from '@z1/journal'
 import { BranchMemory } from '@z1/memory'
 import { ModuleStore, compareVersions, serviceMode } from '@z1/module'
 import type { InstalledModule, ModuleServiceKind } from '@z1/module'
-import type { ApprovalDecision, ApprovalRequest, NodeRegistry } from '@z1/node'
+import type { ApprovalDecision, ApprovalRequest, ModelHandle, NodeRegistry } from '@z1/node'
 import {
   ModuleRuntime,
   ModuleServiceRuntime,
@@ -44,11 +44,13 @@ import {
   type RuntimeServices,
   type ToolService,
 } from '@z1/runtime'
+import { createToolCreatorService, toolCreatorEnabled } from '@z1/tool-creator'
 
 import { loadCassette } from './cassette.ts'
 import type { RuntimeConfig } from './config.ts'
 import { createLocalFsService } from './fs-local.ts'
 import { createAgentTemplateRegistry, createTemplateRegistry } from './templates.ts'
+import { toolCreatorGenerate } from './tool-creator.ts'
 import { composeToolService, type ToolServiceMember } from './tool-composite.ts'
 
 export interface RunOverrides {
@@ -65,6 +67,12 @@ export interface RunOverrides {
    */
   moduleApproval?: ApprovalService
   llm?: LlmService
+  /**
+   * The model a host-side tool call uses when it has to make a model call of
+   * its own; today only `tool.create` asks. A run without one still works:
+   * `tool.create` reports `model_unavailable` rather than guessing a provider.
+   */
+  model?: ModelHandle
   tools?: ToolService
   fs?: FsService
   artifacts?: ArtifactService
@@ -624,20 +632,37 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         const useServiceModules =
           config.useModules && (overrides.useServiceModules ?? config.useServiceModules)
         const provided = useServiceModules ? await selectServices(overrides.runId) : {}
+        const runTools =
+          overrides.tools ?? (provided.tools?.instance as ToolService | undefined) ?? mock.tools
+        // Recording wraps whichever transport won, so a provider, a module
+        // adapter or a cassette replay is journaled identically. Named once
+        // because `tool.create` makes its model call through the same service.
+        const runLlmService = createRecordingLlmService({
+          inner: overrides.llm ?? (provided.llm?.instance as LlmService | undefined) ?? llm,
+          journal,
+          mode: config.recordLlm,
+          ...(overrides.runId === undefined ? {} : { runId: overrides.runId }),
+          ...(overrides.onEvent === undefined ? {} : { onEvent: overrides.onEvent }),
+        })
+        const toolGenerate =
+          overrides.model === undefined
+            ? undefined
+            : toolCreatorGenerate(runLlmService, overrides.model)
 
         services = {
-          // Recording wraps whichever transport won, so a provider, a module
-          // adapter or a cassette replay is journaled identically.
-          llm: createRecordingLlmService({
-            inner:
-              overrides.llm ?? (provided.llm?.instance as LlmService | undefined) ?? llm,
-            journal,
-            mode: config.recordLlm,
-            ...(overrides.runId === undefined ? {} : { runId: overrides.runId }),
-            ...(overrides.onEvent === undefined ? {} : { onEvent: overrides.onEvent }),
-          }),
-          tools:
-            overrides.tools ?? (provided.tools?.instance as ToolService | undefined) ?? mock.tools,
+          llm: runLlmService,
+          // Off unless `Z1_TOOL_CREATOR=1`, so an existing run's tool service is
+          // the very same instance it was. Without a run model the tool keeps
+          // reporting `model_unavailable` instead of calling a model it cannot
+          // name: the creator is a host hook, never a guessed provider.
+          tools: toolCreatorEnabled(config.env)
+            ? createToolCreatorService({
+                inner: runTools,
+                workspace: config.cwd,
+                log: serviceLog,
+                ...(toolGenerate === undefined ? {} : { generate: toolGenerate }),
+              })
+            : runTools,
           fs: overrides.fs ?? (provided.fs?.instance as FsService | undefined) ?? fs,
           artifacts:
             overrides.artifacts ??

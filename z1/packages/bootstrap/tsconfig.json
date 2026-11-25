@@ -36,6 +36,9 @@
     },
     {
       "path": "../template"
+    },
+    {
+      "path": "../tool-creator"
     }
   ],
   "compilerOptions": {

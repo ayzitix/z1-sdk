@@ -57,6 +57,9 @@
       "path": "./packages/template"
     },
     {
+      "path": "./packages/tool-creator"
+    },
+    {
       "path": "./apps/cli"
     },
     {
