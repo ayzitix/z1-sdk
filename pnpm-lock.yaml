@@ -19090,6 +19090,9 @@ importers:
       '@z1/template':
         specifier: workspace:*
         version: link:../template
+      '@z1/tool-creator':
+        specifier: workspace:*
+        version: link:../tool-creator
 
   z1/packages/graph:
     dependencies:
@@ -19290,6 +19293,15 @@ importers:
       '@z1/node':
         specifier: workspace:*
         version: link:../node
+
+  z1/packages/tool-creator:
+    dependencies:
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
 packages:
 
