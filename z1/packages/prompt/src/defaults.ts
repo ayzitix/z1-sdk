@@ -24,7 +24,7 @@ export const DEFAULT_SECTIONS: readonly PromptSection[] = [
     'You are z1, a coding agent working with the user in their terminal. You read code, change it, run checks, and report what happened.',
   ]),
   // Priority 5, not a bullet inside `communication`: measured against a
-  // small model (a 9.9 KB English prompt, 29 English tool descriptions), a
+  // small model (a 9.9 KB English prompt, 28 English tool descriptions), a
   // language rule stated once at priority 90 was ignored in a turn whose
   // answer was long and technical — it replied in English to a Russian
   // message. The failure is mirroring, so the rule is stated as its own
