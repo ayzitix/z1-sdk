@@ -39,8 +39,13 @@ export interface ToolProposalRun {
   code?: string
 }
 
-/** The risk class an approval prompt shows; ordered by severity. */
-export type ToolProposalRisk = 'read-only' | 'writes' | 'runs-programs' | 'network'
+/**
+ * The risk class an approval prompt shows; ordered by severity.
+ *
+ * `secrets` sits above `writes`: reading a declared environment variable is how
+ * a tool gets a credential, and the class is what the model repeats to the user.
+ */
+export type ToolProposalRisk = 'read-only' | 'writes' | 'secrets' | 'runs-programs' | 'network'
 
 /**
  * A reviewed, built and smoke-tested tool project awaiting a human decision.

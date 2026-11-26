@@ -28,7 +28,7 @@ function label(name: string): string {
  * the *same* step cannot proceed without the value.
  */
 export const SUBAGENT_WAIT_GUIDANCE =
-  '`subagent` runs the child in the background by default: the call returns `{ runId, status: "running" }` at once, your turn ends, and the report arrives by itself in a later turn - the user does not have to type for it to arrive. Do not pass `wait: true` merely because you want the answer: launch in the background, tell the user what you started, and read the report when it arrives. Use `wait: true` only when the very next line of this same step cannot be written without the child\'s value, which is rare. Never call `subagent` twice to "check" a background child.'
+  '`subagent` runs the child in the background by default: the call returns a run id and `status: "running"` at once, your turn ends, and the report arrives by itself in a later turn - the user does not have to type for it to arrive. Do not pass `wait: true` merely because you want the answer: launch in the background, tell the user what you started, and read the report when it arrives. Use `wait: true` only when the very next line of this same step cannot be written without the child\'s value, which is rare. Never call `subagent` twice to "check" a background child.'
 
 /**
  * The duty that goes with a launch: say what was started and why.

@@ -56,7 +56,7 @@ export const subagentToolSchema: ToolSchema = {
             maxItems: MAX_SUBAGENT_TOOL_ENTRIES,
             items: { type: 'string' },
             description:
-              'Exact tool names the child may call. [] means no tools; ["*"] means every parent tool.',
+              'Exact tool names the child may call. [] means no tools; ["*"] means every parent tool except `subagent` itself, which a child never gets.',
           },
           disable: {
             type: 'array',

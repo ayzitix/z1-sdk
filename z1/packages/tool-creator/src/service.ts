@@ -71,7 +71,7 @@ export interface ToolCreatorServiceOptions {
 export const toolCreateSchema: ToolSchema = {
   name: TOOL_CREATE_NAME,
   description:
-    'Create a z1 tool from a plain-language request. The z2q creator writes the source, reviews it, retries with the exact issues, builds the project and smoke-tests it, then returns a proposal: name, version, sha256, what it may touch, its risk class and the next step. Nothing is installed — a person installs the proposal with `z1 tool install <projectDir>` (the standalone binary is `z1-tool`) after reading the capability lines.',
+    'Create a z1 tool from a plain-language request. The z2q creator writes the source, reviews it, retries with the exact issues, builds the project and smoke-tests it, then returns a proposal: name, version, sha256, what it may touch, its risk class and the next step. The smoke test already ran the new tool once per example in this workspace with exactly the capabilities it declares, including any declared host and environment variable — nothing is installed, and a person installs the proposal with `z1 tool install <projectDir>` (the same CLI is `z1-tool` inside the z2q checkout) after reading the capability lines.',
   parameters: {
     type: 'object',
     additionalProperties: false,

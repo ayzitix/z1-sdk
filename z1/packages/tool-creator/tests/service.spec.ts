@@ -236,7 +236,11 @@ describe('createToolCreatorService', () => {
 describe('toolCreateSchema', () => {
   test('advertises exactly the three arguments parseRequest accepts', () => {
     expect(toolCreateSchema.name).toBe(TOOL_CREATE_NAME)
-    expect(toolCreateSchema.description).toContain('Nothing is installed')
+    expect(toolCreateSchema.description).toContain('nothing is installed')
+    // The smoke test is real execution with the declared grants, and the model
+    // is the one who tells the user what happened: the description has to say so.
+    expect(toolCreateSchema.description).toContain('smoke test already ran the new tool')
+    expect(toolCreateSchema.description).toContain('any declared host and environment variable')
     const properties = asRecord(toolCreateSchema.parameters['properties'] ?? null)
     expect(Object.keys(properties)).toEqual(['name', 'purpose', 'examples'])
     expect(asRecord(toolCreateSchema.parameters)['required']).toEqual(['name', 'purpose'])

@@ -660,8 +660,8 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
 
         services = {
           llm: runLlmService,
-          // Off unless `Z1_TOOL_CREATOR=1`, so an existing run's tool service is
-          // the very same instance it was. Without a run model the tool keeps
+          // On by default; `Z1_TOOL_CREATOR=0` turns it off, and then the run's
+          // tool service is the very same instance it was. Without a run model the tool keeps
           // reporting `model_unavailable` instead of calling a model it cannot
           // name: the creator is a host hook, never a guessed provider. It sits
           // outside the installed tools, so the creator sees them in its own
