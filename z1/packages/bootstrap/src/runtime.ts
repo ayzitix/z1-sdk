@@ -18,6 +18,7 @@ import { SqliteJournal } from '@z1/journal'
 import { BranchMemory } from '@z1/memory'
 import { ModuleStore, compareVersions, serviceMode } from '@z1/module'
 import type { InstalledModule, ModuleServiceKind } from '@z1/module'
+import { createInstalledToolService, installedToolsEnabled } from '@z1/installed-tools'
 import type { ApprovalDecision, ApprovalRequest, ModelHandle, NodeRegistry } from '@z1/node'
 import {
   ModuleRuntime,
@@ -634,6 +635,14 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         const provided = useServiceModules ? await selectServices(overrides.runId) : {}
         const runTools =
           overrides.tools ?? (provided.tools?.instance as ToolService | undefined) ?? mock.tools
+        // Installed z2q tools answer their own names before anything the run
+        // brought, and every other name goes to `runTools` untouched. On by
+        // default, like `tool.create`: a tool a person installed by hand is the
+        // point of the feature. `Z1_INSTALLED_TOOLS=0` hands the run the very
+        // same instance it had.
+        const withInstalledTools = installedToolsEnabled(config.env)
+          ? createInstalledToolService({ inner: runTools, workspace: config.cwd, log: serviceLog })
+          : runTools
         // Recording wraps whichever transport won, so a provider, a module
         // adapter or a cassette replay is journaled identically. Named once
         // because `tool.create` makes its model call through the same service.
@@ -654,15 +663,17 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
           // Off unless `Z1_TOOL_CREATOR=1`, so an existing run's tool service is
           // the very same instance it was. Without a run model the tool keeps
           // reporting `model_unavailable` instead of calling a model it cannot
-          // name: the creator is a host hook, never a guessed provider.
+          // name: the creator is a host hook, never a guessed provider. It sits
+          // outside the installed tools, so the creator sees them in its own
+          // inventory and `tool.create` is still the name the model asks for.
           tools: toolCreatorEnabled(config.env)
             ? createToolCreatorService({
-                inner: runTools,
+                inner: withInstalledTools,
                 workspace: config.cwd,
                 log: serviceLog,
                 ...(toolGenerate === undefined ? {} : { generate: toolGenerate }),
               })
-            : runTools,
+            : withInstalledTools,
           fs: overrides.fs ?? (provided.fs?.instance as FsService | undefined) ?? fs,
           artifacts:
             overrides.artifacts ??

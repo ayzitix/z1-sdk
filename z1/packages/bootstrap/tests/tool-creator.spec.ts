@@ -133,7 +133,7 @@ test('a run model turns tool.create into one two-message model call', async () =
     expect(summary['name']).toBe('tool.find-todos')
     expect(summary['version']).toBe('0.1.0')
     expect(summary['projectDir']).toBe('/proposal/tool.find-todos')
-    expect(String(summary['next'])).toContain('z1-tool install /proposal/tool.find-todos')
+    expect(String(summary['next'])).toContain('z1 tool install /proposal/tool.find-todos')
 
     // Exactly one call, so the proposal cost one model turn and nothing else.
     expect(llm.requests).toHaveLength(1)

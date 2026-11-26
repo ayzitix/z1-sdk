@@ -8,6 +8,9 @@
       "path": "../agent"
     },
     {
+      "path": "../installed-tools"
+    },
+    {
       "path": "../journal"
     },
     {

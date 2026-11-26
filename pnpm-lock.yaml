@@ -19060,6 +19060,9 @@ importers:
       '@z1/agent':
         specifier: workspace:*
         version: link:../agent
+      '@z1/installed-tools':
+        specifier: workspace:*
+        version: link:../installed-tools
       '@z1/journal':
         specifier: workspace:*
         version: link:../journal
@@ -19102,6 +19105,15 @@ importers:
       zod:
         specifier: 4.6.6
         version: 4.6.6
+
+  z1/packages/installed-tools:
+    dependencies:
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
   z1/packages/journal: {}
 

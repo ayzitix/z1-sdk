@@ -28,6 +28,7 @@
     "@z1/runtime": "workspace:*",
     "@z1/session": "workspace:*",
     "@z1/template": "workspace:*",
+    "@z1/installed-tools": "workspace:*",
     "@z1/tool-creator": "workspace:*"
   }
 }

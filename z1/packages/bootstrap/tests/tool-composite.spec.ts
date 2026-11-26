@@ -181,10 +181,10 @@ async function makeRuntime(modulesPath: string): Promise<Runtime> {
   const runtime = await createRuntime(
     loadRuntimeConfig({
       cwd: root,
-      // This suite pins how module tools compose, not the host decorator: with
-      // `tool.create` on by default it would add one more name to every
-      // assertion here.
-      env: { Z1_TOOL_CREATOR: '0' },
+      // This suite pins how module tools compose, not the host decorators: with
+      // `tool.create` or installed tools on by default they would add a name to
+      // every assertion here and stand between the run and the module instance.
+      env: { Z1_TOOL_CREATOR: '0', Z1_INSTALLED_TOOLS: '0' },
       overrides: {
         dbPath: join(root, `runs-${randomUUID()}.db`),
         graphsPath: join(root, 'graphs'),
