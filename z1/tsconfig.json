@@ -57,6 +57,9 @@
       "path": "./packages/template"
     },
     {
+      "path": "./packages/env-keys"
+    },
+    {
       "path": "./packages/installed-tools"
     },
     {

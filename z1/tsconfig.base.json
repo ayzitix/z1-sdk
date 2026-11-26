@@ -79,6 +79,9 @@
       "@z1/template": [
         "./packages/template/src/index.ts"
       ],
+      "@z1/env-keys": [
+        "./packages/env-keys/src/index.ts"
+      ],
       "@z1/installed-tools": [
         "./packages/installed-tools/src/index.ts"
       ],

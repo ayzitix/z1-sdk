@@ -19060,6 +19060,9 @@ importers:
       '@z1/agent':
         specifier: workspace:*
         version: link:../agent
+      '@z1/env-keys':
+        specifier: workspace:*
+        version: link:../env-keys
       '@z1/installed-tools':
         specifier: workspace:*
         version: link:../installed-tools
@@ -19096,6 +19099,18 @@ importers:
       '@z1/tool-creator':
         specifier: workspace:*
         version: link:../tool-creator
+
+  z1/packages/env-keys:
+    dependencies:
+      '@z1/module':
+        specifier: workspace:*
+        version: link:../module
+      '@z1/node':
+        specifier: workspace:*
+        version: link:../node
+      '@z1/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
   z1/packages/graph:
     dependencies:

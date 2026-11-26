@@ -224,7 +224,9 @@ describe('tool composition in a run', () => {
 
     try {
       const names = (await handle.services.tools.list()).map((tool) => tool.name)
-      expect(names).toEqual(['read', 'write', 'web.search', 'web.status'])
+      // The composite's own order, then the always-on `env.keys` the runtime
+      // wraps every run's inventory with (`packages/env-keys`).
+      expect(names).toEqual(['read', 'write', 'web.search', 'web.status', 'env.keys'])
       expect(await handle.services.tools.call('web.search', { q: 'z1' })).toEqual({
         by: 'com.example.web-tools',
         name: 'web.search',
@@ -238,7 +240,7 @@ describe('tool composition in a run', () => {
     }
   })
 
-  test('a single tools module is used as-is, with no wrapper', async () => {
+  test('a single tools module is used as-is under the always-on env.keys', async () => {
     const modulesPath = join(root, 'store-one-tools')
     const key = `tools-${randomUUID()}`
     await install(modulesPath, {
@@ -265,10 +267,18 @@ export const services = {
     const runtime = await makeRuntime(modulesPath)
     const handle = await runtime.beginRun({ approval: { request: async () => 'allowed-once' } })
     try {
-      const instances = (globalThis as { __z1ToolInstances?: Record<string, ToolService> })
-        .__z1ToolInstances
-      expect(handle.services.tools).toBe(instances?.[key])
-      expect((await handle.services.tools.list()).map((tool) => tool.name)).toEqual(['solo'])
+      // One module is not re-composed: its own tool is listed first, unchanged,
+      // and a call lands on the instance the module made — that instance's
+      // `call` answers `{ name, args }`, where the built-in mock would add `ok`.
+      // `env.keys` is the decorator the runtime composes over every run's
+      // inventory, so the run's service is that instance plus one tool.
+      const listed = await handle.services.tools.list()
+      expect(listed.map((tool) => tool.name)).toEqual(['solo', 'env.keys'])
+      expect(listed[0]).toEqual(schema('solo'))
+      expect(await handle.services.tools.call('solo', { a: 1 })).toEqual({
+        name: 'solo',
+        args: { a: 1 },
+      })
     } finally {
       await handle.dispose()
     }
@@ -279,7 +289,7 @@ export const services = {
     const runtime = await makeRuntime(modulesPath)
     const handle = await runtime.beginRun({ approval: { request: async () => 'allowed-once' } })
     try {
-      expect(await handle.services.tools.list()).toEqual([])
+      expect((await handle.services.tools.list()).map((tool) => tool.name)).toEqual(['env.keys'])
       expect(await handle.services.tools.call('anything', { a: 1 })).toEqual({
         ok: true,
         name: 'anything',

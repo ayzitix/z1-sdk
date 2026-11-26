@@ -14,6 +14,7 @@
 
 import { mkdirSync } from 'node:fs'
 
+import { createEnvKeysService } from '@z1/env-keys'
 import { SqliteJournal } from '@z1/journal'
 import { BranchMemory } from '@z1/memory'
 import { ModuleStore, compareVersions, serviceMode } from '@z1/module'
@@ -643,6 +644,17 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         const withInstalledTools = installedToolsEnabled(config.env)
           ? createInstalledToolService({ inner: runTools, workspace: config.cwd, log: serviceLog })
           : runTools
+        // `env.keys` is composed unconditionally: every run has a workspace, and
+        // the point of the tool is that a model cannot be without it — a switch
+        // would be a way to forget to set a variable and lose the only thing
+        // that tells a person their `.env` is committed. It sits outside the
+        // installed tools, so an installed tool can never shadow it, and inside
+        // `tool.create`, which keeps its own inventory honest.
+        const withEnvKeys = createEnvKeysService({
+          inner: withInstalledTools,
+          workspace: config.cwd,
+          log: serviceLog,
+        })
         // Recording wraps whichever transport won, so a provider, a module
         // adapter or a cassette replay is journaled identically. Named once
         // because `tool.create` makes its model call through the same service.
@@ -668,12 +680,12 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
           // inventory and `tool.create` is still the name the model asks for.
           tools: toolCreatorEnabled(config.env)
             ? createToolCreatorService({
-                inner: withInstalledTools,
+                inner: withEnvKeys,
                 workspace: config.cwd,
                 log: serviceLog,
                 ...(toolGenerate === undefined ? {} : { generate: toolGenerate }),
               })
-            : withInstalledTools,
+            : withEnvKeys,
           fs: overrides.fs ?? (provided.fs?.instance as FsService | undefined) ?? fs,
           artifacts:
             overrides.artifacts ??

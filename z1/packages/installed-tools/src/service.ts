@@ -53,7 +53,10 @@ export interface InstalledToolServiceOptions {
   sdkPath?: string
   /** Host ceiling over the manifest's `net.hosts`. Default `true` (the manifest decides). */
   net?: boolean | { hosts: readonly string[] }
-  /** Host env policy. Default `{ inherit: true }`: only declared names resolve. */
+  /**
+   * Host env policy. Default `{ inherit: true, file: '.env' }`: only declared
+   * names resolve, and the workspace's `.env` is read before `process.env`.
+   */
   env?: false | { read?: Record<string, string>; inherit?: boolean }
   log?: (level: InstalledToolLogLevel, message: string, data?: Json) => void
 }
@@ -91,7 +94,10 @@ export function createInstalledToolService(options: InstalledToolServiceOptions)
   const toolsDir =
     options.toolsDir === undefined ? join(workspace, TOOLS_DIR) : resolve(options.toolsDir)
   const net = options.net ?? true
-  const env = options.env ?? { inherit: true }
+  // `<workspace>/.env` first, then this process's environment: an installed tool
+  // declares a name and expects the key the person put in the file, exactly as
+  // the smoke test that approved it did.
+  const env = options.env ?? { inherit: true, file: '.env' }
   const loadOptions = options.sdkPath === undefined ? {} : { sdkPath: options.sdkPath }
 
   let z2q: Z2qModule | undefined

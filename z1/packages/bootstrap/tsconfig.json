@@ -8,6 +8,9 @@
       "path": "../agent"
     },
     {
+      "path": "../env-keys"
+    },
+    {
       "path": "../installed-tools"
     },
     {
