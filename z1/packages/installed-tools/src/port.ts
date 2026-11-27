@@ -70,6 +70,11 @@ export interface Z2qToolPackage {
  */
 export interface Z2qRuntimeOptions {
   readonly workspace: string
+  /**
+   * Absolute directories owned by the running runtime; z2q refuses writes into
+   * them (`protected_path`). An older z2q ignores the field.
+   */
+  readonly protectedRoots?: readonly string[]
   readonly net?: false | true | { hosts?: readonly string[] }
   readonly env?: false | { read?: Record<string, string>; inherit?: boolean }
 }

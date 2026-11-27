@@ -13,6 +13,9 @@
  */
 
 import { mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { delimiter, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { createEnvKeysService } from '@z1/env-keys'
 import { SqliteJournal } from '@z1/journal'
@@ -54,6 +57,29 @@ import { createLocalFsService } from './fs-local.ts'
 import { createAgentTemplateRegistry, createTemplateRegistry } from './templates.ts'
 import { toolCreatorGenerate } from './tool-creator.ts'
 import { composeToolService, type ToolServiceMember } from './tool-composite.ts'
+
+/**
+ * Directories a generated tool must never write into: the runtime it is running
+ * on. A broken runtime cannot be repaired by the agent that broke it, so the
+ * list is computed here — where the SDK knows its own location — and handed to
+ * the tool sandbox as a capability refusal, not as advice in a prompt.
+ *
+ * `Z1_PROTECTED_ROOTS` adds host-specific entries, path.delimiter separated.
+ */
+function resolveProtectedRoots(env: Record<string, string | undefined>): readonly string[] {
+  const roots = new Set<string>()
+  // .../z1/packages/bootstrap/{src,lib}/runtime.ts -> .../z1/packages
+  roots.add(resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'))
+  roots.add(join(homedir(), '.z1'))
+  const extra = env['Z1_PROTECTED_ROOTS']?.trim()
+  if (extra !== undefined && extra !== '') {
+    for (const entry of extra.split(delimiter)) {
+      const value = entry.trim()
+      if (value !== '') roots.add(resolve(value))
+    }
+  }
+  return [...roots]
+}
 
 export interface RunOverrides {
   /**
@@ -642,7 +668,12 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         // point of the feature. `Z1_INSTALLED_TOOLS=0` hands the run the very
         // same instance it had.
         const withInstalledTools = installedToolsEnabled(config.env)
-          ? createInstalledToolService({ inner: runTools, workspace: config.cwd, log: serviceLog })
+          ? createInstalledToolService({
+              inner: runTools,
+              workspace: config.cwd,
+              protectedRoots: resolveProtectedRoots(config.env),
+              log: serviceLog,
+            })
           : runTools
         // `env.keys` is composed unconditionally: every run has a workspace, and
         // the point of the tool is that a model cannot be without it — a switch

@@ -58,6 +58,12 @@ export interface InstalledToolServiceOptions {
    * names resolve, and the workspace's `.env` is read before `process.env`.
    */
   env?: false | { read?: Record<string, string>; inherit?: boolean }
+  /**
+   * Absolute directories owned by the running runtime (the CLI and SDK
+   * checkouts, the agent home). A tool may never write into them, so an agent
+   * cannot break the runtime it is running on.
+   */
+  protectedRoots?: readonly string[]
   log?: (level: InstalledToolLogLevel, message: string, data?: Json) => void
 }
 
@@ -179,7 +185,12 @@ export function createInstalledToolService(options: InstalledToolServiceOptions)
 
     let runtime: Z2qRuntime
     try {
-      runtime = await api.createToolRuntime({ workspace, net, env })
+      runtime = await api.createToolRuntime({
+        workspace,
+        net,
+        env,
+        ...(options.protectedRoots === undefined ? {} : { protectedRoots: options.protectedRoots }),
+      })
     } catch (error) {
       throw failed(name, error)
     }
